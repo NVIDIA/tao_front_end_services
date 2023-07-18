@@ -1,0 +1,44 @@
+{
+    "api_params": {
+        "actions": ["convert","convert_and_index","convert_efficientdet_tf1","convert_efficientdet_tf2","augment","kmeans"],
+        "formats":["kitti","raw","coco", "coco_raw"],
+        "image":"tlt-tf1",
+        "spec_backend":"protobuf",
+        "classwise":"False",
+        "chaining_rules":"odaction",
+        "actions_pipe":{
+            "convert":"odconvert",
+            "convert_and_index":"odconvertindex",
+            "convert_efficientdet_tf1":"odconvertefficientdet_tf1",
+            "convert_efficientdet_tf2":"odconvertefficientdet_tf2",
+            "augment":"odaugment",
+            "kmeans":"prune"
+        }
+    },
+    "cli_params": {
+        "kmeans":{
+            "label_folders":"od_labels",
+            "image_folders":"od_images",
+            "results_dir":"output_dir"
+        },
+        "augment": {
+            "dataset-folder":"root",
+            "augmentation-proto":"experiment_spec",
+            "output-dataset":"output_dir",
+            "verbose":"verbose",
+            "batch_size":"from_csv"
+        },
+        "convert_efficientdet_tf1":{
+            "image_dir":"od_images",
+            "annotations_file":"od_annotations",
+            "num_shards":"from_csv",
+            "tag":"from_csv",
+            "include_masks":"from_csv",
+            "output_dir":"create_od_tfrecords",
+            "results_dir":"output_dir"
+        }
+    },
+
+    "spec_params":{
+    }
+}

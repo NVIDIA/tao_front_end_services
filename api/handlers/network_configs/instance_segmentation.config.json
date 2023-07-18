@@ -1,0 +1,24 @@
+{
+    "api_params": {
+        "actions": ["convert"],
+        "formats":["raw","coco", "coco_raw"],
+        "image":"tlt-tf1",
+        "spec_backend":"protobuf",
+        "classwise":"False",
+        "chaining_rules":"odaction",
+        "actions_pipe":{
+            "convert":"odconvert"
+        }
+    },
+    "cli_params": {
+        "convert":{
+            "image_dir":"od_images",
+            "annotations_file":"od_annotations",
+            "output_dir":"create_od_tfrecords",
+            "results_dir":"output_dir"
+        }
+    },
+
+    "spec_params":{
+    }
+}

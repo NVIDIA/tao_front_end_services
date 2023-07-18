@@ -1,0 +1,127 @@
+{
+    "api_params": {
+        "dataset_type":"object_detection",
+        "actions": ["train","evaluate","prune","retrain","export","gen_trt_engine","inference"],
+        "image":"tlt-tf1",
+        "spec_backend":"protobuf",
+        "classwise":"True",
+        "chaining_rules":"cvaction",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "prune":"prune",
+            "retrain":"retrain",
+            "export":"export",
+            "gen_trt_engine":"gen_trt_engine",
+            "inference":"inference"
+        }
+    },
+
+    "cli_params": {
+        "train": {
+            "experiment_spec":"experiment_spec",
+            "results_dir":"output_dir",
+            "gpus":"from_csv",
+            "use_amp": "from_csv",
+            "enc_key":"key"
+        },
+        "evaluate": {
+            "experiment_spec":"experiment_spec",
+            "key":"key",
+            "model_path":"parent_model_evaluate",
+            "results_dir":"output_dir",
+            "image_dir":"od_inference_input",
+            "label_dir":"od_inference_labels",
+            "batch_size":"from_csv"
+        },
+        "evaluate_tao_deploy": {
+            "experiment_spec":"experiment_spec",
+            "model_path":"parent_model_evaluate",
+            "results_dir":"output_dir",
+            "image_dir":"od_inference_input",
+            "label_dir":"od_inference_labels",
+            "batch_size":"from_csv"
+        },
+        "prune": {
+            "model":"parent_model",
+            "output_file":"create_hdf5_file",
+            "results_dir":"output_dir",
+            "key":"key",
+            "verbose":"verbose"
+        },
+        "retrain": {
+            "experiment_spec":"experiment_spec",
+            "results_dir":"output_dir",
+            "gpus":"from_csv",
+            "use_amp": "from_csv",
+            "enc_key":"key"
+        },
+        "export": {
+            "model":"parent_model",
+            "key":"key",
+            "output_file":"create_onnx_file",
+            "experiment_spec":"parent_spec",
+            "results_dir":"output_dir",
+            "target_opset":"from_csv",
+            "verbose":"verbose"
+        },
+        "inference": {
+            "experiment_spec":"experiment_spec",
+            "key":"key",
+            "model_path":"parent_model_evaluate",
+            "results_dir":"output_dir"
+        },
+        "inference_tao_deploy": {
+            "experiment_spec":"experiment_spec",
+            "model_path":"parent_model_evaluate",
+            "results_dir":"output_dir"
+        },
+        "gen_trt_engine": {
+            "model_path":"parent_model",
+            "results_dir":"output_dir",
+            "experiment_spec":"parent_spec",
+            "key":"key",
+            "data_type":"from_csv",
+            "batch_size":"from_csv",
+            "max_batch_size":"from_csv",
+            "batches":"from_csv",
+            "cal_image_dir":"cal_image_dir",
+            "cal_data_file":"create_cal_data_file",
+            "engine_file":"create_engine_file",
+            "cal_cache_file":"create_cal_cache"
+            }
+    },
+
+    "spec_params":{
+        "train": {
+            "training_config.pretrained_weights":"ptm_if_no_resume_model",
+            "training_config.resume_from_model":"resume_model",
+            "enc_key":"key"
+        },
+        "retrain": {
+            "training_config.retrain_pruned_model":"parent_model",
+            "enc_key":"key"
+        },
+        "inference":{
+            "inference_config.detection_image_output_dir":"output_dir_images_annotated",
+            "inference_config.labels_dump_dir":"output_dir_labels",
+            "inference_config.images_dir":"od_inference_input"
+        }
+    },
+
+    "automl_spec_params":{
+        "training_config.checkpoint_interval":"assign_const_value,training_config.num_epochs",
+        "evaluation_config.validation_period_during_training":"assign_const_value,training_config.num_epochs,training_config.checkpoint_interval",
+        "training_config.resume_from_model":"automl_resume_model",
+        "training_config.pretrained_weights":"automl_assign_ptm",
+        "enc_key":"key"
+    },
+
+    "automl_cli_params":{
+        "experiment_spec":"automl_experiment_spec",
+        "results_dir":"automl_output_dir",
+        "enc_key":"key",
+        "use_amp": "from_csv",
+        "gpus":"from_csv"
+    }
+}

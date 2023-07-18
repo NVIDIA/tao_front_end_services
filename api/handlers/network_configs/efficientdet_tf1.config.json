@@ -1,0 +1,121 @@
+{
+    "api_params": {
+        "dataset_type":"object_detection",
+        "actions": ["train","evaluate","prune","retrain","export","gen_trt_engine","inference"],
+        "image":"tlt-tf1",
+        "spec_backend":"protobuf",
+        "classwise":"False",
+        "chaining_rules":"cvaction",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "prune":"prune",
+            "retrain":"retrain",
+            "export":"export",
+            "gen_trt_engine":"gen_trt_engine",
+            "inference":"inference"
+        }
+    },
+
+    "cli_params": {
+        "train": {
+            "experiment_spec_file":"experiment_spec",
+            "model_dir":"output_dir",
+            "gpus":"from_csv",
+            "use_amp": "from_csv",
+            "key":"key"
+        },
+        "evaluate": {
+            "experiment_spec":"experiment_spec",
+            "model_path":"parent_model_evaluate",
+            "key":"key",
+            "results_dir":"output_dir",
+            "image_dir":"od_inference_input"
+        },
+        "evaluate_tao_deploy": {
+            "experiment_spec":"experiment_spec",
+            "model_path":"parent_model_evaluate",
+            "results_dir":"output_dir",
+            "image_dir":"od_inference_input"
+        },
+        "prune": {
+            "model":"parent_model",
+            "output_dir":"output_dir",
+            "key":"key",
+            "verbose":"verbose"
+        },
+        "retrain": {
+            "experiment_spec_file":"experiment_spec",
+            "model_dir":"output_dir",
+            "gpus":"from_csv",
+            "use_amp": "from_csv",
+            "key":"key"
+        },
+        "export": {
+            "experiment_spec_file":"parent_spec",
+            "model_path":"parent_model",
+            "output_path":"create_onnx_file",
+            "key":"key",
+            "verbose":"verbose"
+        },
+        "inference":{
+            "experiment_spec":"experiment_spec",
+            "model_path":"parent_model_evaluate",
+            "image_dir":"od_inference_input",
+            "key":"key",
+            "class_map":"od_inference_label_map",
+            "results_dir":"output_dir",
+            "threshold":"from_csv"
+        },
+        "inference_tao_deploy":{
+            "experiment_spec":"experiment_spec",
+            "model_path":"parent_model_evaluate",
+            "image_dir":"od_inference_input",
+            "class_map":"od_inference_label_map",
+            "results_dir":"output_dir",
+            "threshold":"from_csv"
+        },
+        "gen_trt_engine": {
+            "model_path":"parent_model",
+            "results_dir":"output_dir",
+            "key":"key",
+            "batch_size":"from_csv",
+            "data_type":"from_csv",
+            "batches":"from_csv",
+            "min_batch_size":"from_csv",
+            "opt_batch_size":"from_csv",
+            "max_batch_size":"from_csv",
+            "cal_image_dir":"cal_image_dir",
+            "engine_file":"create_engine_file",
+            "cal_cache_file":"create_cal_cache"
+            }
+    },
+
+    "spec_params":{
+        "train":{
+            "training_config.checkpoint":"resume_model_or_ptm"
+        },
+        "retrain":{
+            "training_config.checkpoint":"parent_model",
+            "training_config.pruned_model_path":"parent_model"
+        },
+        "evaluate":{
+            "training_config.checkpoint":"pruned_model",
+            "training_config.pruned_model_path":"pruned_model"
+        }
+    },
+
+    "automl_spec_params":{
+        "training_config.checkpoint_period":"assign_const_value,training_config.num_epochs",
+        "eval_config.eval_epoch_cycle":"assign_const_value,training_config.num_epochs,training_config.checkpoint_period",
+        "training_config.checkpoint":"automl_assign_ptm"
+    },
+
+    "automl_cli_params":{
+        "experiment_spec_file":"automl_experiment_spec",
+        "model_dir":"automl_output_dir",
+        "gpus":"from_csv",
+        "use_amp": "from_csv",
+        "key":"key"
+    }
+}

@@ -1,0 +1,79 @@
+{
+    "api_params": {
+        "dataset_type":"pose_classification",
+        "actions": ["dataset_convert","train","evaluate","export","inference"],
+        "formats":["default"],
+        "image":"tlt-pytorch",
+        "spec_backend":"yaml",
+        "classwise":"False",
+        "chaining_rules":"cvaction",
+        "actions_pipe":{
+            "dataset_convert":"purpose_built_models_ds_convert",
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+
+    "cli_params": {
+        "dataset_convert": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "train": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "evaluate": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "inference":{
+            "experiment_spec_file":"experiment_spec"
+        },
+        "export": {
+            "experiment_spec_file":"experiment_spec"
+        }
+    },
+
+    "spec_params":{
+        "dataset_convert":{
+            "encryption_key":"key",
+            "results_dir":"pose_classification_ds_convert_op_dir"
+        },
+        "train":{
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "train.gpu_ids": "from_csv",
+            "model.pretrained_model_path":"resume_model_or_ptm"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "evaluate.checkpoint":"parent_model"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "encryption_key":"key",
+            "inference.checkpoint":"parent_model",
+            "inference.output_file":"create_inference_result_file_pose"
+        },
+        "export":{
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        }
+    },
+
+    "automl_spec_params":{
+        "model.pretrained_model_path":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.gpu_ids": "from_csv",
+        "encryption_key":"key",
+        "results_dir":"automl_output_dir"
+    },
+
+    "automl_cli_params":{
+        "experiment_spec_file":"automl_experiment_spec"
+    }
+}

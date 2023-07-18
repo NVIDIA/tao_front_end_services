@@ -1,0 +1,72 @@
+{
+    "api_params": {
+        "dataset_type":"action_recognition",
+        "actions": ["train","evaluate","export","inference"],
+        "formats":["default"],
+        "image":"tlt-pytorch",
+        "spec_backend":"yaml",
+        "classwise":"False",
+        "chaining_rules":"cvaction",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+
+    "cli_params": {
+        "train": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "evaluate": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "inference":{
+            "experiment_spec_file":"experiment_spec"
+        },
+        "export": {
+            "experiment_spec_file":"experiment_spec"
+        }
+    },
+
+    "spec_params":{
+        "train":{
+            "model.rgb_pretrained_model_path":"resume_model_or_ptm",
+            "model.of_pretrained_model_path":"resume_model_or_ptm",
+            "encryption_key":"key",
+            "train.gpu_ids": "from_csv",
+            "results_dir":"output_dir"
+        },
+        "evaluate":{
+            "evaluate.checkpoint":"parent_model",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        },
+        "inference":{
+            "inference.checkpoint":"parent_model",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        },
+        "export":{
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        }
+    },
+
+    "automl_spec_params":{
+        "model.rgb_pretrained_model_path":"automl_assign_ptm",
+        "model.of_pretrained_model_path":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.gpu_ids": "from_csv",
+        "encryption_key":"key",
+        "results_dir":"automl_output_dir"
+    },
+
+    "automl_cli_params":{
+        "experiment_spec_file":"automl_experiment_spec"
+    }
+}

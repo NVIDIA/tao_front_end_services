@@ -1,0 +1,12 @@
+{
+    "api_params": {
+        "actions": [],
+        "formats":["default","custom","raw","classification_pyt"],
+        "image":"tlt-tf1",
+        "spec_backend":"protobuf",
+        "classwise":"False",
+        "chaining_rules":"",
+        "actions_pipe":{
+        }
+    }
+}

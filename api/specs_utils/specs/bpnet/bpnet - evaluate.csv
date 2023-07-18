@@ -1,0 +1,11 @@
+parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex,automl_enabled,math_cond,parent_param,depends_on
+model_path,,hidden,,,,,,,,,,FALSE,,,
+train_spec,,hidden,,,,,,,,,,FALSE,,,
+input_shape,,list,,"[256,256]",,,,,,,,FALSE,,,
+keep_aspect_ratio_mode,,string,,adjust_network_input,,,,,,,,FALSE,,,
+output_stage_to_use,,hidden,,,,,,,,,,FALSE,,,
+output_upsampling_factor,,list,,"[8,8]",,,,,,,,FALSE,,,
+heatmap_threshold,,float,,0.1,,,,,,,,FALSE,,,
+paf_threshold,,float,,0.05,,,,,,,,FALSE,,,
+multi_scale_inference,,bool,,FALSE,,,,,,,,FALSE,,,
+scales,,list,,"[0.5,1.0,1.5,2.0]",,,,,,,,FALSE,,,

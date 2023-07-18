@@ -1,0 +1,12 @@
+{
+    "api_params": {
+        "actions": [],
+        "formats":["lprnet","raw"],
+        "image":"tlt-tf1",
+        "spec_backend":"protobuf",
+        "classwise":"False",
+        "chaining_rules":"",
+        "actions_pipe":{
+        }
+    }
+}

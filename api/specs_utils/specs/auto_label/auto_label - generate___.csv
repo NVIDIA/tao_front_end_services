@@ -1,0 +1,8 @@
+parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex,automl_enabled,math_cond,parent_param,depends_on
+inference,,collection,Model inference parameters,,,,,,,,,FALSE,,,
+inference.ann_path,,string,Input annotation path,ann.json,,,,,,,,FALSE,,,
+inference.img_dir,,string,Input image directory path,images,,,,,,,,FALSE,,,
+inference.label_dump_path,,string,Input label directory path,out.json,,,,,,,,FALSE,,,
+results_dir,,string,Result directory,out,,,,,,,,FALSE,,,
+checkpoint,,string,Model checkpoint path,model.ckpt,,,,,,,,FALSE,,,
+gpu_ids,,list,List of GPU IDs,"[0]",,,,,,,,FALSE,,,

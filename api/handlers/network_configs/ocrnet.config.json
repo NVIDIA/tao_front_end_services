@@ -1,0 +1,113 @@
+{
+    "api_params": {
+        "dataset_type":"ocrnet",
+        "actions": ["dataset_convert","train","evaluate","export","prune","retrain","inference","gen_trt_engine"],
+        "formats":["default"],
+        "image":"tlt-pytorch",
+        "spec_backend":"yaml",
+        "classwise":"False",
+        "chaining_rules":"cvaction",
+        "actions_pipe":{
+            "dataset_convert":"pyt_odconvert",
+            "train":"train",
+            "evaluate":"evaluate",
+            "prune":"prune_with_spec",
+            "retrain":"retrain",
+            "export":"export_with_spec",
+            "inference":"inference",
+            "gen_trt_engine":"gen_trt_engine"
+        }
+    },
+
+    "cli_params": {
+        "dataset_convert": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "train": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "evaluate": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "inference":{
+            "experiment_spec_file":"experiment_spec"
+        },
+        "prune": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "retrain": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "export": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "gen_trt_engine": {
+            "experiment_spec_file":"experiment_spec"
+        }
+    },
+
+    "spec_params":{
+        "dataset_convert": {
+            "results_dir":"output_dir"
+        },
+        "train": {
+            "encryption_key":"key",
+            "train.gpu_ids": "from_csv",
+            "train.pretrained_model_path": "ptm",
+            "train.resume_training_checkpoint_path": "resume_model",
+            "results_dir":"output_dir"
+        },
+        "evaluate":{
+            "evaluate.checkpoint":"parent_model",
+            "evaluate.trt_engine":"parent_model",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        },
+        "inference":{
+            "inference.checkpoint":"parent_model",
+            "inference.trt_engine":"parent_model",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        },
+        "prune":{
+            "prune.checkpoint":"parent_model",
+            "prune.pruned_file":"create_pth_file",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        },
+        "retrain": {
+            "encryption_key":"key",
+            "train.gpu_ids": "from_csv",
+            "train.resume_training_checkpoint_path": "parent_model",
+            "results_dir":"output_dir"
+        },
+        "export":{
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "encryption_key":"key",
+            "results_dir":"output_dir"
+        },
+        "gen_trt_engine":{
+            "encryption_key":"key",
+            "results_dir": "output_dir",
+            "gen_trt_engine.onnx_file":"parent_model",
+            "gen_trt_engine.trt_engine":"create_engine_file",
+            "gen_trt_engine.tensorrt.calibration.cal_image_dir":"cal_image_dir_list",
+            "gen_trt_engine.tensorrt.calibration.cal_cache_file":"create_cal_cache"
+        }
+    },
+
+    "automl_spec_params":{
+        "train.pretrained_model_path":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",
+        "train.gpu_ids": "from_csv",
+        "encryption_key":"key",
+        "results_dir":"automl_output_dir"
+    },
+
+    "automl_cli_params":{
+        "experiment_spec_file":"automl_experiment_spec"
+    }
+}

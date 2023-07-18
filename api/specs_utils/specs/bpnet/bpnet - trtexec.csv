@@ -1,0 +1,8 @@
+parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,regex,popular
+onnx,,hidden,,,,,,,,,
+minShapes,,string,,input_1:0:1x256x256x3,,,,,,,
+maxShapes,,string,,input_1:0:1x256x256x3,,,,,,,
+optShapes,,string,,input_1:0:1x256x256x3,,,,,,,
+int8,,bool,,TRUE,,,,,yes,,yes
+calib,,hidden,,,,,,,yes,,
+saveEngine,,hidden,,,,,,,,,yes

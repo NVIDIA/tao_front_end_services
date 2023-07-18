@@ -1,0 +1,97 @@
+{
+    "api_params": {
+        "dataset_type":"character_recognition",
+        "actions": ["train","evaluate","export","gen_trt_engine","inference"],
+        "image":"tlt-tf1",
+        "spec_backend":"protobuf",
+        "classwise":"True",
+        "chaining_rules":"cvaction",
+        "actions_pipe":{
+            "train":"train",
+            "evaluate":"evaluate",
+            "export":"export",
+            "gen_trt_engine":"gen_trt_engine",
+            "inference":"inference"
+        }
+    },
+
+    "cli_params": {
+        "train": {
+            "experiment_spec_file":"experiment_spec",
+            "results_dir":"output_dir",
+            "key":"key",
+            "gpus":"from_csv",
+            "use_amp": "from_csv",
+            "resume_model_weights":"resume_model_or_ptm",
+            "initial_epoch":"from_csv"
+        },
+        "evaluate": {
+            "model_path":"parent_model_evaluate",
+            "key":"key",
+            "experiment_spec":"experiment_spec",
+            "trt":"framework_storetrue",
+            "results_dir":"output_dir",
+            "batch_size":"from_csv"
+        },
+        "evaluate_tao_deploy": {
+            "model_path":"parent_model_evaluate",
+            "experiment_spec":"experiment_spec",
+            "results_dir":"output_dir",
+            "batch_size":"from_csv"
+        },
+        "export": {
+            "model":"parent_model",
+            "key":"key",
+            "experiment_spec":"parent_spec",
+            "output_file":"create_onnx_file",
+            "verbose":"verbose",
+            "target_opset":"from_csv",
+            "results_dir":"output_dir"
+        },
+        "inference": {
+            "model_path":"parent_model_evaluate",
+            "image_dir":"lprnet_inference_input",
+            "key":"key",
+            "experiment_spec":"experiment_spec",
+            "trt":"framework_storetrue",
+            "results_dir":"output_dir",
+            "batch_size":"from_csv"
+        },
+        "inference_tao_deploy": {
+            "model_path":"parent_model_evaluate",
+            "image_dir":"lprnet_inference_input",
+            "experiment_spec":"experiment_spec",
+            "trt":"framework_storetrue",
+            "results_dir":"output_dir",
+            "batch_size":"from_csv"
+        },
+        "gen_trt_engine": {
+            "data_type":"from_csv",
+            "engine_file":"create_engine_file",
+            "min_batch_size":"from_csv",
+            "opt_batch_size":"from_csv",
+            "max_batch_size":"from_csv",
+            "key":"key",
+            "model_path":"parent_model",
+            "results_dir":"output_dir"
+        }
+    },
+
+    "spec_params":{
+    },
+
+    "automl_spec_params":{
+        "training_config.checkpoint_interval":"assign_const_value,training_config.num_epochs",
+        "eval_config.validation_period_during_training":"assign_const_value,training_config.num_epochs,training_config.checkpoint_interval"
+    },
+
+    "automl_cli_params":{
+        "resume_model_weights":"automl_ptm_if_no_resume_model",
+        "experiment_spec_file":"automl_experiment_spec",
+        "results_dir":"automl_output_dir",
+        "gpus":"from_csv",
+        "key":"key",
+        "use_amp": "from_csv",
+        "initial_epoch":"automl_assign_resume_epoch"
+    }
+}

@@ -1,0 +1,98 @@
+{
+    "api_params": {
+        "dataset_type":"pointpillars",
+        "actions": ["dataset_convert","train","prune","evaluate","retrain","export","inference"],
+        "formats":["default"],
+        "image":"tlt-pytorch",
+        "spec_backend":"yaml",
+        "classwise":"False",
+        "chaining_rules":"cvaction",
+        "actions_pipe":{
+            "dataset_convert":"purpose_built_models_ds_convert",
+            "train":"train",
+            "evaluate":"evaluate",
+            "prune":"prune_with_spec",
+            "retrain":"retrain",
+            "export":"export_with_spec",
+            "inference":"inference"
+        }
+    },
+
+    "cli_params": {
+        "dataset_convert": {
+            "experiment_spec_file":"experiment_spec"
+        },
+        "train": {
+            "experiment_spec_file":"experiment_spec",
+            "gpus":"from_csv",
+            "key":"key"
+        },
+        "evaluate": {
+            "experiment_spec_file":"experiment_spec",
+            "key":"key"
+        },
+        "prune": {
+            "experiment_spec_file":"experiment_spec",
+            "key":"key",
+            "pruning_thresh":"from_csv"
+        },
+        "retrain": {
+            "experiment_spec_file":"experiment_spec",
+            "gpus":"from_csv",
+            "key":"key"
+        },
+        "inference":{
+            "experiment_spec_file":"experiment_spec",
+            "key":"key"
+        },
+        "export": {
+            "experiment_spec_file":"experiment_spec",
+            "key":"key",
+            "save_engine":"create_engine_file"
+        }
+    },
+
+    "spec_params":{
+        "dataset_convert":{
+            "results_dir":"output_dir"
+        },
+        "train":{
+            "results_dir":"output_dir",
+            "model.pretrained_model_path":"resume_model_or_ptm"
+        },
+        "evaluate":{
+            "results_dir":"output_dir",
+            "evaluate.checkpoint":"parent_model"
+        },
+        "prune":{
+            "prune.model":"parent_model",
+            "results_dir":"output_dir"
+        },
+        "inference":{
+            "results_dir":"output_dir",
+            "inference.checkpoint":"parent_model"
+        },
+        "retrain":{
+            "results_dir":"output_dir",
+            "train.pruned_model_path":"parent_model"
+        },
+        "export":{
+            "export.checkpoint":"parent_model",
+            "export.onnx_file":"create_onnx_file",
+            "results_dir":"output_dir"
+        }
+    },
+
+    "automl_spec_params":{
+        "model.pretrained_model_path":"automl_assign_ptm",
+        "train.resume_training_checkpoint_path":"automl_resume_model",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
+        "results_dir":"automl_output_dir"
+    },
+    
+    "automl_cli_params":{
+        "experiment_spec_file":"automl_experiment_spec",
+        "gpus":"from_csv",
+        "key":"key"
+    }
+}
