@@ -284,4 +284,9 @@ PeopleSemSegnet,nvidia/tao/peoplesemsegnet:trainable_vanilla_unet_v2.0,unet
 PeopleSemSegformer,nvidia/tao/peoplesemsegformer:trainable_v1.0,segformer
 CitySemSegformer,nvidia/tao/citysemsegformer:trainable_mit-b5_v1.0,segformer
 CitySemSegformer,nvidia/tao/citysemsegformer:trainable_fan_v1.0,segformer
-Retail Object Detection,nvidia/tao/retail_object_recognition:trainable_v1.0,efficientdet_tf2
+Retail Object Recognition,nvidia/tao/retail_object_recognition:trainable_v1.0,ml_recog
+Retail Object Detection,nvidia/tao/retail_object_detection:trainable_100_v1.0,efficientdet_tf2
+Retail Object Detection,nvidia/tao/retail_object_detection:trainable_binary_v1.0,efficientdet_tf2
+Retail Object Detection,nvidia/tao/retail_object_detection:trainable_binary_v1.1,efficientdet_tf2
+Retail Object Detection,nvidia/tao/retail_object_detection:trainable_binary_v2.0,dino
+Retail Object Detection,nvidia/tao/retail_object_detection:trainable_meta_v2.0,dino

@@ -89,7 +89,7 @@ def main(args=sys.argv[1:]):
             'Topic :: Software Development :: Libraries',
             'Topic :: Software Development :: Libraries :: Python Modules',
             'Environment :: Console',
-            'License :: NVIDIA Proprietary Software',
+            'License :: Other/Proprietary License',
             f'Programming Language :: Python :: {sys.version_info.major}',
             'Topic :: Scientific/Engineering :: Artificial Intelligence',
         ],

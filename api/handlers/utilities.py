@@ -748,7 +748,7 @@ VALID_NETWORKS = ("detectnet_v2", "faster_rcnn", "yolo_v4", "yolo_v4_tiny", "yol
                   "action_recognition", "classification_pyt", "mal", "ml_recog", "ocdnet", "ocrnet", "optical_inspection", "pointpillars", "pose_classification", "re_identification", "deformable_detr", "dino", "segformer",  # PYT CV MODELS
                   "annotations", "analytics", "augmentation", "auto_label")  # Data_Service tasks.
 NO_SPEC_ACTIONS_MODEL = ("evaluate", "retrain", "inference", "inference_seq", "inference_trt")  # Actions with **optional** specs
-NO_PTM_MODELS = ("ml_recog")
+NO_PTM_MODELS = set([])
 _ITER_MODELS = ("segformer")
 
 AUTOML_DISABLED_NETWORKS = ["mal"]
