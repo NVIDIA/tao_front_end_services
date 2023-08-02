@@ -18,7 +18,7 @@ flake8
 pydocstyle
 pylint
 PyJWT==2.6.0
-cryptography==39.0.1
+cryptography==41.0.3
 jsonschema==4.17.0
 numpy==1.23.4
 scipy==1.9.3
