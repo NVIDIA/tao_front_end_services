@@ -1,7 +1,7 @@
 Cython==0.29.36
 uuid==1.30
 Flask==2.3.2
-uWSGI==2.0.21
+uWSGI==2.0.22
 apispec==6.0.1
 apispec-webframeworks==0.5.2
 apispec==6.0.1
