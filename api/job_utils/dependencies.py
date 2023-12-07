@@ -24,6 +24,7 @@ Dependency check modules
 """
 import os
 import json
+from handlers.ds_upload import DS_UPLOAD_TO_FUNCTIONS
 from handlers.utilities import get_handler_root, load_json_spec, search_for_ptm, NO_PTM_MODELS
 from handlers.stateless_handlers import get_handler_spec_root, get_handler_job_metadata, get_handler_metadata
 from job_utils import executor
@@ -34,13 +35,18 @@ def dependency_check_parent(job_context, dependency):
     parent_job_id = job_context.parent_id
     # If no parent job, this is always True
     if parent_job_id is None:
-        return True
+        return True, ""
     handler_id = job_context.handler_id
     parent_status = get_handler_job_metadata(handler_id, parent_job_id).get("status", "Error")
     parent_root = os.path.join(get_handler_root(handler_id), parent_job_id)
     # Parent Job must be done
     # Parent job output folder must exist
-    return bool(parent_status == "Done" and os.path.isdir(parent_root))
+    failure_message = ""
+    if not parent_status == "Done":
+        failure_message += f"Parent job {parent_job_id}'s status is not Done"
+    if not os.path.isdir(parent_root):
+        failure_message += f" Parent job {parent_job_id}'s folder doesn't exist"
+    return bool(parent_status == "Done" and os.path.isdir(parent_root)), failure_message
 
 
 def dependency_check_specs(job_context, dependency):
@@ -61,12 +67,57 @@ def dependency_check_specs(job_context, dependency):
     spec_json_path = os.path.join(handler_spec_root, action + ".json")
     load_json_spec(spec_json_path)
 
-    return bool(os.path.exists(spec_json_path))
+    failure_message = ""
+    if not os.path.exists(spec_json_path):
+        failure_message = f"Specs for network {network} and action {action} can't be found"
+    return bool(os.path.exists(spec_json_path)), failure_message
 
 
 def dependency_check_dataset(job_context, dependency):
     """Returns always true for dataset dependency check"""
-    return True
+    network = job_context.network
+    handler_id = job_context.handler_id
+    handler_metadata = get_handler_metadata(handler_id)
+    valid_datset_structure = True
+    ds_upload_keys = DS_UPLOAD_TO_FUNCTIONS.keys()
+    if handler_metadata.get("train_datasets", []):
+        train_ds_list = handler_metadata.get("train_datasets", [])
+        for train_ds in train_ds_list:
+            dataset_metadata = get_handler_metadata(train_ds)
+            if dataset_metadata.get("type", None) in ds_upload_keys:
+                valid_datset_structure = DS_UPLOAD_TO_FUNCTIONS[dataset_metadata.get("type")](dataset_metadata)
+        if network in ("detectnet_v2", "faster_rcnn", "yolo_v3", "yolo_v4", "yolo_v4_tiny", "ssd", "dssd", "retinanet"):
+            eval_ds = handler_metadata.get("eval_dataset", None)
+            dataset_metadata = get_handler_metadata(eval_ds)
+            if dataset_metadata.get("type", None) in ds_upload_keys:
+                valid_datset_structure = DS_UPLOAD_TO_FUNCTIONS[dataset_metadata.get("type")](dataset_metadata)
+        if network in ("detectnet_v2"):
+            infer_ds = handler_metadata.get("inference_dataset", None)
+            dataset_metadata = get_handler_metadata(infer_ds)
+            if dataset_metadata.get("type", None) in ds_upload_keys:
+                valid_datset_structure = DS_UPLOAD_TO_FUNCTIONS[dataset_metadata.get("type")](dataset_metadata)
+    elif handler_metadata.get("type", None) is None:
+        eval_valid_datset_structure = True
+        test_valid_datset_structure = True
+        eval_ds = handler_metadata.get("eval_dataset", None)
+        if eval_ds:
+            dataset_metadata = get_handler_metadata(eval_ds)
+            if dataset_metadata.get("type", None) in ds_upload_keys:
+                eval_valid_datset_structure = DS_UPLOAD_TO_FUNCTIONS[dataset_metadata.get("type")](dataset_metadata)
+        infer_ds = handler_metadata.get("inference_dataset", None)
+        if infer_ds:
+            dataset_metadata = get_handler_metadata(infer_ds)
+            if dataset_metadata.get("type", None) in ds_upload_keys:
+                test_valid_datset_structure = DS_UPLOAD_TO_FUNCTIONS[dataset_metadata.get("type")](dataset_metadata)
+        valid_datset_structure = eval_valid_datset_structure and test_valid_datset_structure
+    else:
+        if handler_metadata.get("type", None) in ds_upload_keys:
+            valid_datset_structure = DS_UPLOAD_TO_FUNCTIONS[handler_metadata.get("type")](handler_metadata)
+
+    failure_message = ""
+    if not valid_datset_structure:
+        failure_message = "Dataset still uploading, or uploaded data doesn't match the directory structure defined for this network"
+    return valid_datset_structure, failure_message
 
 
 def dependency_check_model(job_context, dependency):
@@ -77,33 +128,40 @@ def dependency_check_model(job_context, dependency):
     handler_metadata = get_handler_metadata(handler_id)
     # If it is a dataset, no model dependency
     if "train_datasets" not in handler_metadata.keys():
-        return True
+        return True, ""
     if network in NO_PTM_MODELS:
-        return True
+        return True, ""
     ptm_ids = handler_metadata.get("ptm", None)
     for ptm_id in ptm_ids:
         if not ptm_id:
-            return False
+            return False, "PTM_ID is None"
         if not search_for_ptm(get_handler_root(ptm_id), network=network):
-            return False
+            return False, f"PTM file path for PTM ID {ptm_id} not found yet"
 
-    return True
+    return True, ""
 
 
 def dependency_check_automl_specs(job_context, dependency):
     """Checks if train.json is present for automl job"""
     spec_json_path = os.path.join(get_handler_spec_root(job_context.handler_id), "train.json")
-    return bool(os.path.exists(spec_json_path))
+    failure_message = ""
+    if not os.path.exists(spec_json_path):
+        failure_message = f"AutoML specs path for handler id {job_context.handler_id} not found"
+    return bool(os.path.exists(spec_json_path)), failure_message
 
 
 def dependency_check_gpu(job_context, dependency):
     """Check if GPU dependency is met"""
-    return executor.dependency_check(accelerator=dependency.name)
+    gpu_available = executor.dependency_check(accelerator=dependency.name)
+    message = ""
+    if not gpu_available:
+        message = "GPU's needed to run this job is not available yet, please wait for other jobs to complete"
+    return gpu_available, message
 
 
 def dependency_check_default(job_context, dependency):
     """Returns a default value of False when dependency type is not present in dependency_type_map"""
-    return False
+    return False, "Requested dependency not found"
 
 
 def dependency_check_automl(job_context, dependency):
@@ -113,14 +171,14 @@ def dependency_check_automl(job_context, dependency):
     # Check if recommendation number is there and can be loaded
     file_path = root + f"/{job_context.id}/controller.json"
     if not os.path.exists(file_path):
-        return False
+        return False, f"Automl controller json for job id {job_context.id} not found yet"
     with open(file_path, 'r', encoding='utf-8') as f:
         recs_dict = json.loads(f.read())
     try:
         recs_dict[rec_number]
-        return True
+        return True, ""
     except:
-        return False
+        return False, f"Recommendation number {rec_number} requested is not available yet"
 
 
 def dependency_check_automl_ptm(job_context, dependency):
@@ -128,7 +186,11 @@ def dependency_check_automl_ptm(job_context, dependency):
     network = job_context.network
     ptm_id = dependency.name
     if ptm_id:
-        return bool(search_for_ptm(get_handler_root(ptm_id), network=network))
+        ptm_exists = bool(search_for_ptm(get_handler_root(ptm_id), network=network))
+        failure_message = ""
+        if not ptm_exists:
+            failure_message = f"AutoML PTM file path for ptm_id {ptm_id} doesn't exists yet"
+        return ptm_exists, failure_message
     return True
 
 

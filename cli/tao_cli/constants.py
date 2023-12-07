@@ -28,6 +28,8 @@ class dataset_format(str, enum.Enum):
     custom = "custom"
     unet = "unet"
     classification_pyt = "classification_pyt"
+    visual_changenet_segment = 'visual_changenet_segment'
+    visual_changenet_classify = 'visual_changenet_classify'
 
 
 class dataset_type(str, enum.Enum):
@@ -48,6 +50,8 @@ class dataset_type(str, enum.Enum):
     pointpillars = "pointpillars"
     pose_classification = "pose_classification"
     re_identification = "re_identification"
+    visual_changenet = "visual_changenet"
+    centerpose = "centerpose"
 
 
 class network_type(str, enum.Enum):
@@ -88,6 +92,8 @@ class network_type(str, enum.Enum):
     pose_classification = "pose_classification"
     segformer = "segformer"
     re_identification = "re_identification"
+    visual_changeent = "visual_changenet"
+    centerpose = "centerpose"
     # PYTORCH TTS
     spectro_gen = "spectro_gen"
     vocoder = "vocoder"

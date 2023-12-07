@@ -21,6 +21,12 @@ import os
 from auth_utils import __ngc_jwks_client, __starfleet_jwks_client, sessions
 
 
+class AuthenticationError(Exception):
+    """Authentication Error"""
+
+    pass
+
+
 def validate(token):
     """Validate Authentication"""
     err = None
@@ -31,12 +37,12 @@ def validate(token):
         user, err = _validate_ngc(token)
         if not err:
             print('Adding trusted user: ' + str(user), file=sys.stderr)
-            sessions.set_session({'user_id': str(user), 'token': token})
-        else:
+            sessions.set({'user_id': str(user), 'token': token})
+        elif str(err) != "Signature has expired":
             user, err = _validate_starfleet(token)
             if not err:
                 print('Adding trusted user: ' + str(user), file=sys.stderr)
-                sessions.set_session({'user_id': str(user), 'token': token})
+                sessions.set({'user_id': str(user), 'token': token})
     return user, err
 
 
@@ -55,7 +61,7 @@ def _validate_ngc(token):
         )
         user = uuid.uuid5(uuid.UUID(int=0), payload.get('sub'))
     except Exception as e:
-        err = 'Token error: ' + str(e)
+        err = AuthenticationError(e)
     return user, err
 
 
@@ -73,8 +79,8 @@ def _validate_starfleet(token):
             audience=client_id
         )
     except Exception as e:
-        err = 'Token error: ' + str(e)
+        err = AuthenticationError(e)
     user = payload.get('external_id')
     if not err and not user:
-        err = 'Token error: unknown user'
+        err = AuthenticationError('Unknown user')
     return user, err

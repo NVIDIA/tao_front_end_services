@@ -17,8 +17,7 @@ import tarfile
 import os
 import glob
 import sys
-from handlers.utilities import Code
-from handlers.utilities import run_system_command, get_handler_root
+from handlers.utilities import get_handler_root
 
 
 # Simple helper class for ease of code migration
@@ -30,6 +29,21 @@ class SimpleHandler:
         self.root = get_handler_root(handler_metadata.get("id"))
         self.type = handler_metadata.get("type")
         self.format = handler_metadata.get("format")
+
+
+def _untar_file(tar_path, dest, strip_components=0):
+    """Function to untar a file"""
+    os.makedirs(dest, exist_ok=True)
+    with tarfile.open(tar_path, 'r') as tar:
+        for member in tar.getmembers():
+            # Remove leading directory components using strip_components
+            components = member.name.split(os.sep)
+            if len(components) > strip_components:
+                member.name = os.path.join(*components[strip_components:])
+            if member.isdir():
+                # Make subdirs ahead because tarfile extracts them with user permissions only
+                os.makedirs(os.path.join(dest, member.name), exist_ok=True)
+            tar.extract(member, path=dest, set_attrs=False)
 
 
 def _extract_images(tar_path, dest):
@@ -44,10 +58,8 @@ def _extract_images(tar_path, dest):
                 strip_components = name.split("/").index("images")
                 break
     # Build shell command for untarring
-    untar_command = f"tar -xf {tar_path} --strip-components={strip_components} -C {dest}/"
-    # Run shell command
     print("Untarring data started", file=sys.stderr)
-    run_system_command(untar_command)
+    _untar_file(tar_path, dest, strip_components)
     print("Untarring data complete", file=sys.stderr)
 
     # Remove .tar.gz file
@@ -63,17 +75,7 @@ def write_dir_contents(directory, file):
             f.write(dir_files + "\n")
 
 
-def _untar_and_delete(tar_path, dest):
-    """Run untar command and delete the tar file"""
-    # Build shell command for untarring
-    untar_command = f"tar -xf {tar_path} -C {dest}/"
-    # Run shell command
-    run_system_command(untar_command)
-    # Remove .tar.gz file
-    os.remove(tar_path)
-
-
-def object_detection(tar_path, handler_metadata):
+def object_detection(handler_metadata):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -89,7 +91,6 @@ def object_detection(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "images"))
         if handler.format == "kitti":
@@ -98,18 +99,16 @@ def object_detection(tar_path, handler_metadata):
             assert os.path.exists(os.path.join(handler.root, "annotations.json"))
         elif handler.format == "coco_raw":
             assert os.path.exists(os.path.join(handler.root, "label_map.txt"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
 instance_segmentation = object_detection
 
 
-def semantic_segmentation(tar_path, handler_metadata):
+def semantic_segmentation(handler_metadata):
     """
     Upload - uploads and creates .txt files
     - /images/
@@ -120,24 +119,19 @@ def semantic_segmentation(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and masks paths exist
         assert os.path.exists(os.path.join(handler.root, "images"))
-        write_dir_contents(os.path.join(handler.root, "images"), os.path.join(handler.root, "images.txt"))
         if handler.format == "unet":
             assert os.path.exists(os.path.join(handler.root, "masks"))
-            write_dir_contents(os.path.join(handler.root, "masks"), os.path.join(handler.root, "masks.txt"))
         elif handler.format == "coco":
             assert os.path.exists(os.path.join(handler.root, "annotations.json"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def character_recognition(tar_path, handler_metadata):
+def character_recognition(handler_metadata):
     """
     LPRNET Dataset structure
     Upload - uploads and untars
@@ -149,21 +143,18 @@ def character_recognition(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "image"))
         if handler.format != "raw":
             assert os.path.exists(os.path.join(handler.root, "label"))
             assert os.path.exists(os.path.join(handler.root, "characters.txt"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def ocrnet(tar_path, handler_metadata):
+def ocrnet(handler_metadata):
     """
     OCRNET Dataset structure
     Upload - uploads and untars
@@ -174,25 +165,35 @@ def ocrnet(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
 
         assert os.path.exists(os.path.join(handler.root, "character_list"))
         assert os.path.exists(os.path.join(handler.root, "train")) or os.path.exists(os.path.join(handler.root, "test"))
+        assert os.path.exists(os.path.join(handler.root, "train/gt_new.txt")) or os.path.exists(os.path.join(handler.root, "test/gt_new.txt"))
+        return True
+
+    except:
+        return False
+
+
+def ocrnet_permission_change(handler_metadata):
+    """
+    Change permission of necessary files and folders for OCRNET
+    """
+    handler = SimpleHandler(handler_metadata)
+
+    try:
         if os.path.exists(os.path.join(handler.root, "train")):
             os.system(f"chmod -R 777 {os.path.join(handler.root, 'train')}")
         if os.path.exists(os.path.join(handler.root, "test")):
             os.system(f"chmod -R 777 {os.path.join(handler.root, 'test')}")
-        assert os.path.exists(os.path.join(handler.root, "train/gt_new.txt")) or os.path.exists(os.path.join(handler.root, "test/gt_new.txt"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def ocdnet(tar_path, handler_metadata):
+def ocdnet(handler_metadata):
     """
     OCDNET Dataset structure
     Upload - uploads and untars
@@ -205,20 +206,39 @@ def ocdnet(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
 
         assert os.path.exists(os.path.join(handler.root, "train/img")) or os.path.exists(os.path.join(handler.root, "test/img"))
         assert os.path.exists(os.path.join(handler.root, "train/gt")) or os.path.exists(os.path.join(handler.root, "test/gt"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def optical_inspection(tar_path, handler_metadata):
+def centerpose(handler_metadata):
+    """
+    CenterPose Dataset structure
+    Upload - uploads and preprocessed
+    - /train: train images and ground_truth
+    - /val: val images and ground_truth
+    - /test: test images and ground_truth
+
+    """
+    handler = SimpleHandler(handler_metadata)
+
+    try:
+        # Validate images and labels paths exist
+
+        assert os.path.exists(os.path.join(handler.root, "train")) or os.path.exists(os.path.join(handler.root, "val"))
+        assert os.path.exists(os.path.join(handler.root, "test"))
+        return True
+
+    except:
+        return False
+
+
+def optical_inspection(handler_metadata):
     """
     Optical Inspection Dataset structure
     Upload - uploads and untars
@@ -229,19 +249,41 @@ def optical_inspection(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
 
         assert os.path.exists(os.path.join(handler.root, "images")) and os.path.exists(os.path.join(handler.root, "dataset.csv"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def ml_recog(tar_path, handler_metadata):
+def visual_changenet(handler_metadata):  # pylint: disable=R1710
+    """
+    Visual Changenet Dataset structure
+    Upload - uploads and untars
+    - A: test_image
+    - B: golden_image
+    - label: change_masks
+    - list: dataset_split_files
+    For Classification use the optical inspection dataset structure
+
+    """
+    handler = SimpleHandler(handler_metadata)
+    try:
+        # Validate each directory exists
+        if handler.format == "visual_changenet_classify":
+            return optical_inspection(handler_metadata)
+        if handler.format == "visual_changenet_segment":
+            assert os.path.exists(os.path.join(handler.root, "A")) and os.path.exists(os.path.join(handler.root, "B"))
+            assert os.path.exists(os.path.join(handler.root, "list")) and os.path.exists(os.path.join(handler.root, "label"))
+            return True
+
+    except:
+        return False
+
+
+def ml_recog(handler_metadata):
     """
     Metric Learning Recognition Dataset structure
     Upload - uploads and untars
@@ -255,20 +297,17 @@ def ml_recog(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
 
         assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition"))
         assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition", "retail-product-checkout-dataset_classification_demo"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def image_classification(tar_path, handler_metadata):
+def image_classification(handler_metadata):
     """
     Raw:
     images/
@@ -286,25 +325,18 @@ def image_classification(tar_path, handler_metadata):
     """
     handler = SimpleHandler(handler_metadata)
     try:
-        print("Extracting images from data tarball file", file=sys.stderr)
-        _extract_images(tar_path, handler.root)
-        print("Extraction complete", file=sys.stderr)
         # Validate images and labels paths exist
         assert len(glob.glob(os.path.join(handler.root, "images*"))) == 1
         if handler.format == "custom":
             assert os.path.exists(os.path.join(handler.root, "val.csv"))
         if handler.format == "classification_pyt":
             assert os.path.exists(os.path.join(handler.root, "classes.txt"))
-        msg = "Upload successful"
-        print("Returning sucess code to the api call", file=sys.stderr)
-        return Code(201, {}, msg)
-
+        return True
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def bpnet(tar_path, handler_metadata):
+def bpnet(handler_metadata):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -320,7 +352,6 @@ def bpnet(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "annotations"))
         assert os.path.exists(os.path.join(handler.root, "annotations", "person_keypoints_train2017.json"))
@@ -329,18 +360,30 @@ def bpnet(tar_path, handler_metadata):
         assert os.path.exists(os.path.join(handler.root, "val2017"))
 
         assert os.path.exists(os.path.join(handler.root, "coco_spec.json"))
-        os.system(f"chmod -R 777 {os.path.join(handler.root, 'coco_spec.json')}")
         assert os.path.exists(os.path.join(handler.root, "bpnet_18joints.json"))
         assert os.path.exists(os.path.join(handler.root, "infer_spec.yaml"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def fpenet(tar_path, handler_metadata):
+def bpnet_permission_change(handler_metadata):
+    """
+    Change permission of necessary files and folders for BPNet
+    """
+    handler = SimpleHandler(handler_metadata)
+
+    try:
+        if os.path.exists(os.path.join(handler.root, "coco_spec.json")):
+            os.system(f"chmod -R 777 {os.path.join(handler.root, 'coco_spec.json')}")
+        return True
+
+    except:
+        return False
+
+
+def fpenet(handler_metadata):
     """
     Default:
     data/afw
@@ -350,25 +393,32 @@ def fpenet(tar_path, handler_metadata):
     """
     handler = SimpleHandler(handler_metadata)
     try:
-        print("Extracting images from data tarball file", file=sys.stderr)
-        _extract_images(tar_path, handler.root)
-        print("Extraction complete", file=sys.stderr)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "data", "afw"))
         assert (os.path.exists(os.path.join(handler.root, "data", "afw", "afw.json")) or os.path.exists(os.path.join(handler.root, "data", "afw_10", "afw_10.json")))
         assert os.path.exists(os.path.join(handler.root, "data.json"))
-        os.system(f"chmod -R 777 {os.path.join(handler.root, 'data')}")
-        os.system(f"chmod -R 777 {os.path.join(handler.root, 'data.json')}")
-        msg = "Upload successful"
-        print("Returning sucess code to the api call", file=sys.stderr)
-        return Code(201, {}, msg)
-
+        return True
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def action_recognition(tar_path, handler_metadata):
+def fpenet_permission_change(handler_metadata):
+    """
+    Change permission of necessary files and folders for FPENet
+    """
+    handler = SimpleHandler(handler_metadata)
+    try:
+        # Validate images and labels paths exist
+        if os.path.exists(os.path.join(handler.root, 'data')):
+            os.system(f"chmod -R 777 {os.path.join(handler.root, 'data')}")
+        if os.path.exists(os.path.join(handler.root, 'data.json')):
+            os.system(f"chmod -R 777 {os.path.join(handler.root, 'data.json')}")
+        return True
+    except:
+        return False
+
+
+def action_recognition(handler_metadata):
     """
     Default:
     train
@@ -378,22 +428,15 @@ def action_recognition(tar_path, handler_metadata):
     """
     handler = SimpleHandler(handler_metadata)
     try:
-        print("Extracting images from data tarball file", file=sys.stderr)
-        _extract_images(tar_path, handler.root)
-        print("Extraction complete", file=sys.stderr)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "train"))
         assert os.path.exists(os.path.join(handler.root, "test"))
-        msg = "Upload successful"
-        print("Returning sucess code to the api call", file=sys.stderr)
-        return Code(201, {}, msg)
-
+        return True
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def pointpillars(tar_path, handler_metadata):
+def pointpillars(handler_metadata):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -406,21 +449,18 @@ def pointpillars(tar_path, handler_metadata):
     handler = SimpleHandler(handler_metadata)
 
     try:
-        _extract_images(tar_path, handler.root)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "train", "label"))
         assert os.path.exists(os.path.join(handler.root, "train", "lidar"))
         assert os.path.exists(os.path.join(handler.root, "val", "label"))
         assert os.path.exists(os.path.join(handler.root, "val", "lidar"))
-        msg = "Upload successful"
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def pose_classification(tar_path, handler_metadata):
+def pose_classification(handler_metadata):
     """
     Default:
     kinetics/nvidia : root_folder_path
@@ -434,9 +474,6 @@ def pose_classification(tar_path, handler_metadata):
     """
     handler = SimpleHandler(handler_metadata)
     try:
-        print("Extracting images from data tarball file", file=sys.stderr)
-        _extract_images(tar_path, handler.root)
-        print("Extraction complete", file=sys.stderr)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "kinetics")) or os.path.exists(os.path.join(handler.root, "nvidia"))
 
@@ -447,17 +484,13 @@ def pose_classification(tar_path, handler_metadata):
             model_type = "nvidia"
 
         assert os.path.exists(os.path.join(handler.root, model_type, "train_data.npy")) and os.path.exists(os.path.join(handler.root, model_type, "train_label.pkl")) and os.path.exists(os.path.join(handler.root, model_type, "val_data.npy")) and os.path.exists(os.path.join(handler.root, model_type, "val_label.pkl"))
-
-        msg = "Upload successful"
-        print("Returning sucess code to the api call", file=sys.stderr)
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
-def re_identification(tar_path, handler_metadata):
+def re_identification(handler_metadata):
     """
     Default:
     sample_train
@@ -468,19 +501,12 @@ def re_identification(tar_path, handler_metadata):
     """
     handler = SimpleHandler(handler_metadata)
     try:
-        print("Extracting images from data tarball file", file=sys.stderr)
-        _extract_images(tar_path, handler.root)
-        print("Extraction complete", file=sys.stderr)
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "sample_train")) and os.path.exists(os.path.join(handler.root, "sample_test")) and os.path.exists(os.path.join(handler.root, "sample_query"))
-
-        msg = "Upload successful"
-        print("Returning sucess code to the api call", file=sys.stderr)
-        return Code(201, {}, msg)
+        return True
 
     except:
-        msg = "Invalid tar file / tar file with no images and/or labels directory"
-        return Code(400, {}, msg)
+        return False
 
 
 DS_UPLOAD_TO_FUNCTIONS = {"object_detection": object_detection,
@@ -497,4 +523,10 @@ DS_UPLOAD_TO_FUNCTIONS = {"object_detection": object_detection,
                           "optical_inspection": optical_inspection,
                           "pointpillars": pointpillars,
                           "pose_classification": pose_classification,
-                          "re_identification": re_identification}
+                          "re_identification": re_identification,
+                          "visual_changenet": visual_changenet,
+                          "centerpose": centerpose}
+
+DS_CHANGE_PERMISSIONS = {"bpnet": bpnet_permission_change,
+                         "fpenet": fpenet_permission_change,
+                         "ocrnet": ocrnet_permission_change}

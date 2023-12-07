@@ -14,7 +14,6 @@
 
 """Util functions for AutoML jobs"""
 import sys
-import threading
 from handlers.stateless_handlers import get_public_models, get_handler_metadata
 from handlers.utilities import download_ptm
 from job_utils.workflow import Workflow, Job, Dependency
@@ -47,8 +46,7 @@ def on_new_automl_job(automl_context, recommendation):
     ptm_id = get_ptm_id_from_recommendation(recommendation.specs, automl_context.network)
     # Background process to download this PTM
     if ptm_id:
-        job_run_thread = threading.Thread(target=download_ptm, args=(ptm_id,))
-        job_run_thread.start()
+        download_ptm(ptm_id)  # Don't thread download_ptm as the job can start before the PTM is downloaded which will cause issues
 
     # automl_context is same as JobContext that was created for AutoML job
     recommendation_id = recommendation.id

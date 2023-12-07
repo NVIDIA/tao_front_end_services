@@ -18,7 +18,7 @@ import glob
 import json
 import sys
 
-from handlers.stateless_handlers import get_handler_root, get_handler_job_metadata
+from handlers.stateless_handlers import get_handler_root, get_handler_metadata, get_handler_job_metadata
 
 
 def detectnet_v2(config, job_context, handler_metadata):
@@ -766,7 +766,7 @@ def ocrnet(config, job_context, handler_metadata):
 
 
 def optical_inspection(config, job_context, handler_metadata):
-    """Assigns paths of data sources to the respective config params for OCRNET"""
+    """Assigns paths of data sources to the respective config params for optical inspection"""
     # Train dataset
     if handler_metadata.get("train_datasets", []) != []:
         train_ds = handler_metadata.get("train_datasets", [])[0]
@@ -803,6 +803,105 @@ def optical_inspection(config, job_context, handler_metadata):
             config["dataset"]["infer_dataset"] = {}
         config["dataset"]["infer_dataset"]["images_dir"] = os.path.join(infer_root, "images")
         config["dataset"]["infer_dataset"]["csv_path"] = os.path.join(infer_root, "dataset.csv")
+
+    return config
+
+
+def centerpose(config, job_context, handler_metadata):
+    """Assigns paths of data sources to the respective config params for CenterPose"""
+    # Train dataset
+    if handler_metadata.get("train_datasets", []) != []:
+        train_ds = handler_metadata.get("train_datasets", [])[0]
+        train_root = get_handler_root(train_ds)
+        if job_context.action == "train":
+            config["dataset"]["train_data"] = {}
+            config["dataset"]["train_data"] = os.path.join(train_root, 'train')
+
+    # Eval dataset
+    eval_ds = handler_metadata.get("eval_dataset", None)
+    eval_root = get_handler_root(eval_ds)
+    if eval_ds is not None:
+        if job_context.action == "train":
+            config["dataset"]["val_data"] = {}
+            config["dataset"]["val_data"] = os.path.join(eval_root, "val")
+        if job_context.action == "evaluate":
+            config["dataset"]["test_data"] = {}
+            config["dataset"]["test_data"] = os.path.join(eval_root, "test")
+
+    # Inference dataset
+    infer_ds = handler_metadata.get("inference_dataset", None)
+    infer_root = get_handler_root(infer_ds)
+    if infer_ds is not None:
+        if job_context.action == "inference":
+            config["dataset"]["inference_data"] = {}
+            config["dataset"]["inference_data"] = os.path.join(infer_root, "val")
+
+    return config
+
+
+def visual_changenet_classify(config, job_context, handler_metadata):
+    """Assigns paths of data sources to the respective config params for visual_changenet_classify"""
+    # Train dataset
+    if handler_metadata.get("train_datasets", []) != []:
+        train_ds = handler_metadata.get("train_datasets", [])[0]
+        train_root = get_handler_root(train_ds)
+        if "dataset" not in config.keys():
+            config["dataset"] = {}
+        if "classify" not in config["dataset"].keys():
+            config["dataset"]["classify"] = {}
+        if "train_dataset" not in config["dataset"]["classify"].keys():
+            config["dataset"]["classify"]["train_dataset"] = {}
+        config["dataset"]["classify"]["train_dataset"]["images_dir"] = os.path.join(train_root, "images")
+        config["dataset"]["classify"]["train_dataset"]["csv_path"] = os.path.join(train_root, "dataset.csv")
+
+    # Eval dataset
+    eval_ds = handler_metadata.get("eval_dataset", None)
+    eval_root = get_handler_root(eval_ds)
+    if eval_ds is not None:
+        if "dataset" not in config.keys():
+            config["dataset"] = {}
+        if "classify" not in config["dataset"].keys():
+            config["dataset"]["classify"] = {}
+        if "validation_dataset" not in config["dataset"]["classify"].keys():
+            config["dataset"]["classify"]["validation_dataset"] = {}
+        if "test_dataset" not in config["dataset"]["classify"].keys():
+            config["dataset"]["classify"]["test_dataset"] = {}
+        config["dataset"]["classify"]["validation_dataset"]["images_dir"] = os.path.join(eval_root, "images")
+        config["dataset"]["classify"]["validation_dataset"]["csv_path"] = os.path.join(eval_root, "dataset.csv")
+        config["dataset"]["classify"]["test_dataset"]["images_dir"] = os.path.join(eval_root, "images")
+        config["dataset"]["classify"]["test_dataset"]["csv_path"] = os.path.join(eval_root, "dataset.csv")
+
+    # Inference dataset
+    infer_ds = handler_metadata.get("inference_dataset", None)
+    infer_root = get_handler_root(infer_ds)
+    if infer_ds is not None:
+        if "dataset" not in config.keys():
+            config["dataset"] = {}
+        if "classify" not in config["dataset"].keys():
+            config["dataset"]["classify"] = {}
+        if "infer_dataset" not in config["dataset"]["classify"].keys():
+            config["dataset"]["classify"]["infer_dataset"] = {}
+        config["dataset"]["classify"]["infer_dataset"]["images_dir"] = os.path.join(infer_root, "images")
+        config["dataset"]["classify"]["infer_dataset"]["csv_path"] = os.path.join(infer_root, "dataset.csv")
+
+    return config
+
+
+def visual_changenet(config, job_context, handler_metadata):
+    """Assigns paths of data sources to the respective config params for visual changenet"""
+    # Train dataset
+    if handler_metadata.get("train_datasets", []) != []:
+        print("Warning: checking handler visual changenet", handler_metadata.get("train_datasets"), file=sys.stderr)
+        train_ds = handler_metadata.get("train_datasets", [])[0]
+        train_dataset_metadata = get_handler_metadata(train_ds)
+        if train_dataset_metadata.get('format') == 'visual_changenet_classify':
+            return visual_changenet_classify(config, job_context, handler_metadata)
+        train_root = get_handler_root(train_ds)
+        if "dataset" not in config.keys():
+            config["dataset"] = {}
+        if "segment" not in config["dataset"].keys():
+            config["dataset"]["segment"] = {}
+        config["dataset"]["segment"]["root_dir"] = train_root
 
     return config
 
@@ -876,8 +975,10 @@ DS_CONFIG_TO_FUNCTIONS = {"detectnet_v2": detectnet_v2,
                           "deformable_detr": deformable_detr,
                           "dino": dino,
                           "object_detection": object_detection,
+                          "centerpose": centerpose,
                           "instance_segmentation": instance_segmentation,
                           "analytics": analytics,
                           "annotations": annotations,
                           "augmentation": augmentation,
-                          "auto_label": auto_label}
+                          "auto_label": auto_label,
+                          "visual_changenet": visual_changenet}

@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND noninteractive
 RUN apt-get update && \
     apt-get upgrade --yes && \
     apt-get remove --yes python3.10 && \
-    apt-get install --yes software-properties-common git && \
+    apt-get install --yes software-properties-common git curl && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get install --no-install-suggests --no-install-recommends --yes python3.11 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 && \
@@ -35,6 +35,7 @@ FROM build AS staging
 WORKDIR /opt/api
 COPY api/ .
 COPY notebooks/ notebooks/
+COPY cli/version.py version.py
 COPY docker/requirements.txt .
 
 # Add python kubernetes client
@@ -47,7 +48,8 @@ RUN wget https://github.com/kubernetes-client/python/archive/refs/tags/v23.6.0.z
     /venv/bin/python setup.py install
 
 # Add NGC CLI
-RUN wget --content-disposition 'https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.23.0/files/ngccli_linux.zip' -P /opt/ngccli/ && \
+RUN mkdir -p /opt/ngccli/
+RUN wget --content-disposition 'https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.23.0/files/ngccli_linux.zip' -P /opt/ngccli/ -O /opt/ngccli/ngccli_linux.zip && \
     unzip -o /opt/ngccli/ngccli_linux.zip -d /opt/ngccli/ && \
     /opt/ngccli/ngc-cli/ngc --version
 ENV PATH="/opt/ngccli/ngc-cli:${PATH}" NGC_CLI_TRACE_DISABLE=1
@@ -58,6 +60,8 @@ RUN git clone https://github.com/aws/aws-cli.git && cd aws-cli && /venv/bin/pyth
 
 # Fetch metadata for PTMs
 ARG NGC_KEY
+ARG ORG_NAME
+ARG TEAM_NAME
 COPY docker/ngc_config_file .
 RUN if [ "$NGC_KEY" != "no_key_val" ]; then \
     sed -i 's/NGC_API_KEY_FIXME/'"$NGC_KEY"'/g' ngc_config_file && \
@@ -65,7 +69,7 @@ RUN if [ "$NGC_KEY" != "no_key_val" ]; then \
     mkdir -p /var/www/ && cp -r /root/.ngc /var/www/ && chmod -R 777 /var/www/.ngc && \
     rm -rf ngc_config_file; \
   fi
-RUN /venv/bin/python3 -u pretrained_models.py
+RUN /venv/bin/python3 -u pretrained_models.py --teamNames="nvidia/tao,nvaie" --ngcApiKey $NGC_KEY
 
 ################ PRODUCT IMAGE #################
 

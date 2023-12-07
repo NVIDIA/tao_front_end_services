@@ -17,29 +17,29 @@ import numpy as np
 import os
 import json
 import math
-
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
 from scipy.stats import norm
 from scipy.optimize import minimize
-from automl.utils import JobStates, fix_input_dimension, get_valid_range, clamp_value, report_healthy
-from handlers.utilities import load_json_spec
+from automl.utils import JobStates, get_valid_range, clamp_value, report_healthy
+from automl.automl_algorithm_base import AutoMLAlgorithmBase
+from handlers.utilities import get_total_epochs, get_flatten_specs
 
 np.random.seed(95051)
 
 
-class Bayesian:
+class Bayesian(AutoMLAlgorithmBase):
     """Bayesian AutoML algorithm class"""
 
-    def __init__(self, root, parameters):
+    def __init__(self, root, network, parameters):
         """Initialize the Bayesian algorithm class
         Args:
             root: handler root
+            network: model we are running AutoML on
             parameters: automl sweepable parameters
         """
-        self.root = root
-        self.parameters = parameters
-        self.parent_params = {}
+        super().__init__(root, network, parameters)
+        report_healthy(self.root + "/controller.log", "Bayesian init", clear=True)
         length_scale = [1.0] * len(self.parameters)
         m52 = ConstantKernel(1.0) * Matern(length_scale=length_scale, nu=2.5)
         # m52 = ConstantKernel(1.0) * Matern(length_scale=1.0, nu=2.5) # is another option
@@ -57,80 +57,33 @@ class Bayesian:
         self.xi = 0.01
         self.num_restarts = 5
 
-        self.num_epochs_per_experiment = self.get_total_epochs()
+        self.num_epochs_per_experiment = get_total_epochs(self.root)
 
-        report_healthy(self.root + "/controller.log", "Bayesian init", clear=True)
-
-    def convert_parameter(self, parameter_config, suggestion):
+    def generate_automl_param_rec_value(self, parameter_config, suggestion):
         """Convert 0 to 1 GP prediction into a possible value"""
-        tp = parameter_config.get("value_type")
+        parameter_name = parameter_config.get("parameter")
+        data_type = parameter_config.get("value_type")
         default_value = parameter_config.get("default_value", None)
-        math_cond = parameter_config.get("math_cond", None)
         parent_param = parameter_config.get("parent_param", None)
 
-        if tp in ("int", "integer"):
-            if parameter_config["parameter"] == "augmentation_config.preprocessing.output_image_height":
-                if "model_config.input_image_config.size_height_width.height" in self.parent_params.keys():
-                    return self.parent_params["model_config.input_image_config.size_height_width.height"]
-            if parameter_config["parameter"] == "augmentation_config.preprocessing.output_image_width":
-                if "model_config.input_image_config.size_height_width.width" in self.parent_params.keys():
-                    return self.parent_params["model_config.input_image_config.size_height_width.width"]
-
-            v_min = parameter_config.get("valid_min", "")
-            v_max = parameter_config.get("valid_max", "")
-            if v_min == "" or v_max == "":
-                return int(default_value)
-            if (type(v_min) != str and math.isnan(v_min)) or (type(v_max) != str and math.isnan(v_max)):
-                return int(default_value)
-
-            v_min = int(v_min)
-            if (type(v_max) != str and math.isinf(v_max)) or v_max == "inf":
-                v_max = int(default_value)
-            else:
-                v_max = int(v_max)
-            random_int = np.random.randint(v_min, v_max + 1)
-
-            if type(math_cond) == str:
-                factor = int(math_cond.split(" ")[1])
-                random_int = fix_input_dimension(random_int, factor)
-
-            if not (type(parent_param) == float and math.isnan(parent_param)):
-                if (type(parent_param) == str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) == bool and parent_param):
-                    self.parent_params[parameter_config.get("parameter")] = random_int
-
-            return random_int
-        if tp == "float":
+        if data_type == "float":
             v_min = parameter_config.get("valid_min", "")
             v_max = parameter_config.get("valid_max", "")
             if v_min == "" or v_max == "":
                 return float(default_value)
-            if (type(v_min) != str and math.isnan(v_min)) or (type(v_max) != str and math.isnan(v_max)):
+            if (type(v_min) is not str and math.isnan(v_min)) or (type(v_max) is not str and math.isnan(v_max)):
                 return float(default_value)
 
             v_min, v_max = get_valid_range(parameter_config, self.parent_params)
             normalized = suggestion * (v_max - v_min) + v_min
             quantized = clamp_value(normalized, v_min, v_max)
 
-            if not (type(parent_param) == float and math.isnan(parent_param)):
-                if (type(parent_param) == str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) == bool and parent_param):
-                    self.parent_params[parameter_config.get("parameter")] = quantized
-
+            if not (type(parent_param) is float and math.isnan(parent_param)):
+                if (type(parent_param) is str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) == bool and parent_param):
+                    self.parent_params[parameter_name] = quantized
             return quantized
-        if tp == "bool":
-            return np.random.randint(0, 2) == 1
-        if tp == "ordered_int":
-            if parameter_config.get("valid_options", "") == "":
-                return default_value
-            valid_values = parameter_config.get("valid_options")
-            sample = int(np.random.choice(valid_values.split(",")))
-            return sample
-        if tp in ("categorical", "ordered"):
-            if parameter_config.get("valid_options", "") == "":
-                return default_value
-            valid_values = parameter_config.get("valid_options")
-            sample = np.random.choice(valid_values.split(","))
-            return sample
-        return default_value
+
+        return super().generate_automl_param_rec_value(parameter_config)
 
     def save_state(self):
         """Save the Bayesian algorithm related variables to brain.json"""
@@ -146,11 +99,11 @@ class Bayesian:
                       indent=4)
 
     @staticmethod
-    def load_state(root, parameters):
+    def load_state(root, network, parameters):
         """Load the Bayesian algorithm related variables to brain.json"""
         file_path = root + "/brain.json"
         if not os.path.exists(file_path):
-            return Bayesian(root)
+            return Bayesian(root, network)
 
         with open(file_path, 'r', encoding='utf-8') as f:
             json_loaded = json.loads(f.read())
@@ -158,7 +111,7 @@ class Bayesian:
             for x in json_loaded["Xs"]:
                 Xs.append(np.array(x))
             ys = json_loaded["ys"]
-        bayesian = Bayesian(root, parameters)
+        bayesian = Bayesian(root, network, parameters)
         # Load state (Remember everything)
         bayesian.Xs = Xs
         bayesian.ys = ys
@@ -170,6 +123,7 @@ class Bayesian:
 
     def generate_recommendations(self, history):
         """Generates parameter values and appends to recommendations"""
+        get_flatten_specs(self.default_train_spec, self.default_train_spec_flattened)
         if history == []:
             # default recommendation => random points
             # TODO: In production, this must be default values for a baseline
@@ -177,7 +131,7 @@ class Bayesian:
             self.Xs.append(suggestions)
             recommendations = []
             for param_dict, suggestion in zip(self.parameters, suggestions):
-                recommendations.append(self.convert_parameter(param_dict, suggestion))
+                recommendations.append(self.generate_automl_param_rec_value(param_dict, suggestion))
             return [dict(zip([param["parameter"] for param in self.parameters], recommendations))]
         # This function will be called every 5 seconds or so.
         # If no change in history, dont give a recommendation
@@ -198,7 +152,7 @@ class Bayesian:
         recommendations = []
         assert len(self.parameters) == len(suggestions)
         for param_dict, suggestion in zip(self.parameters, suggestions):
-            recommendations.append(self.convert_parameter(param_dict, suggestion))
+            recommendations.append(self.generate_automl_param_rec_value(param_dict, suggestion))
 
         return [dict(zip([param["parameter"] for param in self.parameters], recommendations))]
 
@@ -260,23 +214,3 @@ class Bayesian:
             ei[sigma == 0.0] = 0.0
 
         return -1 * ei[0, 0]
-
-    def get_total_epochs(self):
-        """Get the epoch/iter number from train.json"""
-        spec = load_json_spec(self.root + "/../specs/train.json")
-        max_epoch = 100.0
-        for key1 in spec:
-            if key1 in ("training_config", "train_config", "train"):
-                for key2 in spec[key1]:
-                    if key2 in ("num_epochs", "epochs", "n_epochs", "max_iters"):
-                        max_epoch = float(spec[key1][key2])
-                    elif key2 in ("train_config"):
-                        for key3 in spec[key1][key2]:
-                            if key3 == "runner":
-                                for key4 in spec[key1][key2][key3]:
-                                    if key4 == "max_epochs":
-                                        max_epoch = float(spec[key1][key2][key3][key4])
-            elif key1 in ("num_epochs"):
-                max_epoch = float(spec[key1])
-
-        return max_epoch

@@ -46,5 +46,5 @@ def get_from_ngc(key):
         err = 'Credentials error: ' + str(e)
     if not err:
         print('Adding trusted user: ' + str(creds.get('user_id')), file=sys.stderr)
-        sessions.set_session(creds)
+        sessions.set(creds)
     return creds, err

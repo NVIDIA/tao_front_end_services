@@ -55,7 +55,7 @@ docker_build:
 	@read -p "Enter the docker registry value [nvcr.io]: " TAO_API_REGISTRY && echo "TAO_API_REGISTRY=$$TAO_API_REGISTRY" > .env; \
 	read -p "Enter the docker org value [nvidia]: " TAO_API_ORG && echo "TAO_API_ORG=$$TAO_API_ORG" >> .env; \
 	read -p "Enter the docker team value [tao]: " TAO_API_TEAM && echo "TAO_API_TEAM=$$TAO_API_TEAM" >> .env; \
-	echo "TAO_VERSION=5.0.0" >> .env; \
+	echo "TAO_VERSION=5.2.0" >> .env; \
 	stty -echo && read -p "Enter your ngc_api_key [from ~/.ngc/config]: " PASSWORD && echo "PASSWORD=$$PASSWORD" >> .env; \
 	[ ! -z "$$TAO_API_REGISTRY" ] && BUILD_ARGS="--tao_api_registry=$$TAO_API_REGISTRY"; \
 	[ ! -z "$$TAO_API_ORG" ] && BUILD_ARGS="$$BUILD_ARGS --tao_api_org=$$TAO_API_ORG"; \

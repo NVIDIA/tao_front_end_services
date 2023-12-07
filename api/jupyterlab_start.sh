@@ -36,10 +36,12 @@ apt-get install helm --yes
 ## INSTALL AWS CLI
 /venv/bin/pip3 install awscli
 ## FETCH NGC COLLATERALS
-su - jupyterlab -c "cd ~ && /opt/ngccli/ngc-cli/ngc registry resource download-version '$NGC_COLLATERALS'"
+cd /opt/api && ngc registry resource download-version $NGC_COLLATERALS
+chmod -R 777 /opt/api/$NOTEBOOKS_DIR
 ## COPY TUTORIALS
-su - jupyterlab -c "[ -d '/opt/api/$NOTEBOOKS_DIR/tutorials' ] && cp -r /opt/api/$NOTEBOOKS_DIR/tutorials ~/$NOTEBOOKS_DIR"
-su - jupyterlab -c "[ -d '/opt/api/$NOTEBOOKS_DIR' ] && cp -r /opt/api/$NOTEBOOKS_DIR ~/notebooks/tao_end2end"
+su - jupyterlab -c "mkdir -p ~/$NOTEBOOKS_DIR/tao_end2end/"
+su - jupyterlab -c "[ -d '/opt/api/$NOTEBOOKS_DIR/tutorials' ] && mv /opt/api/$NOTEBOOKS_DIR/tutorials/* ~/$NOTEBOOKS_DIR/ && rm -rf /opt/api/$NOTEBOOKS_DIR/tutorials"
+su - jupyterlab -c "[ -d '/opt/api/$NOTEBOOKS_DIR' ] && mv /opt/api/$NOTEBOOKS_DIR/* ~/$NOTEBOOKS_DIR/tao_end2end/"
 ## START JUPYTER LAB
 apt-get install -y python3-venv
 /venv/bin/pip3 install virtualenv

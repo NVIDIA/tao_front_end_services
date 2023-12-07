@@ -44,7 +44,7 @@
 
     "spec_params":{
         "train": {
-            "model.pretrained_model_path": "ptm",
+            "model.pretrained_model_path": "ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path": "resume_model",
             "train.gpu_id": "from_csv",
             "num_gpus": "from_csv",

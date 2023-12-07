@@ -20,7 +20,7 @@
     "cli_params": {
         "train": {
             "experiment_spec_file":"experiment_spec",
-            "pretrained_model_file":"resume_model_or_ptm",
+            "pretrained_model_file":"ptm",
             "results_dir":"output_dir",
             "verbose":"verbose",
             "use_amp": "from_csv",
@@ -113,11 +113,11 @@
     },
 
     "automl_cli_params":{
-        "pretrained_model_file":"automl_assign_ptm",
+        "pretrained_model_file":"ptm",
         "experiment_spec_file":"automl_experiment_spec",
         "results_dir":"automl_output_dir",
         "gpus":"from_csv",
         "use_amp": "from_csv",
         "key":"key"
-}
+    }
 }

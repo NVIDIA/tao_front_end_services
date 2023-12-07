@@ -37,6 +37,17 @@ def get_handler_root(handler_id):
     return ""
 
 
+# Sub for handler.spec_root with handler_root(handler_id)
+def get_handler_spec_root(handler_id):
+    """Return path of specs folder under handler_root"""
+    return os.path.join(get_handler_root(handler_id), "specs")
+
+
+def get_handler_log_root(handler_id):
+    """Return path of logs folder under handler_root"""
+    return os.path.join(get_handler_root(handler_id), "logs")
+
+
 def get_handler_job_metadata(handler_id, job_id):
     """Return metadata info present in job_id.json inside jobs_metadata folder"""
     # Only metadata of a particular job
@@ -47,6 +58,29 @@ def get_handler_job_metadata(handler_id, job_id):
     with open(job_metadata_file, "r", encoding='utf-8') as f:
         metadata = json.load(f)
     return metadata
+
+
+def get_job_files(handler_id, job_id, retrieve_logs=False, retrieve_specs=False):
+    """Return metadata info present in job_id.json inside jobs_metadata folder"""
+    # Only metadata of a particular job
+    logs_folder = ""
+    specs_folder = ""
+    if retrieve_logs:
+        logs_folder = get_handler_log_root(handler_id)
+    if retrieve_specs:
+        specs_folder = get_handler_spec_root(handler_id)
+
+    handler_root = get_handler_root(handler_id)
+    job_folder = os.path.join(handler_root, job_id)
+    if not os.path.exists(job_folder) and (retrieve_logs and not os.path.exists(logs_folder)) and (retrieve_specs and not os.path.exists(specs_folder)):
+        return []
+    files = glob.glob(f"{job_folder}/**", recursive=True)
+    if logs_folder and os.path.exists(logs_folder):
+        files += glob.glob(f"{logs_folder}/**", recursive=True)
+    if specs_folder and os.path.exists(specs_folder):
+        files += glob.glob(f"{specs_folder}/**", recursive=True)
+    files = [os.path.relpath(file, handler_root) for file in files if not file.endswith('/')]
+    return files
 
 
 def get_toolkit_status(handler_id, job_id):
@@ -70,21 +104,10 @@ def json_serializable(response):
         return False
 
 
-# Sub for handler.spec_root with handler_root(handler_id)
-def get_handler_spec_root(handler_id):
-    """Return path of specs folder under handler_root"""
-    return get_handler_root(handler_id) + "/specs/"
-
-
 # Sub for handler.metadata_file with handler_root(handler_id)
 def get_handler_metadata_file(handler_id):
     """Return path of metadata.json under handler_root"""
     return get_handler_root(handler_id) + "/metadata.json"
-
-
-def get_handler_log_root(handler_id):
-    """Return path of logs folder under handler_root"""
-    return get_handler_root(handler_id) + "/logs/"
 
 
 def get_handler_jobs_metadata_root(handler_id):
@@ -106,6 +129,14 @@ def get_handler_metadata(handler_id):
     """Return metadata info present in metadata.json inside handler_root"""
     metadata_file = get_handler_metadata_file(handler_id)
     metadata = load_json_data(metadata_file)
+    return metadata
+
+
+def write_handler_metadata(handler_id, metadata):
+    """Return metadata info present in metadata.json inside handler_root"""
+    metadata_file = get_handler_metadata_file(handler_id)
+    with open(metadata_file, "w+", encoding='utf-8') as f:
+        f.write(json.dumps(metadata, indent=4))
     return metadata
 
 
@@ -312,11 +343,28 @@ def check_model_type_match(user_id, model_meta, ptm_ids):
     return True
 
 
+def check_checkpoint_choose_match(technique):
+    """Checks if technique chosen for checkpoint retrieve is a valid option"""
+    if technique not in ("best_model", "latest_model", "from_epoch_number"):
+        return False
+    return True
+
+
+def check_checkpoint_epoch_number_match(epoch_number_dictionary):
+    """Checks if the epoch number requested to retrieve checkpoint is a valid number"""
+    try:
+        for key in epoch_number_dictionary.keys():
+            _ = int(epoch_number_dictionary[key])
+    except:
+        return False
+    return True
+
+
 def model_update_handler_attributes(user_id, model_meta, key, value):
     """Checks if the artifact provided is of the correct type"""
     # Returns value or False
     if key in ["train_datasets"]:
-        if type(value) != list:
+        if type(value) is not list:
             value = [value]
         for dataset_id in value:
             if not check_dataset_type_match(user_id, model_meta, dataset_id, no_raw=True):
@@ -329,6 +377,12 @@ def model_update_handler_attributes(user_id, model_meta, key, value):
             return False
     elif key in ["ptm"]:
         if not check_model_type_match(user_id, model_meta, value):
+            return False
+    elif key in ["checkpoint_choose_method"]:
+        if not check_checkpoint_choose_match(value):
+            return False
+    elif key in ["checkpoint_epoch_number"]:
+        if not check_checkpoint_epoch_number_match(value):
             return False
     else:
         return False

@@ -48,7 +48,7 @@
     "spec_params":{
         "train": {
             "encryption_key":"key",
-            "train.checkpoint": "parent_model_evaluate",
+            "train.checkpoint": "resume_model_or_ptm",
             "results_dir":"output_dir"
         },
         "evaluate":{

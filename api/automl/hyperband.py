@@ -17,27 +17,27 @@ import numpy as np
 import json
 import os
 import math
-from automl.utils import ResumeRecommendation, JobStates, fix_input_dimension, get_valid_range, clamp_value, report_healthy
-from handlers.utilities import load_json_spec
+from automl.utils import ResumeRecommendation, JobStates, get_valid_range, clamp_value, report_healthy
+from automl.automl_algorithm_base import AutoMLAlgorithmBase
+from handlers.utilities import load_json_spec, get_flatten_specs
 
 np.random.seed(95051)
 
 
-class HyperBand:
+class HyperBand(AutoMLAlgorithmBase):
     """Hyperband AutoML algorithm class"""
 
-    def __init__(self, root, parameters, R, nu, network, epoch_multiplier):
+    def __init__(self, root, network, parameters, R, nu, epoch_multiplier):
         """Initialize the Hyperband algorithm class
         Args:
             root: handler root
+            network: model we are running AutoML on
             parameters: automl sweepable parameters
             R: the maximum amount of resource that can be allocated to a single configuration
             nu: an input that controls the proportion of configurations discarded in each round of SuccessiveHalving
             epoch_multiplier: multiplying factor for epochs
         """
-        self.root = root
-        self.parameters = parameters
-        self.parent_params = {}
+        super().__init__(root, network, parameters)
         report_healthy(self.root + "/controller.log", "Hyperband init", clear=True)
         self.epoch_multiplier = int(epoch_multiplier)
         self.ni = {}
@@ -91,74 +91,29 @@ class HyperBand:
                       sort_keys=True,
                       indent=4)
 
-    # Generate a random sample for a parameter from params.py
-    def sample_parameter(self, parameter_config):
+    def generate_automl_param_rec_value(self, parameter_config):
         """Generate a random value for the parameter passed"""
         tp = parameter_config.get("value_type")
         default_value = parameter_config.get("default_value", None)
-        math_cond = parameter_config.get("math_cond", None)
         parent_param = parameter_config.get("parent_param", None)
-        if tp in ("int", "integer"):
-            if parameter_config["parameter"] == "augmentation_config.preprocessing.output_image_height":
-                if "model_config.input_image_config.size_height_width.height" in self.parent_params.keys():
-                    return self.parent_params["model_config.input_image_config.size_height_width.height"]
-            if parameter_config["parameter"] == "augmentation_config.preprocessing.output_image_width":
-                if "model_config.input_image_config.size_height_width.width" in self.parent_params.keys():
-                    return self.parent_params["model_config.input_image_config.size_height_width.width"]
 
-            v_min = parameter_config.get("valid_min", "")
-            v_max = parameter_config.get("valid_max", "")
-            if v_min == "" or v_max == "":
-                return int(default_value)
-            if (type(v_min) != str and math.isnan(v_min)) or (type(v_max) != str and math.isnan(v_max)):
-                return int(default_value)
-
-            v_min = int(v_min)
-            if (type(v_max) != str and math.isinf(v_max)) or v_max == "inf":
-                v_max = int(default_value)
-            else:
-                v_max = int(v_max)
-            random_int = np.random.randint(v_min, v_max + 1)
-
-            if type(math_cond) == str:
-                factor = int(math_cond.split(" ")[1])
-                random_int = fix_input_dimension(random_int, factor)
-
-            if not (type(parent_param) == float and math.isnan(parent_param)):
-                if (type(parent_param) == str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) == bool and parent_param):
-                    self.parent_params[parameter_config.get("parameter")] = random_int
-
-            return random_int
         if tp == "float":
             v_min = parameter_config.get("valid_min", "")
             v_max = parameter_config.get("valid_max", "")
             if v_min == "" or v_max == "":
                 return float(default_value)
-            if (type(v_min) != str and math.isnan(v_min)) or (type(v_max) != str and math.isnan(v_max)):
+            if (type(v_min) is not str and math.isnan(v_min)) or (type(v_max) is not str and math.isnan(v_max)):
                 return float(default_value)
             v_min, v_max = get_valid_range(parameter_config, self.parent_params)
             random_float = np.random.uniform(low=v_min, high=v_max)
             random_float = clamp_value(random_float, v_min, v_max)
 
-            if not (type(parent_param) == float and math.isnan(parent_param)):
-                if (type(parent_param) == str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) == bool and parent_param):
+            if not (type(parent_param) is float and math.isnan(parent_param)):
+                if (type(parent_param) is str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) is bool and parent_param):
                     self.parent_params[parameter_config.get("parameter")] = random_float
             return random_float
-        if tp == "bool":
-            return np.random.randint(0, 2) == 1
-        if tp == "ordered_int":
-            if parameter_config.get("valid_options", "") == "":
-                return default_value
-            valid_values = parameter_config.get("valid_options")
-            sample = int(np.random.choice(valid_values.split(",")))
-            return sample
-        if tp in ("categorical", "ordered"):
-            if parameter_config.get("valid_options", "") == "":
-                return default_value
-            valid_values = parameter_config.get("valid_options")
-            sample = np.random.choice(valid_values.split(","))
-            return sample
-        return default_value
+
+        return super().generate_automl_param_rec_value(parameter_config)
 
     def save_state(self):
         """Save the Hyperband algorithm related variables to brain.json"""
@@ -181,16 +136,16 @@ class HyperBand:
                       indent=4)
 
     @staticmethod
-    def load_state(root, parameters, R, nu, network, epoch_multiplier):
+    def load_state(root, network, parameters, R, nu, epoch_multiplier):
         """Load the Hyperband algorithm related variables to brain.json"""
         file_path = root + "/brain.json"
         if not os.path.exists(file_path):
-            return HyperBand(root, parameters, R, nu, network, epoch_multiplier)
+            return HyperBand(root, network, parameters, R, nu, epoch_multiplier)
 
         with open(file_path, 'r', encoding='utf-8') as f:
             json_loaded = json.loads(f.read())
 
-        brain = HyperBand(root, parameters, R, nu, network, epoch_multiplier)
+        brain = HyperBand(root, network, parameters, R, nu, epoch_multiplier)
         # Load state (Remember everything)
         brain.bracket = json_loaded["bracket"]  # Bracket
         brain.sh_iter = json_loaded["sh_iter"]  # SH iteration
@@ -254,25 +209,26 @@ class HyperBand:
         hyperparam_dict = {}
         for param in self.parameters:
             name = param["parameter"]
-            rec = self.sample_parameter(param)
+            rec = self.generate_automl_param_rec_value(param)
             hyperparam_dict[name] = rec
         return hyperparam_dict
 
     def generate_recommendations(self, history):
         """Generates recommendations for the controller to run"""
+        get_flatten_specs(self.default_train_spec, self.default_train_spec_flattened)
         if history == []:
             rec1 = self._generate_one_recommendation(history)
-            assert type(rec1) == dict
+            assert type(rec1) is dict
             self.track_id = 0
             return [rec1]
 
         if history[self.track_id].status not in [JobStates.success, JobStates.failure]:
             return []
         rec = self._generate_one_recommendation(history)
-        if type(rec) == dict:
+        if type(rec) is dict:
             self.track_id = len(history)
             return [rec]
-        if type(rec) == ResumeRecommendation:
+        if type(rec) is ResumeRecommendation:
             self.track_id = rec.id
             return [rec]
         return []

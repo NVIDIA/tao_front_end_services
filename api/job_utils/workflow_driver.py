@@ -14,6 +14,7 @@
 
 """Workflow manager for normal model actions"""
 import os
+import json
 
 from job_utils.workflow import Workflow, Job, Dependency
 from handlers.stateless_handlers import get_handler_spec_root
@@ -27,13 +28,18 @@ def on_new_job(job_contexts):
     for job_context in job_contexts:
         deps = []
         deps.append(Dependency(type="parent"))
+        if job_context.specs:
+            spec_json_path = os.path.join(get_handler_spec_root(job_context.handler_id), f"{job_context.action}.json")
+            with open(spec_json_path, "w", encoding='utf-8') as f:
+                request_json_string = json.dumps(job_context.specs, indent=4)
+                f.write(request_json_string)
         deps.append(Dependency(type="specs"))
         deps.append(Dependency(type="model"))
         deps.append(Dependency(type="dataset"))
         if job_context.action not in ["convert", "dataset_convert", "kmeans"]:
             deps.append(Dependency(type="gpu"))
         elif job_context.action in ("convert", "gen_trt_engine"):
-            spec_json_path = os.path.join(get_handler_spec_root(job_context.handler_id), job_context.action, ".json")
+            spec_json_path = os.path.join(get_handler_spec_root(job_context.handler_id), f"{job_context.action}.json")
             config = load_json_spec(spec_json_path)
             if config.get("platform"):
                 deps.append(Dependency(type="gpu", name=config["platform"]))

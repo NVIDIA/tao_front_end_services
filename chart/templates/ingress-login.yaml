@@ -26,7 +26,7 @@ metadata:
       error_page 497 https://$server_name:$server_port$request_uri;
 {{- end }}
     nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /api/v1/login/$2
+    nginx.ingress.kubernetes.io/rewrite-target: /api/v1/login
 {{- if .Values.corsOrigin }}
     nginx.ingress.kubernetes.io/enable-cors: "true"
     nginx.ingress.kubernetes.io/cors-allow-origin: {{ .Values.corsOrigin }}
@@ -49,7 +49,7 @@ spec:
   rules:
   - http:
       paths:
-      - path: /{{ .Release.Namespace }}/api/v1/login(/|$)(.*)
+      - path: /{{ .Release.Namespace }}/api/v1/login
         pathType: Prefix
         backend:
           service:
@@ -57,7 +57,7 @@ spec:
             port:
               number: 8000
 {{- if eq .Release.Namespace "default" }}
-      - path: /api/v1/login(/|$)(.*)
+      - path: /api/v1/login
         pathType: Prefix
         backend:
           service:

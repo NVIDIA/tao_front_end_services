@@ -32,9 +32,11 @@
 
     "spec_params":{
         "train":{
-            "model.pretrained_model_path":"resume_model_or_ptm",
+            "model.pretrained_model_path":"ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path":"resume_model",
             "encryption_key":"key",
             "train.gpu_ids": "from_csv",
+            "train.num_gpus": "from_csv",
             "results_dir":"output_dir"
         },
         "evaluate":{
@@ -64,6 +66,7 @@
         "train.checkpoint_interval":"assign_const_value,train.num_epochs",
         "encryption_key":"key",
         "train.gpu_ids": "from_csv",
+        "train.num_gpus": "from_csv",
         "results_dir":"automl_output_dir"
     },
 

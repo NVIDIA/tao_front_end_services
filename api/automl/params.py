@@ -14,7 +14,7 @@
 
 """AutoML read parameters modules"""
 from handlers.utilities import Code
-from handlers.utilities import AUTOML_DISABLED_NETWORKS
+from handlers.utilities import get_flatten_specs, AUTOML_DISABLED_NETWORKS
 from specs_utils import csv_to_json_schema
 
 import os
@@ -24,17 +24,8 @@ import pandas as pd
 _VALID_TYPES = ["int", "integer",
                 "float",
                 "ordered_int", "bool",
-                "ordered", "categorical"]
-
-
-def get_flatten_specs(dict_spec, flat_specs, parent=""):
-    """Flatten nested dictionary"""
-    for key, value in dict_spec.items():
-        if isinstance(value, dict):
-            get_flatten_specs(value, flat_specs, parent + key + ".")
-        else:
-            flat_key = parent + key
-            flat_specs[flat_key] = value
+                "ordered", "categorical",
+                "list_1_backbone", "list_1_normal", "list_2", "list_3"]
 
 
 def generate_hyperparams_to_search(network_arch, automl_add_hyperparameters, automl_remove_hyperparameters, handler_root):

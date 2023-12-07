@@ -51,17 +51,19 @@ spec:
         - name: IMAGE_TF1
           value: {{ .Values.imageTf1 | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5" | quote }}
         - name: IMAGE_PYT
-          value: {{ .Values.imagePyt | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-pyt" | quote }}
+          value: {{ .Values.imagePyt | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt2.1.0" | quote }}
+        - name: IMAGE_PYT_114
+          value: {{ .Values.imagePyt_114 | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt1.14.0" | quote }}
         - name: IMAGE_TF2
           value: {{ .Values.imageTf2 | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0" | quote }}
         - name: IMAGE_TAO_DEPLOY
-          value: {{ .Values.imageTaoDeploy | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-deploy" | quote }}
+          value: {{ .Values.imageTaoDeploy | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-deploy" | quote }}
         - name: IMAGE_DEFAULT
           value: {{ .Values.imageDefault | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5" | quote }}
         - name: IMAGE_API
           value: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         - name: IMAGE_DATA_SERVICES
-          value: {{ .Values.imageDataservices | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-data-services" | quote }}
+          value: {{ .Values.imageDataservices | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-data-services" | quote }}
         - name: PYTHONIOENCODING 
           value: utf-8
         - name: LC_ALL 

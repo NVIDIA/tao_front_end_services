@@ -94,7 +94,7 @@ yolov4_config.nlayers,Number of Layers,ordered_int,number of layers for this arc
 yolov4_config.loss_loc_weight,weighting for location loss,float,weighting factor for location loss,1,,0,inf,,,,,,,,
 yolov4_config.loss_neg_obj_weights,weighting for loss of negative objects,float,weighting factor for loss of negative objects,1,,0,inf,,,,,,,,
 yolov4_config.loss_class_weights,weighting for classification loss,float,weighting factor for classification loss,1,,0,inf,,,,,,,,
-yolov4_config.freeze_blocks,Freeze Blocks,list,ID of blocks to be frozen during training,,,,,,,,,FALSE,,,
+yolov4_config.freeze_blocks,Freeze Blocks,list_1_backbone,ID of blocks to be frozen during training,,,,,,,,,FALSE,,,
 yolov4_config.freeze_bn,Freeze BN,bool,Whether or not to freeze BatchNormalization layers,FALSE,,,,"TRUE,FALSE",,,,,,,
 yolov4_config.force_relu,Force ReLU,bool,Whether or not to force activation function to ReLU,FALSE,,,,"TRUE,FALSE",,,,,,,
 yolov4_config.activation,Activation,ordered,Activation function,,,,,"relu,leaky_relu,mish",,,,,,,

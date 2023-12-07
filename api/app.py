@@ -15,13 +15,16 @@
 # limitations under the License.
 
 """API modules defining schemas and endpoints"""
+import ast
 import sys
+import math
 import json
+import shutil
 
 from apispec import APISpec
 from apispec.ext.marshmallow import MarshmallowPlugin
 from apispec_webframeworks.flask import FlaskPlugin
-from flask import Flask, request, jsonify, make_response, render_template, send_from_directory
+from flask import Flask, request, jsonify, make_response, render_template, send_from_directory, send_file
 from marshmallow import Schema, fields
 from marshmallow_enum import EnumField, Enum
 
@@ -33,6 +36,8 @@ from handlers.app_handler import AppHandler as app_handler
 from handlers.utilities import validate_uuid
 from job_utils.workflow import Workflow
 
+from werkzeug.exceptions import HTTPException
+
 
 flask_plugin = FlaskPlugin()
 marshmallow_plugin = MarshmallowPlugin()
@@ -43,12 +48,13 @@ marshmallow_plugin = MarshmallowPlugin()
 #
 spec = APISpec(
     title='TAO Toolkit API',
-    version='v5.0.0',
+    version='v5.2.0',
     openapi_version='3.0.3',
     info={"description": 'TAO Toolkit API document'},
     tags=[
-        {"name": 'DATASET', "description": 'Endpoints related to Dataset'},
-        {"name": 'MODEL', "description": 'Endpoints related to Model'}
+        {"name": 'AUTHENTICATION', "description": 'Endpoints related to User Authentication'},
+        {"name": 'DATASET', "description": 'Endpoints related to Datasets'},
+        {"name": 'MODEL', "description": 'Endpoints related to Model Experiments'}
     ],
     plugins=[flask_plugin, marshmallow_plugin],
 )
@@ -103,6 +109,22 @@ class JobStatusEnum(Enum):
 #
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
+app.config['TRAP_HTTP_EXCEPTIONS'] = True
+
+
+@app.errorhandler(HTTPException)
+def handle_exception(e):
+    """Return JSON instead of HTML for HTTP errors."""
+    # start with the correct headers and status code from the error
+    response = e.get_response()
+    # replace the body with JSON
+    response.data = json.dumps({
+        "code": e.code,
+        "name": e.name,
+        "description": e.description,
+    })
+    response.content_type = "application/json"
+    return response
 
 
 #
@@ -170,6 +192,21 @@ class KPISchema(Schema):
     values = fields.Dict(keys=fields.Int(allow_none=True), values=fields.Float(allow_none=True))
 
 
+class CustomFloatField(fields.Float):
+    """Class defining custom Float field allown NaN and Inf values in Marshmallow"""
+
+    def _deserialize(self, value, attr, data, **kwargs):
+        if value == "nan" or (type(value) == float and math.isnan(value)):
+            return float("nan")
+        if value == "inf" or (type(value) == float and math.isinf(value)):
+            return float("inf")
+        if value == "-inf" or (type(value) == float and math.isinf(value)):
+            return float("-inf")
+        if value is None:
+            return None
+        return super()._deserialize(value, attr, data)
+
+
 class AutoMLResultsSchema(Schema):
     """Class defining AutoML results schema"""
 
@@ -178,7 +215,7 @@ class AutoMLResultsSchema(Schema):
 
         ordered = True
     metric = fields.Str(allow_none=True)
-    value = fields.Float(allow_none=True)
+    value = CustomFloatField()
 
 
 class StatsSchema(Schema):
@@ -213,6 +250,115 @@ class JobResultSchema(Schema):
     eta = fields.Str(allow_none=True)
 
 
+class AllowedDockerEnvVariables(Enum):
+    """Allowed docker environment variables while launching DNN containers"""
+
+    WANDB_API_KEY = "WANDB_API_KEY"
+    CLEARML_WEB_HOST = "CLEARML_WEB_HOST"
+    CLEARML_API_HOST = "CLEARML_API_HOST"
+    CLEARML_FILES_HOST = "CLEARML_FILES_HOST"
+    CLEARML_API_ACCESS_KEY = "CLEARML_API_ACCESS_KEY"
+    CLEARML_API_SECRET_KEY = "CLEARML_API_SECRET_KEY"
+
+
+#
+# AUTHENTICATION API
+#
+class LoginReqSchema(Schema):
+    """Class defining login request schema"""
+
+    class Meta:
+        """Class enabling sorting field values by the order in which they are declared"""
+
+        ordered = True
+    ngc_api_key = fields.Str()
+
+
+class LoginRspSchema(Schema):
+    """Class defining login response schema"""
+
+    class Meta:
+        """Class enabling sorting field values by the order in which they are declared"""
+
+        ordered = True
+    user_id = fields.UUID()
+    token = fields.Str()
+
+
+@app.route('/api/v1/login', methods=['POST'])
+def login():
+    """User Login.
+    ---
+    post:
+      tags:
+      - AUTHENTICATION
+      summary: User Login
+      description: Returns the user credentials
+      requestBody:
+        content:
+          application/json:
+            schema: LoginReqSchema
+        description: Login request with ngc_api_key
+        required: true
+      responses:
+        201:
+          description: Retuned the new Dataset
+          content:
+            application/json:
+              schema: LoginRspSchema
+        401:
+          description: Unauthorized
+          content:
+            application/json:
+              schema: ErrorRspSchema
+    """
+    schema = LoginReqSchema()
+    request_dict = schema.dump(schema.load(request.get_json(force=True)))
+    key = request_dict.get('ngc_api_key', 'invalid_key')
+    creds, err = credentials.get_from_ngc(key)
+    if err:
+        print("Unauthorized: " + err, flush=True)
+        metadata = {"error_desc": "Unauthorized: " + err, "error_code": 1}
+        schema = ErrorRspSchema()
+        return make_response(jsonify(schema.dump(schema.load(metadata))), 401)
+    schema = LoginRspSchema()
+    schema_dict = schema.dump(schema.load(creds))
+    return make_response(jsonify(schema_dict), 201)
+
+
+# Internal endpoint for ingress controller to check authentication
+@app.route('/api/v1/auth', methods=['GET'])
+def auth():
+    """authentication endpoint"""
+    # retrieve jwt from headers
+    token = ''
+    url = request.headers.get('X-Original-Url', '')
+    print('URL: ' + str(url), flush=True)
+    authorization = request.headers.get('Authorization', '')
+    authorization_parts = authorization.split()
+    if len(authorization_parts) == 2 and authorization_parts[0].lower() == 'bearer':
+        token = authorization_parts[1]
+    print('Token: ...' + str(token)[-10:], flush=True)
+    # authentication
+    user_id, err = authentication.validate(token)
+    if err:
+        print("Unauthorized: " + str(err), flush=True)
+        metadata = {"error_desc": str(err), "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 401)
+        return response
+
+    # access control
+    err = access_control.validate(url, user_id)
+    if err:
+        print("Forbidden: " + str(err), flush=True)
+        metadata = {"error_desc": str(err), "error_code": 2}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 403)
+        return response
+    return make_response(jsonify({'user_id': user_id}), 200)
+
+
 #
 # DATASET API
 #
@@ -221,6 +367,9 @@ class DatasetActions(Schema):
 
     job = fields.UUID(allow_none=True)
     actions = fields.List(fields.Str())
+    specs = fields.Raw()
+    parent_id = fields.UUID(allow_none=True)
+    parent_job_type = fields.Str(allow_none=True)
 
 
 class DatasetTypeEnum(Enum):
@@ -241,6 +390,8 @@ class DatasetTypeEnum(Enum):
     ocrnet = 'ocrnet'
     optical_inspection = 'optical_inspection'
     re_identification = 're_identification'
+    visual_changenet = 'visual_changenet'
+    centerpose = 'centerpose'
 
 
 class DatasetFormatEnum(Enum):
@@ -256,6 +407,8 @@ class DatasetFormatEnum(Enum):
     default = 'default'
     custom = 'custom'
     classification_pyt = 'classification_pyt'
+    visual_changenet_segment = 'visual_changenet_segment'
+    visual_changenet_classify = 'visual_changenet_classify'
 
 
 class DatasetReqSchema(Schema):
@@ -267,10 +420,12 @@ class DatasetReqSchema(Schema):
         ordered = True
     name = fields.Str()
     description = fields.Str()
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
     version = fields.Str()
     logo = fields.URL()
     type = EnumField(DatasetTypeEnum)
     format = EnumField(DatasetFormatEnum)
+    pull = fields.URL()
 
 
 class DatasetJobResultCategoriesSchema(Schema):
@@ -323,10 +478,12 @@ class DatasetRspSchema(Schema):
     last_modified = fields.DateTime()
     name = fields.Str()
     description = fields.Str()
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
     version = fields.Str()
     logo = fields.URL(allow_none=True)
     type = EnumField(DatasetTypeEnum)
     format = EnumField(DatasetFormatEnum)
+    pull = fields.URL(allow_none=True)
     actions = fields.List(fields.Str())
     jobs = fields.List(fields.Nested(DatasetJobSchema))
 
@@ -411,7 +568,10 @@ def dataset_list(user_id):
     """
     message = validate_uuid(user_id=user_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     datasets = app_handler.list_datasets(user_id)
     filtered_datasets = filtering.apply(request.args, datasets)
     paginated_datasets = pagination.apply(request.args, filtered_datasets)
@@ -461,7 +621,10 @@ def dataset_retrieve(user_id, dataset_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.retrieve_dataset(user_id, dataset_id)
     # Get schema
@@ -518,7 +681,10 @@ def dataset_delete(user_id, dataset_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.delete_dataset(user_id, dataset_id)
     # Get schema
@@ -569,8 +735,12 @@ def dataset_create(user_id):
     """
     message = validate_uuid(user_id=user_id)
     if message:
-        return make_response(jsonify(message), 400)
-    request_dict = request.get_json(force=True)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    schema = DatasetReqSchema()
+    request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
     response = app_handler.create_dataset(user_id, request_dict)
     # Get schema
@@ -633,8 +803,12 @@ def dataset_update(user_id, dataset_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
-    request_dict = request.get_json(force=True)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    schema = DatasetReqSchema()
+    request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
     response = app_handler.update_dataset(user_id, dataset_id, request_dict)
     # Get schema
@@ -697,8 +871,12 @@ def dataset_partial_update(user_id, dataset_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
-    request_dict = request.get_json(force=True)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    schema = DatasetReqSchema()
+    request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
     response = app_handler.update_dataset(user_id, dataset_id, request_dict)
     # Get schema
@@ -737,14 +915,25 @@ def dataset_upload(user_id, dataset_id):
           type: string
           format: uuid
       requestBody:
+        description: Data file to upload (a tar.gz file)
         content:
           multipart/form-data:
-            schema: DatasetUploadSchema
-        description: Data file to upload (a tar.gz file)
+            schema:
+              type: object
+              properties:
+                data:
+                  type: string
+                  format: binary
+            encoding:
+              data:
+                contentType: application/gzip
         required: true
       responses:
         201:
           description: Upload sucessful
+          content:
+            application/json:
+              schema: DatasetUploadSchema
         400:
           description: Bad request, see reply body for details
           content:
@@ -758,14 +947,17 @@ def dataset_upload(user_id, dataset_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     file_tgz = request.files.get("file", None)
     # Get response
     print("Triggering API call to upload data to server", file=sys.stderr)
     response = app_handler.upload_dataset(user_id, dataset_id, file_tgz)
     print("API call to upload data to server complete", file=sys.stderr)
     # Get schema
-    schema = None
+    schema_dict = None
     if response.code == 201:
         schema = DatasetUploadSchema()
         print("Returning success response", file=sys.stderr)
@@ -822,7 +1014,10 @@ def dataset_specs_schema(user_id, dataset_id, action):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.get_spec_schema(user_id, dataset_id, action, "dataset")
     # Get schema
@@ -880,7 +1075,10 @@ def dataset_specs_retrieve(user_id, dataset_id, action):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.get_spec(user_id, dataset_id, action, "dataset")
     # Get schema
@@ -950,7 +1148,10 @@ def dataset_specs_save(user_id, dataset_id, action):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     request_dict = request.get_json(force=True)
     # Get response
     response = app_handler.save_spec(user_id, dataset_id, action, request_dict, "dataset")
@@ -1021,7 +1222,10 @@ def dataset_specs_update(user_id, dataset_id, action):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     request_dict = request.get_json(force=True)
     # Get response
     response = app_handler.update_spec(user_id, dataset_id, action, request_dict, "dataset")
@@ -1082,19 +1286,32 @@ def dataset_job_run(user_id, dataset_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     request_data = request.get_json(force=True).copy()
-    request_schema_data = DatasetActions().load(request_data)
+    schema = DatasetActions()
+    request_schema_data = schema.dump(schema.load(request_data))
     requested_job = request_schema_data.get('job', None)
     if requested_job:
         requested_job = str(requested_job)
+    parent_handler_id = request_schema_data.get('parent_id', None)
+    if parent_handler_id:
+        parent_handler_id = str(parent_handler_id)
+    parent_job_type = request_schema_data.get('parent_job_type', None)
     requested_actions = request_schema_data.get('actions', [])
+    specs = request_schema_data.get('specs', {})
     # Get response
-    response = app_handler.job_run(user_id, dataset_id, requested_job, requested_actions, "dataset")
+    response = app_handler.job_run(user_id, dataset_id, parent_handler_id, requested_job, requested_actions, "dataset", parent_job_type, specs=specs)
     # Get schema
-    schema = None
     if response.code == 201:
-        return make_response(jsonify(response.data), response.code)
+        if isinstance(response.data, list) and all(not validate_uuid(job_id=j) for j in response.data):
+            return make_response(jsonify(response.data), response.code)
+        metadata = {"error_desc": "internal error: invalid job IDs", "error_code": 2}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 500)
+        return response
     schema = ErrorRspSchema()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
@@ -1160,11 +1377,13 @@ def dataset_job_list(user_id, dataset_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_list(user_id, dataset_id, "dataset")
     # Get schema
-    schema = None
     if response.code == 200:
         pagination_total = 0
         metadata = {"jobs": response.data}
@@ -1223,7 +1442,10 @@ def dataset_job_retrieve(user_id, dataset_id, job_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_retrieve(user_id, dataset_id, job_id, "dataset")
     # Get schema
@@ -1279,7 +1501,10 @@ def dataset_job_cancel(user_id, dataset_id, job_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_cancel(user_id, dataset_id, job_id, "dataset")
     # Get schema
@@ -1339,13 +1564,156 @@ def dataset_job_delete(user_id, dataset_id, job_id):
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_delete(user_id, dataset_id, job_id, "dataset")
     # Get schema
     schema = None
     if response.code == 200:
         return make_response(jsonify({}), response.code)
+    schema = ErrorRspSchema()
+    # Load metadata in schema and return
+    schema_dict = schema.dump(schema.load(response.data))
+    return make_response(jsonify(schema_dict), response.code)
+
+
+@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>/list_files', methods=['GET'])
+def dataset_job_files_list(user_id, dataset_id, job_id):
+    """List Job Files.
+    ---
+    get:
+      tags:
+      - DATASET
+      summary: List Job Files
+      description: List the Files produced by a given job
+      parameters:
+      - name: user_id
+        in: path
+        description: User ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: dataset_id
+        in: path
+        description: ID for Dataset
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: job_id
+        in: path
+        description: Job ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        200:
+          description: Returned Job Files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        404:
+          description: User, Dataset or Job not found
+          content:
+            application/json:
+              schema: ErrorRspSchema
+    """
+    message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
+    if message:
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    # Get response
+    retrieve_logs = ast.literal_eval(request.args.get("retrieve_logs", "False"))
+    retrieve_specs = ast.literal_eval(request.args.get("retrieve_specs", "False"))
+    response = app_handler.job_list_files(user_id, dataset_id, job_id, retrieve_logs, retrieve_specs, "dataset")
+    # Get schema
+    if response.code == 200:
+        if isinstance(response.data, list) and (all(isinstance(f, str) for f in response.data) or response.data == []):
+            return make_response(jsonify(response.data), response.code)
+        metadata = {"error_desc": "internal error: file list invalid", "error_code": 2}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 500)
+        return response
+    schema = ErrorRspSchema()
+    # Load metadata in schema and return
+    schema_dict = schema.dump(schema.load(response.data))
+    return make_response(jsonify(schema_dict), response.code)
+
+
+@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>/download_selective_files', methods=['GET'])
+def dataset_job_download_selective_files(user_id, dataset_id, job_id):
+    """Download selective Job Artifacts.
+    ---
+    get:
+      tags:
+      - DATASET
+      summary: Download selective Job Artifacts
+      description: Download selective Artifacts produced by a given job
+      parameters:
+      - name: user_id
+        in: path
+        description: User ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: dataset_id
+        in: path
+        description: ID for Dataset
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: job_id
+        in: path
+        description: Job ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        200:
+          description: Returned Job Artifacts
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        404:
+          description: User, Dataset or Job not found
+          content:
+            application/json:
+              schema: ErrorRspSchema
+    """
+    message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
+    if message:
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    file_lists = request.args.getlist('file_lists')
+    tar_files = ast.literal_eval(request.args.get('tar_files', "True"))
+    if not file_lists:
+        return make_response(jsonify("No files passed in list format to download or"), 400)
+    # Get response
+    response = app_handler.job_download(user_id, dataset_id, job_id, "dataset", file_lists=file_lists, tar_files=tar_files)
+    # Get schema
+    schema = None
+    if response.code == 200:
+        file_path = response.data  # Response is assumed to have the file path
+        file_dir = "/".join(file_path.split("/")[:-1])
+        file_name = file_path.split("/")[-1]  # infer the name
+        return send_from_directory(file_dir, file_name, as_attachment=True)
     schema = ErrorRspSchema()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
@@ -1392,14 +1760,17 @@ def dataset_job_download(user_id, dataset_id, job_id):
                 type: string
                 format: binary
         404:
-          description: User, Model or Job not found
+          description: User, Dataset or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_download(user_id, dataset_id, job_id, "dataset")
     # Get schema
@@ -1423,6 +1794,17 @@ class ModelActions(Schema):
 
     job = fields.UUID(allow_none=True)
     actions = fields.List(fields.Str())
+    specs = fields.Raw()
+    parent_id = fields.UUID(allow_none=True)
+    parent_job_type = fields.Str(allow_none=True)
+
+
+class CheckpointChooseMethodEnum(Enum):
+    """Class defining enum for methods of picking a trained checkpoint"""
+
+    latest_model = 'latest_model'
+    best_model = 'best_model'
+    from_epoch_number = 'from_epoch_number'
 
 
 class ModelNetworkArchEnum(Enum):
@@ -1463,6 +1845,8 @@ class ModelNetworkArchEnum(Enum):
     deformable_detr = 'deformable_detr'
     dino = 'dino'
     segformer = 'segformer'
+    visual_changenet = 'visual_changenet'
+    centerpose = 'centerpose'
     # Data analytics networks
     annotations = "annotations"
     analytics = "analytics"
@@ -1483,7 +1867,10 @@ class ModelReqSchema(Schema):
     logo = fields.URL()
     ngc_path = fields.Str()
     additional_id_info = fields.Str()
-    encryption_key = fields.Str(required=True)
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
+    checkpoint_choose_method = EnumField(CheckpointChooseMethodEnum)
+    checkpoint_epoch_number = fields.Dict(keys=fields.Str(allow_none=True), values=fields.Int(allow_none=True))
+    encryption_key = fields.Str()
     network_arch = EnumField(ModelNetworkArchEnum)
     ptm = fields.List(fields.UUID())
     eval_dataset = fields.UUID()
@@ -1492,6 +1879,16 @@ class ModelReqSchema(Schema):
     train_datasets = fields.List(fields.UUID())
     read_only = fields.Bool()
     public = fields.Bool()
+    automl_enabled = fields.Bool(allow_none=True)
+    automl_algorithm = fields.Str(allow_none=True)
+    automl_max_recommendations = fields.Int(allow_none=True)
+    automl_delete_intermediate_ckpt = fields.Bool(allow_none=True)
+    automl_R = fields.Int(allow_none=True)
+    automl_nu = fields.Int(allow_none=True)
+    metric = fields.Str(allow_none=True)
+    epoch_multiplier = fields.Int(allow_none=True)
+    automl_add_hyperparameters = fields.Str(allow_none=True)
+    automl_remove_hyperparameters = fields.Str(allow_none=True)
 
 
 class ModelJobSchema(Schema):
@@ -1526,6 +1923,9 @@ class ModelRspSchema(Schema):
     logo = fields.URL(allow_none=True)
     ngc_path = fields.Str(allow_none=True)
     additional_id_info = fields.Str(allow_none=True)
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
+    checkpoint_choose_method = EnumField(CheckpointChooseMethodEnum)
+    checkpoint_epoch_number = fields.Dict(keys=fields.Str(allow_none=True), values=fields.Int(allow_none=True))
     encryption_key = fields.Str()
     network_arch = EnumField(ModelNetworkArchEnum)
     ptm = fields.List(fields.UUID())
@@ -1637,7 +2037,10 @@ def model_list(user_id):
     """
     message = validate_uuid(user_id=user_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     models = app_handler.list_models(user_id)
     filtered_models = filtering.apply(request.args, models)
     paginated_models = pagination.apply(request.args, filtered_models)
@@ -1687,7 +2090,10 @@ def model_retrieve(user_id, model_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.retrieve_model(user_id, model_id)
     # Get schema
@@ -1739,7 +2145,10 @@ def model_delete(user_id, model_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.delete_model(user_id, model_id)
     # Get schema
@@ -1790,8 +2199,12 @@ def model_create(user_id):
     """
     message = validate_uuid(user_id=user_id)
     if message:
-        return make_response(jsonify(message), 400)
-    request_dict = request.get_json(force=True)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    schema = ModelReqSchema()
+    request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
     response = app_handler.create_model(user_id, request_dict)
     # Get schema
@@ -1854,8 +2267,12 @@ def model_update(user_id, model_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
-    request_dict = request.get_json(force=True)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    schema = ModelReqSchema()
+    request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
     response = app_handler.update_model(user_id, model_id, request_dict)
     # Get schema
@@ -1918,8 +2335,12 @@ def model_partial_update(user_id, model_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
-    request_dict = request.get_json(force=True)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    schema = ModelReqSchema()
+    request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
     response = app_handler.update_model(user_id, model_id, request_dict)
     # Get schema
@@ -1928,6 +2349,62 @@ def model_partial_update(user_id, model_id):
         schema = ModelRspSchema()
     else:
         schema = ErrorRspSchema()
+    # Load metadata in schema and return
+    schema_dict = schema.dump(schema.load(response.data))
+    return make_response(jsonify(schema_dict), response.code)
+
+
+@app.route('/api/v1/user/<user_id>/specs/<action>/schema', methods=['GET'])
+def specs_schema_without_handler_id(user_id, action):
+    """Retrieve Specs schema.
+    ---
+    get:
+      summary: Retrieve Specs schema without model or dataset id
+      description: Returns the Specs schema for a given action
+      parameters:
+      - name: user_id
+        in: path
+        description: User ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: action
+        in: path
+        description: Action name
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          description: Returned the Specs schema for given action and network
+          content:
+            application/json:
+              schema:
+                type: object
+        404:
+          description: Dataset or Action not found
+          content:
+            application/json:
+              schema: ErrorRspSchema
+    """
+    message = validate_uuid(user_id=user_id)
+    if message:
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    # Get response
+    network = request.args.get('network')
+    format = request.args.get('format')
+    train_datasets = request.args.getlist('train_datasets')
+
+    response = app_handler.get_spec_schema_without_handler_id(network, format, action, train_datasets)
+    # Get schema
+    schema = None
+    if response.code == 200:
+        return make_response(jsonify(response.data), response.code)
+    schema = ErrorRspSchema()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
     return make_response(jsonify(schema_dict), response.code)
@@ -1978,7 +2455,10 @@ def model_specs_schema(user_id, model_id, action):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.get_spec_schema(user_id, model_id, action, "model")
     # Get schema
@@ -2036,7 +2516,10 @@ def model_specs_retrieve(user_id, model_id, action):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.get_spec(user_id, model_id, action, "model")
     # Get schema
@@ -2106,7 +2589,10 @@ def model_specs_save(user_id, model_id, action):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     request_dict = request.get_json(force=True)
     # Get response
     response = app_handler.save_spec(user_id, model_id, action, request_dict, "model")
@@ -2177,7 +2663,10 @@ def model_specs_update(user_id, model_id, action):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     request_dict = request.get_json(force=True)
     # Get response
     response = app_handler.save_spec(user_id, model_id, action, request_dict, "model")
@@ -2238,19 +2727,33 @@ def model_job_run(user_id, model_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     request_data = request.get_json(force=True).copy()
-    request_schema_data = ModelActions().load(request_data)
+    schema = ModelActions()
+    request_schema_data = schema.dump(schema.load(request_data))
     requested_job = request_schema_data.get('job', None)
     if requested_job:
         requested_job = str(requested_job)
+    parent_handler_id = request_schema_data.get('parent_id', None)
+    if parent_handler_id:
+        parent_handler_id = str(parent_handler_id)
+    parent_job_type = request_schema_data.get('parent_job_type', None)
     requested_actions = request_schema_data.get('actions', [])
+    specs = request_schema_data.get('specs', {})
     # Get response
-    response = app_handler.job_run(user_id, model_id, requested_job, requested_actions, "model")
+    response = app_handler.job_run(user_id, model_id, parent_handler_id, requested_job, requested_actions, "model", parent_job_type, specs=specs)
     # Get schema
     schema = None
     if response.code == 201:
-        return make_response(jsonify(response.data), response.code)
+        if isinstance(response.data, list) and all(not validate_uuid(job_id=j) for j in response.data):
+            return make_response(jsonify(response.data), response.code)
+        metadata = {"error_desc": "internal error: invalid job IDs", "error_code": 2}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 500)
+        return response
     schema = ErrorRspSchema()
     # Load metadata in schema and return
     schema_dict = schema.dump(schema.load(response.data))
@@ -2316,7 +2819,10 @@ def model_job_list(user_id, model_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_list(user_id, model_id, "model")
     # Get schema
@@ -2379,7 +2885,10 @@ def model_job_retrieve(user_id, model_id, job_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_retrieve(user_id, model_id, job_id, "model")
     # Get schema
@@ -2435,11 +2944,13 @@ def model_job_cancel(user_id, model_id, job_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_cancel(user_id, model_id, job_id, "model")
     # Get schema
-    schema = None
     if response.code == 200:
         return make_response(jsonify({}), response.code)
     schema = ErrorRspSchema()
@@ -2450,13 +2961,13 @@ def model_job_cancel(user_id, model_id, job_id):
 
 @app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>', methods=['DELETE'])
 def model_job_delete(user_id, model_id, job_id):
-    """Cancel Model Job (or pause training).
+    """Delete Model Job.
     ---
     post:
       tags:
       - MODEL
-      summary: Cancel Model Job or pause training
-      description: Cancel Model Job or pause training
+      summary: Delete Model Job
+      description: Delete Model Job
       parameters:
       - name: user_id
         in: path
@@ -2481,7 +2992,7 @@ def model_job_delete(user_id, model_id, job_id):
           format: uuid
       responses:
         200:
-          description: Successfully requested cancelation or training pause of specified Job ID (asynchronous)
+          description: Successfully requested deletion of specified Job ID
         404:
           description: User, Model or Job not found
           content:
@@ -2490,7 +3001,10 @@ def model_job_delete(user_id, model_id, job_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_delete(user_id, model_id, job_id, "model")
     # Get schema
@@ -2545,9 +3059,19 @@ def model_job_resume(user_id, model_id, job_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    request_data = request.get_json(force=True).copy()
+    schema = ModelActions()
+    request_schema_data = schema.dump(schema.load(request_data))
+    requested_job = request_schema_data.get('job', None)
+    if requested_job:
+        requested_job = str(requested_job)
+    specs = request_schema_data.get('specs', {})
     # Get response
-    response = app_handler.resume_model_job(user_id, model_id, job_id, "model")
+    response = app_handler.resume_model_job(user_id, model_id, job_id, "model", specs=specs)
     # Get schema
     schema = None
     if response.code == 200:
@@ -2605,9 +3129,154 @@ def model_job_download(user_id, model_id, job_id):
     """
     message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
     response = app_handler.job_download(user_id, model_id, job_id, "model")
+    # Get schema
+    schema = None
+    if response.code == 200:
+        file_path = response.data  # Response is assumed to have the file path
+        file_dir = "/".join(file_path.split("/")[:-1])
+        file_name = file_path.split("/")[-1]  # infer the name
+        return send_from_directory(file_dir, file_name, as_attachment=True)
+    schema = ErrorRspSchema()
+    # Load metadata in schema and return
+    schema_dict = schema.dump(schema.load(response.data))
+    return make_response(jsonify(schema_dict), response.code)
+
+
+@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>/list_files', methods=['GET'])
+def model_job_files_list(user_id, model_id, job_id):
+    """List Job Files.
+    ---
+    get:
+      tags:
+      - MODEL
+      summary: List Job Files
+      description: List the Files produced by a given job
+      parameters:
+      - name: user_id
+        in: path
+        description: User ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: model_id
+        in: path
+        description: ID of Model
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: job_id
+        in: path
+        description: Job ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        200:
+          description: Returned Job Files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        404:
+          description: User, Model or Job not found
+          content:
+            application/json:
+              schema: ErrorRspSchema
+    """
+    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    if message:
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    # Get response
+    retrieve_logs = ast.literal_eval(request.args.get("retrieve_logs", "False"))
+    retrieve_specs = ast.literal_eval(request.args.get("retrieve_specs", "False"))
+    response = app_handler.job_list_files(user_id, model_id, job_id, retrieve_logs, retrieve_specs, "model")
+    # Get schema
+    if response.code == 200:
+        if isinstance(response.data, list) and (all(isinstance(f, str) for f in response.data) or response.data == []):
+            return make_response(jsonify(response.data), response.code)
+        metadata = {"error_desc": "internal error: file list invalid", "error_code": 2}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 500)
+        return response
+    schema = ErrorRspSchema()
+    # Load metadata in schema and return
+    schema_dict = schema.dump(schema.load(response.data))
+    return make_response(jsonify(schema_dict), response.code)
+
+
+@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>/download_selective_files', methods=['GET'])
+def model_job_download_selective_files(user_id, model_id, job_id):
+    """Download selective Job Artifacts.
+    ---
+    get:
+      tags:
+      - MODEL
+      summary: Download selective Job Artifacts
+      description: Download selective Artifacts produced by a given job
+      parameters:
+      - name: user_id
+        in: path
+        description: User ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: model_id
+        in: path
+        description: ID of Model
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: job_id
+        in: path
+        description: Job ID
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        200:
+          description: Returned Job Artifacts
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        404:
+          description: User, Model or Job not found
+          content:
+            application/json:
+              schema: ErrorRspSchema
+    """
+    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    if message:
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
+    file_lists = request.args.getlist('file_lists')
+    best_model = ast.literal_eval(request.args.get('best_model', "False"))
+    latest_model = ast.literal_eval(request.args.get('latest_model', "False"))
+    tar_files = ast.literal_eval(request.args.get('tar_files', "True"))
+    if not (file_lists or best_model or latest_model):
+        return make_response(jsonify("No files passed in list format to download or, best_model or latest_model is not enabled"), 400)
+    # Get response
+    response = app_handler.job_download(user_id, model_id, job_id, "model", file_lists=file_lists, best_model=best_model, latest_model=latest_model, tar_files=tar_files)
     # Get schema
     schema = None
     if response.code == 200:
@@ -2654,7 +3323,7 @@ def readiness():
 @app.route('/', methods=['GET'])
 def root():
     """api root endpoint"""
-    return make_response(jsonify(['api', 'openapi.yaml', 'openapi.json', 'redoc', 'swagger']))
+    return make_response(jsonify(['api', 'openapi.yaml', 'openapi.json', 'redoc', 'swagger', 'tao_api_notebooks.zip']))
 
 
 @app.route('/api', methods=['GET'])
@@ -2673,7 +3342,8 @@ def version_v1():
 def user_list():
     """user list endpoint"""
     error = {"error_desc": "Listing users is not authorized: Missing User ID", "error_code": 1}
-    return make_response(jsonify(ErrorRspSchema().dump(error)), 403)
+    schema = ErrorRspSchema()
+    return make_response(jsonify(schema.dump(schema.load(error))), 403)
 
 
 @app.route('/api/v1/user/<user_id>', methods=['GET'])
@@ -2681,33 +3351,11 @@ def user(user_id):
     """user endpoint"""
     message = validate_uuid(user_id=user_id)
     if message:
-        return make_response(jsonify(message), 400)
+        metadata = {"error_desc": message, "error_code": 1}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     return make_response(jsonify(['dataset', 'model']))
-
-
-@app.route('/api/v1/auth', methods=['GET'])
-def auth():
-    """authentication endpoint"""
-    # retrieve jwt from headers
-    token = ''
-    url = request.headers.get('X-Original-Url', '')
-    print('URL: ' + str(url), flush=True)
-    authorization = request.headers.get('Authorization', '')
-    authorization_parts = authorization.split()
-    if len(authorization_parts) == 2 and authorization_parts[0].lower() == 'bearer':
-        token = authorization_parts[1]
-    print('Token: ...' + str(token)[-10:], flush=True)
-    # authentication
-    user_id, err = authentication.validate(token)
-    if err:
-        print("Unauthorized: " + err, flush=True)
-        return make_response(jsonify({}), 401)
-    # access control
-    err = access_control.validate(url, user_id)
-    if err:
-        print("Forbidden: " + err, flush=True)
-        return make_response(jsonify({}), 403)
-    return make_response(jsonify({'user_id': user_id}), 200)
 
 
 @app.route('/openapi.yaml', methods=['GET'])
@@ -2721,7 +3369,7 @@ def openapi_yaml():
 @app.route('/openapi.json', methods=['GET'])
 def openapi_json():
     """openapi_json endpoint"""
-    r = make_response(json.dumps(spec.to_dict(), indent=2))
+    r = make_response(jsonify(spec.to_dict()))
     r.mimetype = 'application/json'
     return r
 
@@ -2738,14 +3386,18 @@ def swagger():
     return render_template('swagger.html')
 
 
-@app.route('/api/v1/login/<key>', methods=['GET'])
-def login(key):
-    """Login endpoint"""
-    creds, err = credentials.get_from_ngc(key)
-    if err:
-        print("Unauthorized: " + err, flush=True)
-        return make_response(jsonify({}), 401)
-    return make_response(jsonify(creds), 200)
+@app.route('/tao_api_notebooks.zip', methods=['GET'])
+def download_folder():
+    """Download notebooks endpoint"""
+    # Create a temporary zip file containing the folder
+    shutil.make_archive("/tmp/tao_api_notebooks", 'zip', "notebooks/")
+
+    # Send the zip file for download
+    return send_file(
+        "/tmp/tao_api_notebooks.zip",
+        as_attachment=True,
+        download_name="tao_api_notebooks.zip"
+    )
 
 
 #
@@ -2788,6 +3440,7 @@ with app.test_request_context():
     spec.path(view=model_job_delete)
     spec.path(view=model_job_resume)
     spec.path(view=model_job_download)
+
 
 if __name__ == '__main__':
     # app.run(host='0.0.0.0', port=8000)

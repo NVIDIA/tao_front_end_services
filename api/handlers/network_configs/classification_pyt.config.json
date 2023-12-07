@@ -3,7 +3,7 @@
         "dataset_type":"image_classification",
         "actions": ["train","evaluate","export","gen_trt_engine","inference"],
         "formats":["default"],
-        "image":"tlt-pytorch",
+        "image":"tlt-pytorch-114",
         "spec_backend":"yaml",
         "classwise":"False",
         "chaining_rules":"cvaction",
@@ -38,7 +38,7 @@
     "spec_params":{
         "train": {
             "train.num_gpus": "from_csv",
-            "model.init_cfg.checkpoint":"ptm",
+            "model.backbone.pretrained":"ptm_if_no_resume_model",
             "train.train_config.resume_training_checkpoint_path":"resume_model",
             "results_dir":"output_dir"
         },
@@ -65,7 +65,7 @@
 
     "automl_spec_params":{
         "train.num_gpus":"from_csv",
-        "model.init_cfg.checkpoint":"automl_assign_ptm",
+        "model.backbone.pretrained":"automl_assign_ptm",
         "train.train_config.resume_training_checkpoint_path":"automl_resume_model",
         "train.train_config.checkpoint_config.interval":"assign_const_value,train.train_config.runner.max_epochs",
         "train.train_config.evaluation.interval":"assign_const_value,train.train_config.runner.max_epochs,train.train_config.checkpoint_config.interval",

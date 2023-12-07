@@ -6,6 +6,7 @@ if [ -f /usr/local/share/ca-certificates/my-cert.crt ]; then
   echo -e "\n# MY-CERT" >> /opt/ngccli/ngc-cli/certifi/cacert.pem
   cat /usr/local/share/ca-certificates/my-cert.crt >> /opt/ngccli/ngc-cli/certifi/cacert.pem
 fi
-cp -r shared/* /shared/ && chmod -R 777 /shared/users
+rm -rf /shared/users/00000000-0000-0000-0000-000000000000/*
+cp -r shared/* /shared/ ; chmod 777 /shared/users ; chmod -R 777 /shared/users/00000000-0000-0000-0000-000000000000 2>/dev/null ; true
 service nginx start
 /venv/bin/uwsgi --ini uwsgi.ini

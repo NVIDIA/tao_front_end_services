@@ -25,12 +25,14 @@ from handlers.automl_handler import AutoMLHandler
 
 from handlers import stateless_handlers
 from handlers.stateless_handlers import check_read_access, check_write_access
-from handlers.utilities import Code, read_network_config, run_system_command, download_ptm, VALID_DSTYPES, VALID_NETWORKS, AUTOML_DISABLED_NETWORKS
+from handlers.utilities import Code, read_network_config, run_system_command, download_ptm, download_dataset, VALID_DSTYPES, VALID_NETWORKS, AUTOML_DISABLED_NETWORKS
 from handlers.chaining import create_job_contexts, infer_action_from_job
-from handlers.ds_upload import DS_UPLOAD_TO_FUNCTIONS
+from handlers.ds_upload import _extract_images, write_dir_contents, DS_CHANGE_PERMISSIONS
 from job_utils import executor as jobDriver
 from job_utils.workflow_driver import on_new_job, on_delete_job
 from specs_utils import csv_to_json_schema
+
+from werkzeug.datastructures import FileStorage
 
 
 # Helpers
@@ -47,6 +49,14 @@ def resolve_job_existence(user_id, kind, handler_id, job_id):
     if kind not in ["dataset", "model"]:
         return False
     metadata_path = os.path.join(stateless_handlers.get_root(), user_id, kind + "s", handler_id, "jobs_metadata", job_id + ".json")
+    return os.path.exists(metadata_path)
+
+
+def resolve_parent_job_existence(user_id, parent_kind, parent_handler_id, job_id):
+    """Return whether parent_job_id.json exists in parent_jobs_metadata folder or not"""
+    if parent_kind not in ["dataset", "model"]:
+        return False
+    metadata_path = os.path.join(stateless_handlers.get_root(), user_id, parent_kind + "s", parent_handler_id, "jobs_metadata", job_id + ".json")
     return os.path.exists(metadata_path)
 
 
@@ -264,12 +274,16 @@ class AppHandler:
         # Gather type,format fields from request
         ds_type = request_dict.get("type", None)
         ds_format = request_dict.get("format", None)
+        ds_pull = request_dict.get("pull", None)
         # Perform basic checks - valid type and format?
         if ds_type not in VALID_DSTYPES:
             msg = "Invalid dataset type"
             return Code(400, {}, msg)
         if ds_format not in read_network_config(ds_type)["api_params"]["formats"]:
             msg = "Incompatible dataset format and type"
+            return Code(400, {}, msg)
+        if ds_pull and not ds_pull.startswith("http"):
+            msg = "Invalid pull URL"
             return Code(400, {}, msg)
 
         if request_dict.get("public", False):
@@ -283,13 +297,20 @@ class AppHandler:
                     "name": request_dict.get("name", "My Dataset"),
                     "description": request_dict.get("description", "My TAO Dataset"),
                     "version": request_dict.get("version", "1.0.0"),
+                    "docker_env_vars": request_dict.get("docker_env_vars", {}),
                     "logo": request_dict.get("logo", "https://www.nvidia.com"),
                     "type": ds_type,
                     "format": ds_format,
-                    "actions": dataset_actions
+                    "actions": dataset_actions,
+                    "pull": ds_pull
                     }
         stateless_handlers.make_root_dirs(user_id, "datasets", dataset_id)
         write_handler_metadata(user_id, "dataset", dataset_id, metadata)
+
+        # Pull dataset in background if known URL
+        if ds_pull:
+            job_run_thread = threading.Thread(target=AppHandler.pull_dataset, args=(user_id, dataset_id,))
+            job_run_thread.start()
 
         # Read this metadata from saved file...
         return_metadata = resolve_metadata_with_jobs(user_id, "dataset", dataset_id)
@@ -330,7 +351,7 @@ class AppHandler:
                     msg = f"Cannot change dataset {key}"
                     return Code(400, {}, msg)
 
-            if key in ["name", "description", "version", "logo"]:
+            if key in ["name", "description", "version", "logo", "docker_env_vars"]:
                 requested_value = request_dict[key]
                 if requested_value is not None:
                     metadata[key] = requested_value
@@ -384,7 +405,7 @@ class AppHandler:
         for metadata_file in metadata_files:
             metadata = load_metadata_json(metadata_file)
             train_datasets = metadata.get("train_datasets", [])
-            if type(train_datasets) != list:
+            if type(train_datasets) is not list:
                 train_datasets = [train_datasets]
             if dataset_id in metadata.get("train_datasets", []) + \
                 [metadata.get("eval_dataset", None),
@@ -431,14 +452,40 @@ class AppHandler:
         if not check_write_access(user_id, dataset_id):
             return Code(404, {}, "Dataset not available")
         # Save tar file at the dataset root
-        tar_path = os.path.join(stateless_handlers.get_handler_root(dataset_id), "data.tar.gz")
+        tar_path = os.path.join(stateless_handlers.get_handler_root(dataset_id), "data.tar")
         file_tgz.save(tar_path)
 
         metadata = resolve_metadata(user_id, "dataset", dataset_id)
         print("Uploading dataset to server", file=sys.stderr)
-        return_Code = DS_UPLOAD_TO_FUNCTIONS[metadata.get("type")](tar_path, metadata)
-        print("Uploading complete", file=sys.stderr)
-        return return_Code
+
+        print("Extracting images from data tarball file", file=sys.stderr)
+        root = stateless_handlers.get_handler_root(metadata.get("id"))
+        _extract_images(tar_path, root)
+        if metadata.get("type") == "semantic_segmentation":
+            write_dir_contents(os.path.join(root, "images"), os.path.join(root, "images.txt"))
+            if metadata.get("format") == "unet":
+                write_dir_contents(os.path.join(root, "masks"), os.path.join(root, "masks.txt"))
+        print("Extraction complete", file=sys.stderr)
+
+        if metadata.get("type", "") in DS_CHANGE_PERMISSIONS.keys():
+            print("Changing permissions of necessary files", file=sys.stderr)
+            permissions_changed = DS_CHANGE_PERMISSIONS[metadata.get("type")](metadata)
+            print("Permission changes complete", file=sys.stderr)
+            if not permissions_changed:
+                return Code(400, {}, "Error while changing permissions of dataset files")
+
+        return Code(201, {}, "Upload successful")
+
+    @staticmethod
+    def pull_dataset(user_id, dataset_id):
+        """
+        user_id: str, uuid
+        dataset_id: str, uuid
+        """
+        file_path = download_dataset(dataset_id)
+        with open(file_path, 'rb') as f:
+            file_tgz = FileStorage(f)
+            AppHandler.upload_dataset(user_id, dataset_id, file_tgz)
 
     # Spec API
 
@@ -489,6 +536,52 @@ class AppHandler:
             # For each train dataset for the model
             metadata = resolve_metadata(user_id, kind, handler_id)
             for train_ds in metadata.get("train_datasets", []):
+                # Obtain class list from classes.json
+                classes_json = os.path.join(stateless_handlers.get_handler_root(train_ds), "classes.json")
+                if not os.path.exists(classes_json):
+                    continue
+                with open(classes_json, "r", encoding='utf-8') as f:
+                    inferred_class_names += json.loads(f.read())  # It is a list
+            inferred_class_names = list(set(inferred_class_names))
+        json_schema = csv_to_json_schema.convert(CSV_PATH, inferred_class_names)
+        return Code(200, json_schema, "Schema retrieved")
+
+    @staticmethod
+    def get_spec_schema_without_handler_id(network, format, action, train_datasets):
+        """
+        network: str, valid network architecture name supported
+        format: str, valid format of the architecture if necessary
+        action: str, a valid Action for a dataset
+        train_datasets: list, list of uuid's of train dataset id's
+        Returns:
+        Code object
+        - 200 with spec in a json-schema format
+        - 404 if model/dataset not found / user cannot access
+        """
+        # Action not available
+        if not network:
+            return Code(404, {}, "Pass network name to the request")
+        if not action:
+            return Code(404, {}, "Pass action name to the request")
+
+        # Read csv from spec_utils/specs/<network_name>/action.csv
+        # Convert to json schema
+        json_schema = {}
+        DIR_PATH = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+        # Try regular format for CSV_PATH => "<network> - <action>.csv"
+        CSV_PATH = os.path.join(DIR_PATH, "specs_utils", "specs", network, f"{network} - {action}.csv")
+        if not os.path.exists(CSV_PATH):
+            # Try secondary format for CSV_PATH => "<network> - <action>__<dataset-format>.csv"
+            CSV_PATH = os.path.join(DIR_PATH, "specs_utils", "specs", network, f"{network} - {action}__{format}.csv")
+            if not os.path.exists(CSV_PATH):
+                Code(404, {}, "Default specs do not exist for action")
+
+        inferred_class_names = []
+        # If class-wise config is applicable
+        if read_network_config(network)["api_params"]["classwise"] == "True":
+            # For each train dataset for the model
+            for train_ds in train_datasets:
                 # Obtain class list from classes.json
                 classes_json = os.path.join(stateless_handlers.get_handler_root(train_ds), "classes.json")
                 if not os.path.exists(classes_json):
@@ -646,7 +739,7 @@ class AppHandler:
     # Job API
 
     @staticmethod
-    def job_run(user_id, handler_id, parent_job_id, actions, kind):
+    def job_run(user_id, handler_id, parent_handler_id, parent_job_id, actions, kind, parent_kind, specs=None):
         """
         user_id: str, uuid
         handler_id: str, uuid corresponding to model/dataset
@@ -664,7 +757,7 @@ class AppHandler:
             return Code(404, [], f"{kind} not found")
 
         if parent_job_id:
-            if not resolve_job_existence(user_id, kind, handler_id, parent_job_id):
+            if not resolve_parent_job_existence(user_id, parent_kind, parent_handler_id, parent_job_id):
                 return Code(404, [], "job not found")
 
         if len(actions) == 0:
@@ -677,15 +770,13 @@ class AppHandler:
             for ptm_id in ptm_ids:
                 if ptm_id:
                     if stateless_handlers.get_handler_metadata(ptm_id).get("ngc_path", None):
-                        download_ptm(ptm_id)
-                        # job_run_thread = threading.Thread(target=download_ptm,args=(ptm_id,))
-                        # job_run_thread.start()
+                        download_ptm(ptm_id)  # Don't thread download_ptm as the job can start before the PTM is downloaded which will cause issues
 
         if is_request_automl(user_id, handler_id, parent_job_id, actions, kind):
             return AutoMLHandler.start(user_id, handler_id, handler_metadata)
         try:
             job_ids = [str(uuid.uuid4()) for i in actions]
-            job_contexts = create_job_contexts(parent_job_id, actions, job_ids, handler_id)
+            job_contexts = create_job_contexts(parent_job_id, actions, job_ids, handler_id, specs=specs)
             on_new_job(job_contexts)
             return Code(201, job_ids, "Jobs scheduled")
         except:
@@ -829,7 +920,7 @@ class AppHandler:
 
     # Download model job
     @staticmethod
-    def job_download(user_id, handler_id, job_id, kind):
+    def job_download(user_id, handler_id, job_id, kind, file_lists=None, best_model=None, latest_model=None, tar_files=True):
         """
         user_id: str, uuid
         handler_id: str, uuid corresponding to model/dataset
@@ -849,17 +940,80 @@ class AppHandler:
             root = stateless_handlers.get_handler_root(handler_id)
             # Copy job logs from root/logs/<job_id>.txt to root/<job_id>/logs_from_toolkit.txt
             job_log_path = stateless_handlers.get_handler_log_root(handler_id) + f"/{job_id}.txt"
-            if os.path.exists(job_log_path):
-                shutil.copy(job_log_path, stateless_handlers.get_handler_root(handler_id) + f"/{job_id}/logs_from_toolkit.txt")
+            if not (file_lists or best_model or latest_model):  # Copy log file only during full job download
+                if os.path.exists(job_log_path):
+                    shutil.copy(job_log_path, stateless_handlers.get_handler_root(handler_id) + f"/{job_id}/logs_from_toolkit.txt")
             out_tar = os.path.join(root, job_id + ".tar.gz")
-            command = f"cd {root} ; tar -zcvf {job_id}.tar.gz {job_id} ; cd -"
-            run_system_command(command)
-            if os.path.exists(out_tar):
-                return Code(200, out_tar, "job deleted")
+            files = [job_id]
+            if file_lists or best_model or latest_model:
+                files = []
+                if file_lists:
+                    for file in file_lists:
+                        if os.path.exists(os.path.join(root, file)):
+                            files.append(file)
+                handler_metadata = stateless_handlers.get_handler_metadata(handler_id)
+                handler_job_metadata = stateless_handlers.get_handler_job_metadata(handler_id, job_id)
+                action = handler_job_metadata.get("action", "")
+                epoch_number_dictionary = handler_metadata.get("checkpoint_epoch_number", {})
+                best_checkpoint_epoch_number = epoch_number_dictionary.get(f"best_model_{job_id}", 0)
+                latest_checkpoint_epoch_number = epoch_number_dictionary.get(f"latest_model_{job_id}", 0)
+                if (not best_model) and latest_model:
+                    best_checkpoint_epoch_number = latest_checkpoint_epoch_number
+                network = handler_metadata.get("network_arch", "")
+                if network in ("bpnet", "classification_pyt", "detectnet_v2", "fpenet", "pointpillars", "efficientdet_tf1", "faster_rcnn", "mask_rcnn", "segformer", "unet"):
+                    format_epoch_number = str(best_checkpoint_epoch_number)
+                else:
+                    format_epoch_number = f"{best_checkpoint_epoch_number:03}"
+                if best_model or latest_model:
+                    job_root = os.path.join(root, job_id)
+                    if handler_metadata.get("automl_enabled") is True and action == "train":
+                        job_root = os.path.join(job_root, "best_model")
+                    find_trained_tlt = glob.glob(f"{job_root}/*{format_epoch_number}.tlt") + glob.glob(f"{job_root}/train/*{format_epoch_number}.tlt") + glob.glob(f"{job_root}/weights/*{format_epoch_number}.tlt")
+                    find_trained_pth = glob.glob(f"{job_root}/*{format_epoch_number}.pth") + glob.glob(f"{job_root}/train/*{format_epoch_number}.pth") + glob.glob(f"{job_root}/weights/*{format_epoch_number}.pth")
+                    find_trained_hdf5 = glob.glob(f"{job_root}/*{format_epoch_number}.hdf5") + glob.glob(f"{job_root}/train/*{format_epoch_number}.hdf5") + glob.glob(f"{job_root}/weights/*{format_epoch_number}.hdf5")
+                    if find_trained_tlt:
+                        files.append(os.path.relpath(find_trained_tlt[0], root))
+                    if find_trained_pth:
+                        files.append(os.path.relpath(find_trained_pth[0], root))
+                    if find_trained_hdf5:
+                        files.append(os.path.relpath(find_trained_hdf5[0], root))
+                if not files:
+                    return Code(404, None, "Atleast one of the requested files not present")
+            if tar_files or (not tar_files and len(files) > 1) or files == job_id:
+                command = f"cd {root} ; tar -zcvf {job_id}.tar.gz {' '.join(files)} ; cd -"
+                print(command, file=sys.stderr)
+                run_system_command(command)
+                if os.path.exists(out_tar):
+                    return Code(200, out_tar, "job deleted")
+            else:
+                if files and os.path.exists(os.path.join(root, files[0])):
+                    return Code(200, os.path.join(root, files[0]), "job deleted")
             return Code(404, None, "job output not found")
 
         except:
             return Code(404, None, "job output not found")
+
+    @staticmethod
+    def job_list_files(user_id, handler_id, job_id, retrieve_logs, retrieve_specs, kind):
+        """
+        user_id: str, uuid
+        handler_id: str, uuid corresponding to model/dataset
+        job_id: str, uuid corresponding to job to be deleted
+        kind: str, one of ["model","dataset"]
+        Returns:
+        200, list(str) - list of file paths wtih respect to the job
+        404, None if no files are found
+        """
+        if not resolve_existence(user_id, kind, handler_id):
+            return Code(404, [], f"{kind} not found")
+
+        if not check_read_access(user_id, handler_id):
+            return Code(404, [], f"{kind} not found")
+
+        return_metadata = stateless_handlers.get_job_files(handler_id, job_id, retrieve_logs, retrieve_specs)
+        if return_metadata:
+            return Code(200, return_metadata, "Job files retrieved")
+        return Code(200, return_metadata, "No downloadable files for this job is found")
 
     # Model API
     @staticmethod
@@ -914,17 +1068,20 @@ class AppHandler:
                     "network_arch": mdl_nw,
                     "dataset_type": read_network_config(mdl_nw)["api_params"]["dataset_type"],
                     "actions": read_network_config(mdl_nw)["api_params"]["actions"],
+                    "docker_env_vars": request_dict.get("docker_env_vars", {}),
                     "train_datasets": [],
                     "eval_dataset": None,
                     "inference_dataset": None,
                     "additional_id_info": None,
+                    "checkpoint_choose_method": request_dict.get("checkpoint_choose_method", "best_model"),
+                    "checkpoint_epoch_number": request_dict.get("checkpoint_epoch_number", {}),
                     "calibration_dataset": None,
                     "ptm": [],
                     "automl_enabled": False,
                     "automl_algorithm": None,
                     "metric": None,
-                    "automl_add_hyperparameters": "",
-                    "automl_remove_hyperparameters": ""
+                    "automl_add_hyperparameters": "[]",
+                    "automl_remove_hyperparameters": "[]"
                     }
 
         if request_dict.get("automl_enabled", False):
@@ -932,8 +1089,8 @@ class AppHandler:
                 metadata["automl_enabled"] = True
                 metadata["automl_algorithm"] = request_dict.get("automl_algorithm", "Bayesian")
                 metadata["metric"] = request_dict.get("metric", "map")
-                metadata["automl_add_hyperparameters"] = request_dict.get("automl_add_hyperparameters", "")
-                metadata["automl_remove_hyperparameters"] = request_dict.get("automl_remove_hyperparameters", "")
+                metadata["automl_add_hyperparameters"] = request_dict.get("automl_add_hyperparameters", "[]")
+                metadata["automl_remove_hyperparameters"] = request_dict.get("automl_remove_hyperparameters", "[]")
                 # AutoML optional params
                 if request_dict.get("automl_max_recommendations"):
                     metadata["automl_max_recommendations"] = request_dict.get("automl_max_recommendations")
@@ -1002,13 +1159,14 @@ class AppHandler:
                     return Code(400, {}, msg)
 
             if key in ["name", "description", "version", "logo",
-                       "ngc_path", "encryption_key", "read_only", "public"]:
+                       "ngc_path", "encryption_key", "read_only",
+                       "metric", "public", "docker_env_vars"]:
                 requested_value = request_dict[key]
                 if requested_value is not None:
                     metadata[key] = requested_value
                     metadata["last_modified"] = datetime.datetime.now().isoformat()
 
-            if key in ["train_datasets", "eval_dataset", "inference_dataset", "calibration_dataset", "ptm"]:
+            if key in ["train_datasets", "eval_dataset", "inference_dataset", "calibration_dataset", "ptm", "checkpoint_choose_method", "checkpoint_epoch_number"]:
                 value = request_dict[key]
                 if stateless_handlers.model_update_handler_attributes(user_id, metadata, key, value):
                     metadata[key] = value
@@ -1024,8 +1182,8 @@ class AppHandler:
                         metadata[key] = True
                         metadata["automl_algorithm"] = request_dict.get("automl_algorithm", "Bayesian")
                         metadata["metric"] = request_dict.get("metric", "map")
-                        metadata["automl_add_hyperparameters"] = request_dict.get("automl_add_hyperparameters", "")
-                        metadata["automl_remove_hyperparameters"] = request_dict.get("automl_remove_hyperparameters", "")
+                        metadata["automl_add_hyperparameters"] = request_dict.get("automl_add_hyperparameters", "[]")
+                        metadata["automl_remove_hyperparameters"] = request_dict.get("automl_remove_hyperparameters", "[]")
 
                         # AutoML optional params
                         if request_dict.get("automl_max_recommendations"):
@@ -1113,7 +1271,7 @@ class AppHandler:
         return Code(200, return_metadata, "Model deleted")
 
     @staticmethod
-    def resume_model_job(user_id, model_id, job_id, kind):
+    def resume_model_job(user_id, model_id, job_id, kind, specs=None):
         """
         user_id: str, uuid
         model_id: str, uuid corresponding to model
@@ -1139,7 +1297,7 @@ class AppHandler:
 
         try:
             # Create a job and run it
-            job_contexts = create_job_contexts(None, ["train"], [job_id], model_id)
+            job_contexts = create_job_contexts(None, ["train"], [job_id], model_id, specs=specs)
             on_new_job(job_contexts)
             return Code(200, [job_id], "Action resumed")
         except:

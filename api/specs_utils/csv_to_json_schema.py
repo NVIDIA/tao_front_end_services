@@ -19,6 +19,10 @@ import json
 __type_mapping = {
     'collection': 'object',
     'list': 'array',
+    'list_1_backbone': 'array',
+    'list_1_normal': 'array',
+    'list_2': 'array',
+    'list_3': 'array',
     'float': 'number',
     'bool': 'boolean',
     'integer': 'integer',

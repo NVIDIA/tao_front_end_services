@@ -29,7 +29,7 @@ from dataclasses import dataclass, field, asdict
 
 from handlers.utilities import read_network_config
 from handlers.actions import ACTIONS_TO_FUNCTIONS, AutoMLPipeline
-from handlers.stateless_handlers import get_root, get_handler_root
+from handlers.stateless_handlers import get_root, get_handler_root, get_handler_job_metadata, update_job_results
 from job_utils.dependencies import dependency_type_map, dependency_check_default
 
 
@@ -192,10 +192,28 @@ def scan_for_jobs():
             report_healthy(f"{job.id} with action {job.action}: Checking dependencies")
             report_healthy(f"Total dependencies: {len(job.dependencies)}")
             all_met = True
+            pending_reason_message = ""
             for dep in job.dependencies:
-                if not dependency_check(job, dep):
+                dependency_met, message = dependency_check(job, dep)
+                if not dependency_met:
+                    pending_reason_message += f"{message} and, "
                     report_healthy(f"Unmet dependency: {dep.type}")
                     all_met = False
+
+            # Update detailed status message in response when appropriate message is available
+            pending_reason_message = ''.join(pending_reason_message.rsplit(" and, ", 1))
+            metadata = get_handler_job_metadata(job.handler_id, job.id)
+            results = metadata.get("result", {})
+            if results:
+                detailed_status = results.get("detailed_status", {})
+                if not detailed_status:
+                    results["detailed_status"] = {}
+            else:
+                metadata["results"] = {}
+                results["detailed_status"] = {}
+            results["detailed_status"]["message"] = pending_reason_message
+            update_job_results(job.handler_id, job.id, results)
+
             # if all dependencies are met
             if all_met and still_exists(job):
                 # execute job

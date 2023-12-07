@@ -61,7 +61,7 @@
 
     "spec_params":{
         "train":{
-            "model.model_parameters.pretrained_model_path":"resume_model_or_ptm",
+            "model.model_parameters.pretrained_model_path":"ptm_if_no_resume_model",
             "checkpoint_dir":"output_dir"
         }
     },

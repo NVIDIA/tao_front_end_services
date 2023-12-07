@@ -24,11 +24,11 @@ import traceback
 import yaml
 
 from job_utils import executor as jobDriver
-from handlers.docker_images import DOCKER_IMAGE_MAPPER
+from handlers.docker_images import DOCKER_IMAGE_MAPPER, DOCKER_IMAGE_VERSION
 from handlers.infer_params import CLI_CONFIG_TO_FUNCTIONS
 from handlers.infer_data_sources import DS_CONFIG_TO_FUNCTIONS
-from handlers.stateless_handlers import get_handler_root, get_handler_spec_root, get_handler_log_root, get_handler_job_metadata, get_handler_metadata, update_job_results, update_job_status, get_toolkit_status, load_json_data
-from handlers.utilities import StatusParser, build_cli_command, write_nested_dict, read_nested_dict, read_network_config, load_json_spec, search_for_ptm, process_classwise_config, validate_gpu_param_value, NO_SPEC_ACTIONS_MODEL, _OD_NETWORKS, _TF1_NETWORKS, AUTOML_DISABLED_NETWORKS
+from handlers.stateless_handlers import get_handler_root, get_handler_spec_root, get_handler_log_root, get_handler_job_metadata, get_handler_metadata, write_handler_metadata, update_job_results, update_job_status, get_toolkit_status, load_json_data
+from handlers.utilities import StatusParser, build_cli_command, write_nested_dict, read_nested_dict, read_network_config, load_json_spec, search_for_ptm, process_classwise_config, validate_gpu_param_value, get_total_epochs, NO_SPEC_ACTIONS_MODEL, _OD_NETWORKS, _TF1_NETWORKS, AUTOML_DISABLED_NETWORKS
 from automl.utils import delete_lingering_checkpoints, wait_for_job_completion
 from specs_utils import json_to_kitti, json_to_yaml
 
@@ -81,7 +81,6 @@ class ActionPipeline:
         self.network = self.job_context.network
         self.network_config = read_network_config(self.network)
         self.api_params = self._read_api_params()
-        self.image = DOCKER_IMAGE_MAPPER[self.api_params.get("image", "")]
         self.handler_metadata = get_handler_metadata(self.job_context.handler_id)
         self.handler_spec_root = get_handler_spec_root(self.job_context.handler_id)
         self.handler_root = get_handler_root(self.job_context.handler_id)
@@ -94,6 +93,18 @@ class ActionPipeline:
             self.tao_deploy_actions = True
             if self.job_context.action in ("evaluate", "inference") and self.job_context.network in _TF1_NETWORKS:
                 self.action_suffix = "_tao_deploy"
+        self.image = DOCKER_IMAGE_MAPPER[self.api_params.get("image", "")]
+        # If current or parent action is gen_trt_engine or trtexec, then it'a a tao-deploy container action
+        if self.tao_deploy_actions:
+            self.image = DOCKER_IMAGE_MAPPER["tao-deploy"]
+        # Default image for dataset convert for OD networks is tlt-tf1, so override that
+        elif self.job_context.action == "convert_efficientdet_tf2":
+            self.image = DOCKER_IMAGE_MAPPER["tlt-tf2"]
+        # Override version of image specific for networks
+        if self.network in DOCKER_IMAGE_VERSION.keys():
+            self.tao_framework_version, self.tao_model_override_version = DOCKER_IMAGE_VERSION[self.network]
+            if self.tao_model_override_version not in self.image:
+                self.image = self.image.replace(self.tao_framework_version, self.tao_model_override_version)
         # This will be run inside a thread
         self.thread = None
 
@@ -106,6 +117,7 @@ class ActionPipeline:
 
         self.run_command = ""
         self.status_file = None
+        self.logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
 
     def _read_api_params(self):
         """Read network config json file and return api_params key"""
@@ -135,9 +147,8 @@ class ActionPipeline:
             # Pipe logs into logfile: <output_dir>/logs_from_toolkit.txt
             if not outdir:
                 outdir = CLI_CONFIG_TO_FUNCTIONS["output_dir"](self.job_context, self.handler_metadata)
-            logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
             # Pipe stdout and stderr to logfile
-            self.run_command += f" > {logfile} 2>&1 >> {logfile}"
+            self.run_command += f" | tee {self.logfile} 2>&1"
             # After command runs, make sure subdirs permission allows anyone to enter and delete
             self.run_command += f"; find {outdir} -type d | xargs chmod 777"
             # After command runs, make sure artifact files permission allows anyone to delete
@@ -146,13 +157,6 @@ class ActionPipeline:
             print(self.run_command, self.status_file, file=sys.stderr)
             # Set up StatusParser
             status_parser = StatusParser(str(self.status_file), self.job_context.network, outdir)
-            # Get image
-            # If current or parent action is gen_trt_engine or trtexec, then it'a a tao-deploy container action
-            if self.tao_deploy_actions:
-                self.image = DOCKER_IMAGE_MAPPER["tao-deploy"]
-            # Default image for dataset convert for OD networks is tlt-tf1, so override that
-            elif self.job_context.action == "convert_efficientdet_tf2":
-                self.image = DOCKER_IMAGE_MAPPER["tlt-tf2"]
             print(self.image, file=sys.stderr)
 
             # Convert self.spec to a backend and post it into a <self.handler_spec_root><job_id>.txt file
@@ -175,10 +179,14 @@ class ActionPipeline:
             num_gpu = -1
             if self.job_context.action not in ['train', 'retrain', 'finetune']:
                 num_gpu = 1
-            jobDriver.create(self.job_name, self.image, self.run_command, num_gpu=num_gpu, accelerator=self.platform)
+            docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
+            jobDriver.create(self.job_name, self.image, self.run_command, num_gpu=num_gpu, accelerator=self.platform, docker_env_vars=docker_env_vars)
             print("Job created", self.job_name, file=sys.stderr)
             # Poll every 5 seconds
             k8s_status = jobDriver.status(self.job_name)
+            metric = self.handler_metadata.get("metric", "")
+            if not metric:
+                metric = "loss"
             while k8s_status in ["Done", "Error", "Running", "Pending", "Creating"]:
                 time.sleep(5)
                 # If Done, try running self.post_run()
@@ -191,6 +199,12 @@ class ActionPipeline:
                         print("Post running", file=sys.stderr)
                         # If post run is done, make it done
                         self.post_run()
+                        if self.job_context.action in ['train', 'retrain']:
+                            epoch_value = get_total_epochs(self.handler_root)
+                            _, best_checkpoint_epoch_number, latest_checkpoint_epoch_number = status_parser.read_metric(results=new_results, metric=metric, brain_epoch_number=epoch_value)
+                            self.handler_metadata["checkpoint_epoch_number"][f"best_model_{self.job_name}"] = best_checkpoint_epoch_number
+                            self.handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.job_name}"] = latest_checkpoint_epoch_number
+                            write_handler_metadata(self.handler_id, self.handler_metadata)
                         update_job_status(self.handler_id, self.job_id, status="Done")
                         break
                     except:
@@ -229,14 +243,16 @@ class ActionPipeline:
 
             final_status = get_handler_job_metadata(self.handler_id, self.job_id).get("status", "Error")
             print(f"Job Done: {self.job_name} Final status: {final_status}", file=sys.stderr)
-            with open(logfile, "a", encoding='utf-8') as f:
-                f.write("\nEOF\n")
+            with open(self.logfile, "a", encoding='utf-8') as f:
+                f.write(f"\n{final_status} EOF\n")
             return
 
         except Exception:
             # Something went wrong inside...
             print(traceback.format_exc(), file=sys.stderr)
             print(f"Job {self.job_name} did not start", file=sys.stderr)
+            with open(self.logfile, "a", encoding='utf-8') as f:
+                f.write("\nError EOF\n")
             update_job_status(self.handler_id, self.job_id, status="Error")
             update_job_results(self.handler_id, self.job_id, result={"detailed_status": {"message": "Error due to unmet dependencies"}})
             return
@@ -653,7 +669,8 @@ class AutoMLPipeline(ActionPipeline):
         if self.network not in AUTOML_DISABLED_NETWORKS:
             spec = process_classwise_config(spec)
 
-        # Save specs to a yaml/kitti file
+        # Save specs to a yaml/kitti file as well as json file
+        self.write_json(file_path=os.path.join(self.expt_root, f"recommendation_{self.rec_number}.json"), json_dict=spec)
         updated_spec_string = SPEC_BACKEND_TO_FUNCTIONS[self.api_params["spec_backend"]](spec)
         action_spec_path = os.path.join(self.job_root, f"recommendation_{self.rec_number}.{self.api_params['spec_backend']}")
 
@@ -665,7 +682,7 @@ class AutoMLPipeline(ActionPipeline):
         params_to_cli = build_cli_command(self.config)
         run_command = f"{self.network} train {params_to_cli}"
         logfile = os.path.join(self.expt_root, "log.txt")
-        run_command += f" > {logfile} 2>&1 >> {logfile}"
+        run_command += f" | tee {logfile} 2>&1"
         return run_command
 
     def get_recommendation_number(self):
@@ -707,7 +724,8 @@ class AutoMLPipeline(ActionPipeline):
             wait_for_job_completion(job_id)
 
             delete_lingering_checkpoints(self.recs_dict[self.rec_number].get("best_epoch_number", ""), self.expt_root)
-            jobDriver.create(job_id, self.image, run_command, num_gpu=-1)
+            docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
+            jobDriver.create(job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars)
             print(f"AutoML recommendation with experiment id {self.rec_number} and job id {job_id} submitted", file=sys.stderr)
             k8s_status = jobDriver.status(job_id)
             while k8s_status in ["Done", "Error", "Running", "Pending", "Creating"]:
@@ -717,7 +735,7 @@ class AutoMLPipeline(ActionPipeline):
                 if k8s_status == "Error":
                     print(f"Relaunching job {job_id}", file=sys.stderr)
                     wait_for_job_completion(job_id)
-                    jobDriver.create(job_id, self.image, run_command, num_gpu=-1)
+                    jobDriver.create(job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars)
                 k8s_status = jobDriver.status(job_id)
 
             return True

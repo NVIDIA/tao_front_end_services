@@ -43,7 +43,9 @@
             "results_dir":"output_dir",
             "encryption_key":"key",
             "train.gpu_ids": "from_csv",
-            "model.pretrained_model_path":"resume_model_or_ptm"
+            "train.num_gpus": "from_csv",
+            "train.resume_training_checkpoint_path":"resume_model",
+            "model.pretrained_model_path":"ptm_if_no_resume_model"
         },
         "evaluate":{
             "results_dir":"output_dir",
@@ -69,6 +71,7 @@
         "train.resume_training_checkpoint_path":"automl_resume_model",
         "train.checkpoint_interval":"assign_const_value,train.num_epochs",
         "train.gpu_ids": "from_csv",
+        "train.num_gpus": "from_csv",
         "encryption_key":"key",
         "results_dir":"automl_output_dir"
     },

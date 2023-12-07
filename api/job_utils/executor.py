@@ -18,18 +18,12 @@ import os
 import sys
 
 
-def create(job_name, image, command, num_gpu=-1, accelerator=None):
+def create(job_name, image, command, num_gpu=-1, accelerator=None, docker_env_vars=None):
     """Creates a kubernetes job"""
     command = 'umask 0 && ' + command
     if num_gpu == -1:
         num_gpu = int(os.getenv('NUM_GPU_PER_NODE', default='1'))
     telemetry_opt_out = os.getenv('TELEMETRY_OPT_OUT', default='no')
-    wand_api_key = os.getenv('WANDB_API_KEY', default='')
-    clearml_web_host = os.getenv('CLEARML_WEB_HOST', default='https://app.clear.ml')
-    clearml_api_host = os.getenv('CLEARML_API_HOST', default='https://api.clear.ml')
-    clearml_files_host = os.getenv('CLEARML_FILES_HOST', default='https://files.clear.ml')
-    clearml_api_access_key = os.getenv('CLEARML_API_ACCESS_KEY', default='')
-    clearml_api_secret_key = os.getenv('CLEARML_API_SECRET_KEY', default='')
     node_selector = {'accelerator': str(accelerator)}
     if not accelerator:
         node_selector = None
@@ -62,33 +56,17 @@ def create(job_name, image, command, num_gpu=-1, accelerator=None):
     telemetry_opt_out_env = client.V1EnvVar(
         name="TELEMETRY_OPT_OUT",
         value=telemetry_opt_out)
-    wandb_api_key_env = client.V1EnvVar(
-        name="WANDB_API_KEY",
-        value=wand_api_key)
-    clearml_web_host_env = client.V1EnvVar(
-        name="CLEARML_WEB_HOST",
-        value=clearml_web_host)
-    clearml_api_host_env = client.V1EnvVar(
-        name="CLEARML_API_HOST",
-        value=clearml_api_host)
-    clearml_files_host_env = client.V1EnvVar(
-        name="CLEARML_FILES_HOST",
-        value=clearml_files_host)
-    clearml_api_access_key_env = client.V1EnvVar(
-        name="CLEARML_API_ACCESS_KEY",
-        value=clearml_api_access_key)
-    clearml_api_secret_key_env = client.V1EnvVar(
-        name="CLEARML_API_SECRET_KEY",
-        value=clearml_api_secret_key)
+    dynamic_docker_envs = []
+    if docker_env_vars:
+        for docker_env_var_key, docker_env_var_value in docker_env_vars.items():
+            kubernetes_env = client.V1EnvVar(
+                name=docker_env_var_key,
+                value=docker_env_var_value)
+            dynamic_docker_envs.append(kubernetes_env)
     container = client.V1Container(
         name="container",
         image=image,
-        env=[
-            num_gpu_env,
-            telemetry_opt_out_env,
-            wandb_api_key_env,
-            clearml_web_host_env, clearml_api_host_env, clearml_files_host_env, clearml_api_access_key_env, clearml_api_secret_key_env
-        ],
+        env=[num_gpu_env, telemetry_opt_out_env] + dynamic_docker_envs,
         command=["/bin/bash", "-c"],
         args=[command],
         resources=resources,

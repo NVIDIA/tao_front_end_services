@@ -56,8 +56,8 @@ class AutoMLHandler:
         automl_nu = handler_metadata.get("automl_nu", 3)
         metric = handler_metadata.get("metric", "map")
         epoch_multiplier = handler_metadata.get("epoch_multiplier", 1)
-        automl_add_hyperparameters = handler_metadata.get("automl_add_hyperparameters", "")
-        automl_remove_hyperparameters = handler_metadata.get("automl_remove_hyperparameters", "")
+        automl_add_hyperparameters = handler_metadata.get("automl_add_hyperparameters", "[]")
+        automl_remove_hyperparameters = handler_metadata.get("automl_remove_hyperparameters", "[]")
 
         # Call the script
         print("Starting automl", automl_job_id, file=sys.stderr)
@@ -152,8 +152,8 @@ class AutoMLHandler:
         automl_nu = handler_metadata.get("automl_nu", 3)
         metric = handler_metadata.get("metric", "map")
         epoch_multiplier = handler_metadata.get("epoch_multiplier", 1)
-        automl_add_hyperparameters = handler_metadata.get("automl_add_hyperparameters", "")
-        automl_remove_hyperparameters = handler_metadata.get("automl_remove_hyperparameters", "")
+        automl_add_hyperparameters = handler_metadata.get("automl_add_hyperparameters", "[]")
+        automl_remove_hyperparameters = handler_metadata.get("automl_remove_hyperparameters", "[]")
         # Call the script
         run_command = f'/venv/bin/python3 automl_start.py --root={root} --automl_job_id={automl_job_id} --network={network} --model_id={model_id} --resume=True --automl_algorithm={automl_algorithm} --automl_max_recommendations={automl_max_recommendations} --automl_delete_intermediate_ckpt={automl_delete_intermediate_ckpt} --automl_R={automl_R} --automl_nu={automl_nu} --metric={metric} --epoch_multiplier={epoch_multiplier} --automl_add_hyperparameters="{automl_add_hyperparameters}" --automl_remove_hyperparameters="{automl_remove_hyperparameters}"'
         jobDriver.create(job_id, image, run_command, num_gpu=0)

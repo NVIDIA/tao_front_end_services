@@ -3,7 +3,7 @@
         "dataset_type":"semantic_segmentation",
         "actions": ["train","evaluate","export","inference","gen_trt_engine"],
         "formats":["default"],
-        "image":"tlt-pytorch",
+        "image":"tlt-pytorch-114",
         "spec_backend":"yaml",
         "classwise":"False",
         "chaining_rules":"cvaction",
@@ -38,7 +38,8 @@
     "spec_params":{
         "train": {
             "train.num_gpus":"from_csv",
-            "model.pretrained_model_path": "ptm",
+            "model.pretrained_model_path": "ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path":"resume_model",
             "results_dir":"output_dir",
             "encryption_key":"key"
         },

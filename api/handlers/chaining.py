@@ -44,7 +44,8 @@ class ChainingRules:
 
 # Actions chaining rules are defined here
 # Read as evaluate can be chained after ["train",..."export"]
-_cvaction_rules = {"train": [],
+_cvaction_rules = {"dataset_convert": [],
+                   "train": [],
                    "evaluate": ["train", "prune", "retrain", "export", "gen_trt_engine", "trtexec"],
                    "prune": ["train", "retrain"],
                    "inference": ["train", "prune", "retrain", "export", "gen_trt_engine", "trtexec"],
@@ -92,7 +93,7 @@ def infer_action_from_job(handler_id, job_id):
     return action
 
 
-def _create_job_contexts(parent_job_id, parent_action, actions, job_ids, network, chaining_rules, handler_id):
+def _create_job_contexts(parent_job_id, parent_action, actions, job_ids, network, chaining_rules, handler_id, specs=None):
     """Create job contexts for the job_id's provided"""
     job_contexts = []
     for idx, jid in enumerate(job_ids):
@@ -101,7 +102,7 @@ def _create_job_contexts(parent_job_id, parent_action, actions, job_ids, network
         action = actions[idx]
 
         # Create a jobconext
-        job_context = JobContext(job_id, None, network, action, handler_id)
+        job_context = JobContext(job_id, None, network, action, handler_id, specs=specs)
         job_contexts.append(job_context)
 
     completed_tasks_master = []
@@ -143,7 +144,7 @@ def _create_job_contexts(parent_job_id, parent_action, actions, job_ids, network
     return job_contexts
 
 
-def create_job_contexts(parent_job_id, actions, job_ids, handler_id):
+def create_job_contexts(parent_job_id, actions, job_ids, handler_id, specs=None):
     """Calls the create job contexts function after Obtains the necessary additional info fo"""
     parent_action = infer_action_from_job(handler_id, parent_job_id)
 
@@ -154,4 +155,4 @@ def create_job_contexts(parent_job_id, actions, job_ids, handler_id):
     network_config = read_network_config(network)
     chaining_rules = CHAINING_RULES_TO_FUNCTIONS[network_config["api_params"]["chaining_rules"]]
 
-    return _create_job_contexts(parent_job_id, parent_action, actions, job_ids, network, chaining_rules, handler_id)
+    return _create_job_contexts(parent_job_id, parent_action, actions, job_ids, network, chaining_rules, handler_id, specs=specs)

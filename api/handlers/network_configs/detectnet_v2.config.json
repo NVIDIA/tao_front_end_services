@@ -112,7 +112,7 @@
 
     "spec_params":{
         "train":{
-            "model_config.pretrained_model_file":"resume_model_or_ptm"
+            "model_config.pretrained_model_file":"ptm"
         },
         "retrain":{
             "model_config.pretrained_model_file":"parent_model",
@@ -127,7 +127,7 @@
         "training_config.checkpoint_interval":"assign_const_value,training_config.num_epochs",
         "evaluation_config.validation_period_during_training":"assign_const_value,training_config.num_epochs,training_config.checkpoint_interval",
         "evaluation_config.first_validation_epoch":"assign_const_value,training_config.num_epochs,training_config.checkpoint_interval",
-        "model_config.pretrained_model_file":"automl_assign_ptm"
+        "model_config.pretrained_model_file":"ptm"
     },
 
     "automl_cli_params":{

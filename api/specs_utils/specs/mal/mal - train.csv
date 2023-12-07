@@ -1,6 +1,6 @@
 parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex,automl_enabled,math_cond,parent_param,depends_on
 version,Schema Version,const,The version of this schema,1,,,,,,,,FALSE,,,
-gpu_ids,GPU indices,list,,"[0]",,,,,,,,FALSE,,,
+gpu_ids,GPU indices,list,,[0],,,,,,,,FALSE,,,
 results_dir,,hidden,,,,,,,,,,FALSE,,,
 checkpoint,,string,,,,,,,,,,FALSE,,,
 dataset,,collection,,,,,,,,,,FALSE,,,
@@ -16,7 +16,7 @@ dataset.load_mask,Whether to load segmentation mask in annotation file,bool,,TRU
 dataset.crop_size,,int,,512,,256,inf,,,,,FALSE,,,
 model,,collection,,,,,,,,,,FALSE,,,
 model.arch,,ordered,,vit-mae-base/16,,,,"vit-deit-tiny/16,vit-deit-small/16,vit-mae-base/16,vit-mae-large/16,vit-mae-huge/14,fan_tiny_12_p16_224,fan_small_12_p16_224,fan_base_18_p16_224,fan_large_24_p16_224,fan_tiny_8_p4_hybrid,fan_small_12_p4_hybrid,fan_base_16_p4_hybrid,fan_large_16_p4_hybrid",,,,FALSE,,,
-model.frozen_stages,,list,,[-1],,,,,,,,FALSE,,,
+model.frozen_stages,,list_1_backbone,,[-1],,,,,,,,FALSE,,,
 model.mask_head_num_convs,,int,,4,,1,inf,,,,,FALSE,,,
 model.mask_head_hidden_channel,,int,,256,,1,inf,,,,,FALSE,,,
 model.mask_head_out_channel,,int,,256,,1,inf,,,,,FALSE,,,

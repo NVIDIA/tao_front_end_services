@@ -16,6 +16,13 @@
 # ['', '<namespace', 'api', 'v1', 'user', '<user_id>', 'model']
 
 """Authentication utils access control modeules"""
+import os.path
+
+
+class AccessControlError(Exception):
+    """Access Control Error"""
+
+    pass
 
 
 def _remove_prefix(text, prefix):
@@ -26,9 +33,9 @@ def _remove_prefix(text, prefix):
 
 
 def validate(url, user_id):
-    """Validate URL format"""
+    """Validate user_id matches user in URL path and whitelist"""
     user_id = str(user_id)
-    err = "Invalid URI path for user " + user_id
+    err = AccessControlError("Invalid URI path for user " + user_id)
     tmp = _remove_prefix(url, 'http://')
     tmp = _remove_prefix(tmp, 'https://')
     tmp = _remove_prefix(tmp, tmp.split('/')[0])
@@ -39,4 +46,14 @@ def validate(url, user_id):
         err = None
     elif (len(parts) >= 6 and parts[4] == 'user' and parts[5] == user_id):
         err = None
+    if err is None:
+        # validate user_id in whitelist
+        # if no whitelist, assume everybody is allowed
+        filename = '/shared/whitelist.txt'
+        if os.path.isfile(filename):
+            err = AccessControlError("No access granted for user " + user_id)
+            with open(filename, 'r', encoding='utf-8') as f:
+                allowed_users = [line.rstrip('\n') for line in f]
+                if user_id in allowed_users:
+                    err = None
     return err

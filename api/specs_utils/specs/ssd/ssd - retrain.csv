@@ -17,7 +17,7 @@
 ,dataset_config.validation_data_sources.tfrecords_directory_path,TFRecords path,hidden,,,,,,,,,,,,,
 ,dataset_config.include_difficult_in_training,include difficult label in training,bool,Whether to use difficult objects in training,TRUE,,,,,,,,,,,
 ,training_config,Training,collection,,,,,,,,,,,,,
-,training_config.batch_size_per_gpu,Batch Size Per GPU,integer,The number of images per batch per GPU.,10,,1,,,,,,,,,
+,training_config.batch_size_per_gpu,Batch Size Per GPU,integer,The number of images per batch per GPU.,2,,1,,,,,,,,,
 ,training_config.num_epochs,Number of Epochs,integer,The total number of epochs to run the experiment.,80,,1,,,,,,,,,
 ,training_config.enable_qat,Enable Quantization Aware Training,bool,bool,FALSE,,,,,,,,,,,
 ,training_config.learning_rate,,collection,,,,,,,,,,,,,

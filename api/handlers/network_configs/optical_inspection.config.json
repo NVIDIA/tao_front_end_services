@@ -41,7 +41,7 @@
     "spec_params":{
         "train": {
             "encryption_key":"key",
-            "train.pretrained_model_path": "ptm",
+            "train.pretrained_model_path": "ptm_if_no_resume_model",
             "train.gpu_ids": "from_csv",
             "train.resume_training_checkpoint_path": "resume_model",
             "results_dir":"output_dir"

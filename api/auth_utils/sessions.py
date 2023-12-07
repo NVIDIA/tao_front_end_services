@@ -17,6 +17,9 @@ import os
 import yaml
 import functools
 import threading
+from datetime import datetime
+
+__SESSION_EXPIRY_HOURS__ = 24
 
 
 def synchronized(wrapped):
@@ -31,40 +34,48 @@ def synchronized(wrapped):
 
 
 @synchronized
-def set_session(creds):
-    """Append/Pop sessions"""
+def _load():
+    """Load sessions from file"""
     sessions = []
-    session = creds
+    dt_now = datetime.now()
     filename = os.path.join('/', 'shared', 'users', "sessions.yaml")
     try:
         with open(filename, "r", encoding='utf-8') as infile:
-            sessions = yaml.safe_load(infile)
-            if type(sessions) != list:    # corrupted file?
-                sessions = []
-            if len(session) > 1000:    # keep a max of 1000 active sessions
-                sessions.pop(0)    # remove oldest known session
+            all_sessions = yaml.safe_load(infile)
+            if type(all_sessions) is list:
+                for session in all_sessions:
+                    dt_session = datetime.fromtimestamp(session.get('timestamp', 0))
+                    dt_delta = dt_now - dt_session
+                    if dt_delta.seconds / 3600 < __SESSION_EXPIRY_HOURS__:
+                        sessions.append(session)
     except:
         pass
-    sessions.append(session)
+    return sessions
+
+
+@synchronized
+def _save(sessions):
+    """Save sessions in file"""
+    filename = os.path.join('/', 'shared', 'users', "sessions.yaml")
     with open(filename, "w", encoding='utf-8') as outfile:
         yaml.dump(sessions, outfile, sort_keys=False)
 
 
-@synchronized
+def set(session):
+    """Add session"""
+    sessions = _load()
+    session = session.copy()  # avoid adding timestamp key to credentials passed in as a session object
+    session['timestamp'] = datetime.timestamp(datetime.now())
+    sessions.append(session)
+    _save(sessions)
+
+
 def get(token):
-    """Read session from sessions.yaml file"""
-    sessions = []
+    """Get user from token"""
     user = None
-    filename = os.path.join('/', 'shared', 'users', "sessions.yaml")
-    try:
-        with open(filename, "r", encoding='utf-8') as infile:
-            sessions = yaml.safe_load(infile)
-            if type(sessions) != list:    # corrupted file?
-                sessions = []
-    except:
-        pass
+    sessions = _load()
     for session in reversed(sessions):
-        if str(session.get('token')) == str(token):
-            user = session.get('user_id')
+        if str(session.get('token', 'invalid')) == str(token):
+            user = session.get('user_id', None)
             break
     return user

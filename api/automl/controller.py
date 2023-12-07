@@ -19,12 +19,13 @@ import json
 import sys
 from copy import deepcopy
 from automl.utils import Recommendation, ResumeRecommendation, JobStates, report_healthy
-from handlers.utilities import StatusParser, _ITER_MODELS, _PURPOSE_BUILT_MODELS, read_network_config
-from handlers.stateless_handlers import update_job_status
+from handlers.utilities import StatusParser, _ITER_MODELS,  network_metric_mapping, read_network_config, get_total_epochs
+from handlers.stateless_handlers import update_job_status, get_handler_metadata, write_handler_metadata
 from job_utils.automl_job_utils import on_new_automl_job, on_delete_automl_job, on_cancel_automl_job
 import uuid
 import shutil
 import glob
+import traceback
 
 time_per_epoch = 0
 time_per_epoch_counter = 0
@@ -66,41 +67,11 @@ class Controller:
         self.automl_algorithm = automl_algorithm
 
         self.metric = metric
-        self.network_metric_mapping = {"action_recognition": "val_acc",
-                                       "bpnet": "loss",
-                                       "classification_pyt": "loss",
-                                       "classification_tf1": "validation_accuracy",
-                                       "classification_tf2": "val_accuracy",
-                                       "deformable_detr": "val_mAP50",
-                                       "detectnet_v2": "mean average precision",
-                                       "dino": "val_mAP50",
-                                       "dssd": "mean average precision",
-                                       "efficientdet_tf1": "AP50",
-                                       "efficientdet_tf2": "AP50",
-                                       "faster_rcnn": "mean average precision",
-                                       "fpenet": "evaluation_cost ",
-                                       "lprnet": "validation_accuracy",
-                                       "ml_recog": "val Precision at Rank 1",
-                                       "multitask_classification": "mean accuracy",
-                                       "mask_rcnn": "mask_AP",
-                                       "ocdnet": "hmean",
-                                       "ocrnet": "val_acc",
-                                       "optical_inspection": "val_acc",
-                                       "pointpillars": "loss",
-                                       "pose_classification": "val_acc",
-                                       "re_identification": "cmc_rank_1",
-                                       "retinanet": "mean average precision",
-                                       "ssd": "mean average precision",
-                                       "segformer": "Mean IOU",
-                                       "unet": "loss",
-                                       "yolo_v3": "mean average precision",
-                                       "yolo_v4": "mean average precision",
-                                       "yolo_v4_tiny": "mean average precision"}
         if self.automl_algorithm in ("hyperband", "h") and self.network in ("bpnet", "multitask_classification", "unet"):
             self.metric_key = "loss"
             self.metric = "loss"
         elif self.metric == "kpi":
-            self.metric_key = self.network_metric_mapping[self.network]
+            self.metric_key = network_metric_mapping[self.network]
         else:
             self.metric_key = self.metric
 
@@ -111,6 +82,7 @@ class Controller:
             self.min_max = min
 
         self.best_epoch_number = 0
+        self.brain_epoch_number = -2
         self.best_model_copied = False
         self.ckpt_path = {}
 
@@ -124,12 +96,19 @@ class Controller:
         self.automl_context = automl_context
         self.on_new_automl_job = lambda jc: on_new_automl_job(self.automl_context, jc)
 
+        with open(f"{self.root}/automl_metadata.json", 'a', encoding='utf-8'):  # Creating Controller json if it doesn't exist
+            pass
+
     def start(self):
         """Starts the automl controller"""
-        report_healthy(self.root + "/controller.log", "Starting", clear=False)
-        self._execute_loop()
-        update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Done")
-        on_delete_automl_job(self.automl_context.handler_id, self.automl_context.id)
+        try:
+            report_healthy(self.root + "/controller.log", "Starting", clear=False)
+            self._execute_loop()
+            update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Done")
+            on_delete_automl_job(self.automl_context.handler_id, self.automl_context.id)
+        except Exception:
+            print(f"AutoMLpipeline loop for network {self.network} failed due to exception {traceback.format_exc()}", file=sys.stderr)
+            update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Error")
 
     def save_state(self):
         """Save the self.recommendations into a controller.json"""
@@ -194,6 +173,10 @@ class Controller:
                             expt_root = os.path.join(self.root, "experiment_" + str(rec.id))
                             self.get_best_checkpoint_path(expt_root, rec)
                             self.delete_not_best_model_checkpoints(expt_root, rec, True)
+                            handler_metadata = get_handler_metadata(self.automl_context.handler_id)
+                            handler_metadata["checkpoint_epoch_number"][f"best_model_{self.automl_context.id}"] = self.best_epoch_number
+                            handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.automl_context.id}"] = self.best_epoch_number
+                            write_handler_metadata(self.automl_context.handler_id, handler_metadata)
 
                     self.eta = 0.0
                     self.remaining_epochs_in_experiment = 0.0
@@ -218,7 +201,7 @@ class Controller:
         for spec in recommended_specs:
             print("Recommendation gotten", file=sys.stderr)
             self.best_epoch_number = 0
-            if type(spec) == dict:
+            if type(spec) is dict:
                 # Save brain state and update current recommendation
                 self.hyperband_cancel_condition_seen = False
                 self.brain.save_state()
@@ -239,7 +222,7 @@ class Controller:
                 self.on_new_automl_job(rec)
                 report_healthy(self.root + "/controller.log", "Job started", clear=False)
 
-            elif type(spec) == ResumeRecommendation:
+            elif type(spec) is ResumeRecommendation:
                 self.hyperband_cancel_condition_seen = False
                 rec_id = spec.id
                 # Save brain state and update current recommendation
@@ -315,7 +298,7 @@ class Controller:
                                         if self.hyperband_cancel_condition_seen or new_results.get(result_key) > self.brain_epoch_number:
                                             self.hyperband_cancel_condition_seen = True
                                             # Cancel the current running job and change the job state to success
-                                            validation_map = self.read_metric(results=new_results)
+                                            validation_map, self.best_epoch_number, _ = status_parser.read_metric(results=new_results, metric=self.metric, automl_algorithm=self.automl_algorithm, automl_root=self.root, brain_epoch_number=self.brain_epoch_number)
                                             if validation_map != 0.0:
                                                 rec.update_status(JobStates.success)
                                                 validation_map_processed = True
@@ -335,7 +318,11 @@ class Controller:
                 status = JobStates.pending
             if status in [JobStates.success, JobStates.failure]:
                 if not validation_map_processed:
-                    validation_map = self.read_metric(results=new_results)
+                    brain_epoch_number = self.brain_epoch_number
+                    if self.automl_algorithm in ("bayesian", "b"):
+                        self.brain.num_epochs_per_experiment = get_total_epochs(self.root, automl=True, automl_experiment_id=rec.id)
+                        brain_epoch_number = self.brain.num_epochs_per_experiment
+                    validation_map, self.best_epoch_number, _ = status_parser.read_metric(results=new_results, metric=self.metric, automl_algorithm=self.automl_algorithm, automl_root=self.root, brain_epoch_number=brain_epoch_number)
                 if status == JobStates.failure:
                     if self.brain.reverse_sort:
                         validation_map = 1e-7
@@ -420,7 +407,7 @@ class Controller:
             result_dict[f"best_{self.metric_key}"] = 0.0
 
         eta_msg_suffix = ""
-        if type(self.eta) == float:
+        if type(self.eta) is float:
             eta_msg_suffix = " minutes remaining approximately"
         result_dict["Estimated time for automl completion"] = str(self.eta) + eta_msg_suffix
         result_dict["Current experiment number"] = len(self.recommendations)
@@ -509,62 +496,3 @@ class Controller:
         else:
             flag = True
         return flag
-
-    def trim_list(self, metric_list):
-        """Retains only the tuples whose epoch numbers are <= required epochs"""
-        trimmed_list = []
-        for tuple_var in metric_list:
-            if tuple_var[0] >= 0:
-                if self.automl_algorithm in ("bayesian", "b") or (self.network == "pointpillars" and tuple_var[0] < self.brain_epoch_number) or (self.network != "pointpillars" and tuple_var[0] <= self.brain_epoch_number):
-                    trimmed_list.append(tuple_var)
-        return trimmed_list
-
-    def read_metric(self, results):
-        """
-        Parses the status parser object and returns the metric of interest
-        result: value from status_parser.update_results()
-        returns: the metric requested in normalized float
-        """
-        metric_value = 0.0
-        if self.metric == "loss":
-            result_type = "graphical"
-        else:
-            result_type = "kpi"
-        try:
-            if result_type not in results.keys() or not results[result_type]:
-                return metric_value
-            for log in results[result_type]:
-                if self.metric == "loss":
-                    criterion = "loss"
-                elif self.metric == "kpi":
-                    criterion = self.network_metric_mapping[self.network]
-                else:
-                    criterion = self.metric
-
-                if log["metric"] == criterion:
-                    if log["values"]:
-                        values_to_search = self.trim_list(log["values"].items())
-                        if self.automl_algorithm in ("hyperband", "h"):
-                            with open(self.root + "/brain.json", 'r', encoding='utf-8') as u:
-                                brain_dict = json.loads(u.read())
-                                if (len(brain_dict.get("ni", [float('-inf')])[str(brain_dict.get("bracket", 0))]) != (brain_dict.get("sh_iter", float('inf')) + 1)):
-                                    self.best_epoch_number, metric_value = values_to_search[-1]
-                                else:
-                                    self.best_epoch_number, metric_value = sorted(values_to_search, key=lambda x: x[1], reverse=self.brain.reverse_sort)[0]
-                        else:
-                            self.best_epoch_number, metric_value = sorted(sorted(values_to_search, key=lambda x: x[0], reverse=True), key=lambda x: x[1], reverse=self.brain.reverse_sort)[0]
-                        metric_value = float(metric_value)
-        except Exception as e:
-            print("Requested metric not found, defaulting to 0.0", file=sys.stderr)
-            print(str(e), file=sys.stderr)
-            if self.brain.reverse_sort:
-                metric_value = float('inf')
-            else:
-                metric_value = 0.0
-
-        if self.network in ("pointpillars", "fpenet"):  # status json epoch number is 1 less than epoch number generated in checkppoint file
-            self.best_epoch_number += 1
-        elif self.network in _PURPOSE_BUILT_MODELS or self.network in ("deformable_detr", "dino"):  # epoch number in checkpoint starts from 0 or models whose validation logs are generated before the training logs
-            self.best_epoch_number -= 1
-        print(f"Metric returned is {metric_value} at epoch/iter {self.best_epoch_number}", file=sys.stderr)
-        return metric_value + 1e-07

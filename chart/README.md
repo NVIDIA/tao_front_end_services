@@ -91,7 +91,9 @@ Below is an example with local NFS (requires a local NFS server). One must repla
 helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
 helm install nfs-subdir-external-provisioner nfs-subdir-external-provisioner/nfs-subdir-external-provisioner \
   --set nfs.server=172.17.171.248 \
-  --set nfs.path=/srv/nfs/kubedata
+  --set nfs.path=/srv/nfs/kubedata \
+  --set storageClass.onDelete=retain \
+  --set storageClass.pathPattern="\${.PVC.namespace}-\${.PVC.name}"
 ```
 
 ### Image Pull Secret for nvcr.io

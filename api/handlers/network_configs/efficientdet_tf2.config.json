@@ -45,7 +45,7 @@
 
     "spec_params":{
         "train":{
-            "train.checkpoint":"parent_model_evaluate",
+            "train.checkpoint":"resume_model_or_ptm",
             "train.init_epoch":"from_csv",
             "encryption_key":"key",
             "results_dir":"output_dir"

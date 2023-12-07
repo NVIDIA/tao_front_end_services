@@ -54,7 +54,7 @@ def get_valid_range(parameter_config, parent_params):
         v_max = default_value
 
     dependent_on_param = parameter_config.get("depends_on", None)
-    if type(dependent_on_param) == str:
+    if type(dependent_on_param) is str:
         dependent_on_param_op = dependent_on_param.split(" ")[0]
         dependent_on_param_name = dependent_on_param.split(" ")[1]
         if dependent_on_param_name in parent_params.keys():
@@ -116,10 +116,10 @@ class Recommendation:
             identity: the id of the recommendation
             specs: the specs/config of the recommendation
         """
-        assert type(identifier) == int
+        assert type(identifier) is int
         self.id = identifier
 
-        assert type(specs) == dict
+        assert type(specs) is dict
         self.specs = specs
 
         self.job_id = None
@@ -137,18 +137,18 @@ class Recommendation:
 
     def assign_job_id(self, job_id):
         """Associates provided job id to the class objects job id"""
-        assert type(job_id) == str
+        assert type(job_id) is str
         self.job_id = job_id
 
     def update_result(self, result):
         """Update the result value"""
         result = float(result)
-        assert type(result) == float
+        assert type(result) is float
         self.result = result
 
     def update_status(self, status):
         """Update the status value"""
-        assert type(status) == str
+        assert type(status) is str
         self.status = status
 
     def __repr__(self):

@@ -1,7 +1,7 @@
 # TAO Toolkit API container info
 image:
   repository: nvcr.io/nvidia/tao/tao-toolkit
-  tag: 5.0.0-api
+  tag: 5.2.0-api
 imagePullSecret: imagepullsecret
 imagePullPolicy: Always
 
@@ -10,8 +10,8 @@ imagePullPolicy: Always
 #myCertConfig: my-cert
 
 # Optional JupyterLab service
-ngcCollaterals: nvidia/tao/tao-getting-started:5.0.0
-notebooksDir: tao-getting-started_v5.0.0/notebooks/tao_api_starter_kit
+ngcCollaterals: nvidia/tao/tao-getting-started:5.2.0
+notebooksDir: tao-getting-started_v5.2.0/notebooks/tao_api_starter_kit
 
 # Optional HTTPS settings for ingress controller
 #host: mydomain.com
@@ -30,22 +30,12 @@ storageSize: 900Gi
 backend: local-k8s
 maxNumGpuPerNode: 1
 imageTf1: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
-imagePyt: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-pyt
+imagePyt: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt2.1.0
+imagePyt_114: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt1.14.0
 imageTf2: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0
-imageTaoDeploy: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-deploy
-imageDataservices: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-data-services
+imageTaoDeploy: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-deploy
+imageDataservices: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-data-services
 imageDefault: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
 
 # To opt out of providing anonymous telemetry data to NVIDIA
 #telemetryOptOut: no
-
-# Optional MLOPS setting for Weights And Biases
-#wandbApiKey: cf23df2207d99a74fbe169e3eba035e633b63d13
-
-# Optional MLOPS setting for ClearML
-#clearMlWebHost: https://app.clear.ml
-#clearMlApiHost: https://api.clear.ml
-#clearMlFilesHost: https://files.clear.ml
-#clearMlApiAccessKey: TL2R884JDQWG11P29N0G
-#clearMlApiSecretKey: Z04nTRD79CYS8FR5MeQ4HIPcZsa25beN5K76OtDcEX8JfdcIYi
-

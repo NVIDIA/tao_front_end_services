@@ -37,7 +37,8 @@
     "spec_params":{
         "train": {
             "train.num_gpus":"from_csv",
-            "model.pretrained_backbone_path":"ptm",
+            "model.pretrained_backbone_path":"ptm_if_no_resume_model",
+            "train.resume_training_checkpoint_path":"resume_model",
             "encryption_key":"key",
             "results_dir":"output_dir"
         },

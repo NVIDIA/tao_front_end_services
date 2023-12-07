@@ -94,7 +94,7 @@
 
     "spec_params":{
         "train": {
-            "training_config.pretrained_weights":"ptm_if_no_resume_model",
+            "training_config.pretrained_weights":"ptm",
             "training_config.resume_from_model":"resume_model",
             "enc_key":"key"
         },
@@ -113,7 +113,7 @@
         "training_config.checkpoint_interval":"assign_const_value,training_config.num_epochs",
         "evaluation_config.validation_period_during_training":"assign_const_value,training_config.num_epochs,training_config.checkpoint_interval",
         "training_config.resume_from_model":"automl_resume_model",
-        "training_config.pretrained_weights":"automl_assign_ptm",
+        "training_config.pretrained_weights":"ptm",
         "enc_key":"key"
     },
 

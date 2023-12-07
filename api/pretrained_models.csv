@@ -126,9 +126,19 @@ Pointpillars,nvidia/tao/pointpillarnet:trainable_v1.0,pointpillars
 ReIdentification,nvidia/tao/reidentificationnet:trainable_v1.1,re_identification
 OCDNET,nvidia/tao/ocdnet:trainable_resnet18_v1.0,ocdnet
 OCDNET,nvidia/tao/ocdnet:trainable_resnet50_v1.0,ocdnet
+OCDNET,nvidia/tao/ocdnet:trainable_ocdnet_vit_v1.0,ocdnet
+OCDNET,nvidia/tao/ocdnet:trainable_ocdnet_vit_v1.1,ocdnet
+OCDNET,nvidia/tao/ocdnet:trainable_ocdnet_vit_v1.2,ocdnet
+OCDNET,nvidia/tao/ocdnet:trainable_ocdnet_vit_v1.3,ocdnet
 OCRNET,nvidia/tao/ocrnet:trainable_v1.0,ocrnet
+OCRNET,nvidia/tao/ocrnet:trainable_v2.0,ocrnet
 Optical Inspection,nvidia/tao/optical_inspection:trainable_v1.0,optical_inspection
 PCB Classification,nvidia/tao/pcb_classification:trainable_v1.0,classification_pyt
+Visual ChangeNet-Classification,nvidia/tao/changenet_classification:changenet_nvpcb_trainable_v1.0,visual_changenet
+Visual ChangeNet-Segmentation,nvidia/tao/changenet_segmentation:changenet_levircd_trainable_v1.0,visual_changenet
+Visual ChangeNet-Segmentation,nvidia/tao/changenet_segmentation_landsatscd:trainable_v1.0,visual_changenet
+TAO Pretrained NVImageNet Classification,nvaie/nv_dinov2_classification_model:trainable_v1.1,classification_pyt
+TAO Pretrained NVImageNet Classification,nvaie/imagenet_nv_dinov2:trainable_v1.1,classification_pyt
 TAO Pretrained NVImageNet Classification,nvidia/tao/pretrained_gcvit_classification_nvimagenet:gcvit_xxtiny_nvimagenet,classification_pyt
 TAO Pretrained NVImageNet Classification,nvidia/tao/pretrained_gcvit_classification_nvimagenet:gcvit_xtiny_nvimagenet,classification_pyt
 TAO Pretrained NVImageNet Classification,nvidia/tao/pretrained_gcvit_classification_nvimagenet:gcvit_tiny_nvimagenet,classification_pyt
@@ -154,6 +164,7 @@ TAO Pretrained ImageNet Classification,nvidia/tao/pretrained_gcvit_classificatio
 TAO Pretrained ImageNet Classification,nvidia/tao/pretrained_fan_classification_nvimagenet:fan_base_hybrid_nvimagenet,classification_pyt
 TAO Pretrained NVImageNet Classification,nvidia/tao/pretrained_fan_classification_nvimagenet:fan_small_hybrid_nvimagenet,classification_pyt
 TAO Pretrained NVImageNet Classification,nvidia/tao/pretrained_fan_classification_nvimagenet:fan_large_hybrid_nvimagenet,classification_pyt
+TAO Pretrained NVImageNet Classification,nvidia/tao/pretrained_fan_classification_nvimagenet:fan_small_hybrid_nvimagenet,centerpose
 TAO Pretrained ImageNet Object Detection backbone,nvidia/tao/pretrained_dino_imagenet:fan_hybrid_base_in22k_1k_384,dino
 TAO Pretrained ImageNet Object Detection backbone,nvidia/tao/pretrained_dino_imagenet:fan_hybrid_base_in22k_1k,dino
 TAO Pretrained ImageNet Object Detection backbone,nvidia/tao/pretrained_dino_imagenet:fan_hybrid_base_in22k,dino

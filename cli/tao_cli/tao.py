@@ -52,6 +52,8 @@ from tao_cli.networks.re_identification import re_identification
 from tao_cli.networks.segformer import segformer
 from tao_cli.networks.deformable_detr import deformable_detr
 from tao_cli.networks.dino import dino
+from tao_cli.networks.visual_changenet import visual_changenet
+from tao_cli.networks.centerpose import centerpose
 # Data Services
 from tao_cli.networks.annotations import annotations
 from tao_cli.networks.analytics import analytics
@@ -103,6 +105,8 @@ cli.add_command(re_identification)
 cli.add_command(segformer)
 cli.add_command(deformable_detr)
 cli.add_command(dino)
+cli.add_command(visual_changenet)
+cli.add_command(centerpose)
 # Data Services
 cli.add_command(annotations)
 cli.add_command(analytics)
