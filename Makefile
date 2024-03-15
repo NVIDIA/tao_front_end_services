@@ -19,7 +19,7 @@ helm_push:
 	helm plugin install https://github.com/chartmuseum/helm-push ;\
 	OUTFILE="/tmp/helm-push-$$(date "+%Y.%m.%d-%H.%M.%S").out" ;\
 	cp chart/values.yaml chart/values.yaml.default ; \
-	sed -i "s#repository: nvcr.io/nvstaging/tao/nvtl-api#repository: $(TAO_API_REGISTRY)/$(TAO_API_ORG)/$(TAO_API_TEAM)/nvtl-api#" "chart/values.yaml"; \
+	sed -i "s#repository: nvcr.io/nvidia/tao/nvtl-api#repository: $(TAO_API_REGISTRY)/$(TAO_API_ORG)/$(TAO_API_TEAM)/nvtl-api#" "chart/values.yaml"; \
 	sed -i "s#tag: v$(TAO_VERSION)-nightly-latest#tag: $(USER)-$(UUID_TAO_HELM)#" "chart/values.yaml"; \
 	echo -e "\norgName: $(TAO_API_ORG)" >> "chart/values.yaml"; \
 	echo "teamName: $(TAO_API_TEAM)" >> "chart/values.yaml"; \
@@ -54,7 +54,7 @@ helm_uninstall:
 
 docker_build:
 	@read -p "Enter the docker registry value [nvcr.io]: " TAO_API_REGISTRY && echo "TAO_API_REGISTRY=$$TAO_API_REGISTRY" > .env; \
-	read -p "Enter the docker org value [nvstaging]: " TAO_API_ORG && echo "TAO_API_ORG=$$TAO_API_ORG" >> .env; \
+	read -p "Enter the docker org value [nvidia]: " TAO_API_ORG && echo "TAO_API_ORG=$$TAO_API_ORG" >> .env; \
 	read -p "Enter the docker team value [tao]: " TAO_API_TEAM && echo "TAO_API_TEAM=$$TAO_API_TEAM" >> .env; \
 	echo "TAO_VERSION=5.2.0" >> .env; \
 	stty -echo && read -p "Enter your ngc_api_key [from ~/.ngc/config]: " PASSWORD && echo "PASSWORD=$$PASSWORD" >> .env; \

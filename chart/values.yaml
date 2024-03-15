@@ -1,6 +1,6 @@
 # TAO Toolkit API container info
 image:
-  repository: nvcr.io/nvstaging/tao/nvtl-api
+  repository: nvcr.io/nvidia/tao/nvtl-api
   tag: v5.2.0-nightly-latest
 imagePullSecret: imagepullsecret
 imagePullPolicy: Always
@@ -35,8 +35,9 @@ adminUUID: "00000000-0000-0000-0000-000000000001"
 backend: local-k8s
 maxNumGpuPerNode: 1
 imageTf1: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
-imagePyt: nvcr.io/nvstaging/tao/tao-toolkit-pyt_v5.2.0-nightly-latest
+imagePyt: nvcr.io/nvidia/tao/tao-toolkit:5.3.0-pyt
 imageTf2: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0
-imageTaoDeploy: nvcr.io/nvstaging/tao/tao-toolkit-deploy_v5.2.0-nightly-latest
-imageDataservices: nvcr.io/nvstaging/tao/tao-toolkit-ds_v5.0.0-nightly-latest
+imageTaoDeploy: nvcr.io/nvidia/tao/tao-toolkit:5.3.0-deploy
+imageDataservices: nvcr.io/nvidia/tao/tao-toolkit:5.3.0-data-services
 imageDefault: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
+

@@ -42,7 +42,7 @@ spec:
                 secretKeyRef:
                   name: bcpclustersecret
                   key: .dockerconfigjson
-            command: ["/bin/bash", "cronjob_start.sh", "nvidia/tao,nvstaging/tao,nvaie,nvstaging/nvaie,iasixjqzw1hj/no-team", "$(BCPCLUSTERSECRET)"]
+            command: ["/bin/bash", "cronjob_start.sh", "nvidia/tao,nvaie", "$(BCPCLUSTERSECRET)"]
             volumeMounts:
             - name: shared-data
               mountPath: /shared
