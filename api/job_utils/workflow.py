@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 """Job Workflow modules"""
 import os
-import yaml
+import sys
 import threading
 import functools
 import datetime
@@ -27,9 +27,10 @@ from queue import PriorityQueue
 
 from dataclasses import dataclass, field, asdict
 
-from handlers.utilities import read_network_config
+from handlers.utilities import read_network_config, MEDICAL_NETWORK_ARCHITECT
 from handlers.actions import ACTIONS_TO_FUNCTIONS, AutoMLPipeline
-from handlers.stateless_handlers import get_root, get_handler_root, get_handler_job_metadata, update_job_results
+from handlers.stateless_handlers import get_handler_root, get_handler_job_metadata, update_job_metadata, safe_dump_file, safe_load_file
+from handlers import ngc_handler
 from job_utils.dependencies import dependency_type_map, dependency_check_default
 
 
@@ -78,6 +79,9 @@ class Job(PrioritizedItem, IdedItem):
     parent_id: uuid.UUID = field(compare=False, default=uuid.uuid4())
     network: str = field(compare=False, default=None)
     handler_id: uuid.UUID = field(compare=False, default=uuid.uuid4())
+    user_id: uuid.UUID = field(compare=False, default=uuid.uuid4())
+    kind: str = field(compare=False, default=None)
+    specs: dict = field(compare=False, default=None)
 
 
 def dependency_check(job_context, dependency):
@@ -102,6 +106,8 @@ def execute_job(job_context):
         # Get the correct ActionPipeline - build specs, build run command, launch K8s job, monitor status, run post-job steps
         network_config = read_network_config(network)
         action_pipeline_name = network_config["api_params"]["actions_pipe"].get(action, "")
+        if network in MEDICAL_NETWORK_ARCHITECT:
+            action_pipeline_name = "medical_" + action_pipeline_name
         action_pipeline = ACTIONS_TO_FUNCTIONS[action_pipeline_name]
         _Actionpipeline = action_pipeline(job_context)
         # Thread this!
@@ -120,7 +126,7 @@ def execute_job(job_context):
 @synchronized
 def still_exists(job_to_check):
     """Checks if the the job is yet to be executed/queued or not"""
-    filename = os.path.join(get_handler_root(job_to_check.handler_id), "jobs.yaml")
+    filename = os.path.join(get_handler_root(job_to_check.user_id, None, job_to_check.handler_id, None), "jobs.yaml")
     jobs = read_jobs(filename)
     for _, job in enumerate(jobs):
         if job.id == job_to_check.id:
@@ -140,32 +146,30 @@ def report_healthy(message, clear=False):
             f.write(str(message) + "\n")
 
 
-@synchronized
 def read_jobs(yaml_file):
     """Reads a job yaml file and convert to job contexts"""
     jobs = []
     if not os.path.exists(yaml_file):
         return []
-    with open(yaml_file, "r", encoding='utf-8') as file:
-        jobs_raw = yaml.safe_load(file)
-        if not jobs_raw:
-            return []
-        # convert yaml to Jobs and put it in the priority queue
-        for job in jobs_raw:
-            j = Job(**job)
-            j.dependencies = []
-            for d in job.get('dependencies'):
-                j.dependencies.append(Dependency(**d))
-            jobs.append(j)
+    jobs_raw = safe_load_file(yaml_file, file_type="yaml")
+    if not jobs_raw:
+        return []
+    # convert yaml to Jobs and put it in the priority queue
+    for job in jobs_raw:
+        j = Job(**job)
+        j.dependencies = []
+        for d in job.get('dependencies'):
+            j.dependencies.append(Dependency(**d))
+        jobs.append(j)
 
     return jobs
 
 
-@synchronized
 def write_jobs(yaml_file, jobs):
     """Writes list of Job objects into the yaml_file"""
-    with open(yaml_file, 'w', encoding='utf-8') as file:
-        yaml.dump([asdict(i) for i in jobs], file, sort_keys=False)
+    os.makedirs(os.path.dirname(yaml_file), exist_ok=True)
+    data = [asdict(i) for i in jobs]
+    safe_dump_file(yaml_file, data, file_type="yaml")
 
 
 @synchronized
@@ -173,10 +177,13 @@ def scan_for_jobs():
     """Scans for new jobs and queues them if dependencies are met"""
     while True:
         report_healthy("Workflow has waken up", clear=True)
+        # Clean up deleted workspaces
+        if os.getenv("NGC_RUNNER", "") == "True":
+            ngc_handler.clean_deleted_workspaces()
         # Create global queue
         queue = PriorityQueue()
         # Read all jobs.yaml files into one queue
-        pattern = get_root() + "**/**/**/jobs.yaml"
+        pattern = os.environ.get("TAO_ROOT", "/shared/users/") + "**/**/**/jobs.yaml"  # jobs.yaml still part of PVC
         job_files = glob.glob(pattern)
         for job_file in job_files:
             for j in read_jobs(job_file):
@@ -189,6 +196,8 @@ def scan_for_jobs():
         for i in range(len(queue.queue)):
             # check dependencies
             job = queue.queue[i]
+            if os.getenv("NGC_RUNNER", "") == "True":
+                ngc_handler.mount_workspaces_required_for_job(job.user_id, job.handler_id, job.parent_id)
             report_healthy(f"{job.id} with action {job.action}: Checking dependencies")
             report_healthy(f"Total dependencies: {len(job.dependencies)}")
             all_met = True
@@ -197,12 +206,12 @@ def scan_for_jobs():
                 dependency_met, message = dependency_check(job, dep)
                 if not dependency_met:
                     pending_reason_message += f"{message} and, "
-                    report_healthy(f"Unmet dependency: {dep.type}")
+                    report_healthy(f"Unmet dependency: {dep.type} {pending_reason_message}")
                     all_met = False
 
             # Update detailed status message in response when appropriate message is available
             pending_reason_message = ''.join(pending_reason_message.rsplit(" and, ", 1))
-            metadata = get_handler_job_metadata(job.handler_id, job.id)
+            metadata = get_handler_job_metadata(job.user_id, job.handler_id, job.id)
             results = metadata.get("result", {})
             if results:
                 detailed_status = results.get("detailed_status", {})
@@ -212,7 +221,7 @@ def scan_for_jobs():
                 metadata["results"] = {}
                 results["detailed_status"] = {}
             results["detailed_status"]["message"] = pending_reason_message
-            update_job_results(job.handler_id, job.id, results)
+            update_job_metadata(job.user_id, job.handler_id, job.id, metadata_key="result", data=results)
 
             # if all dependencies are met
             if all_met and still_exists(job):
@@ -223,7 +232,7 @@ def scan_for_jobs():
                     # dequeue job
                     jobs_to_dequeue.append(job)
         for job in jobs_to_dequeue:
-            Workflow.dequeue(job.handler_id, job.id)
+            Workflow.dequeue(job.user_id, job.handler_id, job.id)
         report_healthy("Workflow going to sleep")
         time.sleep(15)
 
@@ -255,18 +264,18 @@ class Workflow:
         """Method used from outside to put a job into the workflow"""
         # Simply prints the job inside the filename
         # Called only by on_new_job()
-        filename = os.path.join(get_handler_root(job.handler_id), "jobs.yaml")
+        filename = os.path.join(get_handler_root(job.user_id, None, job.handler_id, None), "jobs.yaml")
         jobs = read_jobs(filename)
         jobs.append(job)
         write_jobs(filename, jobs)
 
     @staticmethod
-    def dequeue(handler_id, job_id):
+    def dequeue(user_id, handler_id, job_id):
         """Method used from outside to remove a job from the workflow"""
         # Simply remove the job from the filename
         # Read all jobs
 
-        filename = os.path.join(get_handler_root(handler_id), "jobs.yaml")
+        filename = os.path.join(get_handler_root(user_id, None, handler_id, None), "jobs.yaml")
         jobs = read_jobs(filename)
         # Delete job_id's job from the list
         for idx, job in enumerate(jobs):
@@ -281,6 +290,9 @@ class Workflow:
         try:
             path = "/shared/health.txt"
             # current time and last health modified time must be less than 100 seconds
-            return (time.time() - os.path.getmtime(path)) <= 100
+            last_updated_time = time.time() - os.path.getmtime(path)
+            if last_updated_time > 100:
+                print(f"Health file was updated {last_updated_time} ago which is > 100", file=sys.stderr)
+            return last_updated_time <= 100
         except:
             return False

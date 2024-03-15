@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ kind: ClusterRole
 metadata:
   name: {{ $myName }}-rbac-cr
 rules:
-- apiGroups: ["", "batch", "moebius-job-manager.nvidia.io"]
-  resources: ["jobs", "cloudjobs", "jobs/status", "nodes", "pods", "services", "secrets", "persistentvolumeclaims"]
+- apiGroups: ["", "batch", "dgx-job-manager.nvidia.io", "apps"]
+  resources: ["jobs", "dgxjobs", "jobs/status", "nodes", "pods", "services", "secrets", "deployments", "deployments/status", "persistentvolumeclaims"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

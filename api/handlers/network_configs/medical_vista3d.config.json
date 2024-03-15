@@ -1,0 +1,34 @@
+{
+    "api_params": {
+        "dataset_type": "semantic_segmentation",
+        "formats": [
+            "medical"
+        ],
+        "actions": [
+            "train",
+            "inference",
+            "annotation"
+        ],
+        "image": "medical",
+        "version": "0.2.1",
+        "spec_backend": "yaml",
+        "classwise": "False",
+        "realtime_infer_support": true,
+        "actions_pipe": {
+            "train": "train",
+            "annotation": "annotation"
+        }
+    },
+    "cli_params": {},
+    "spec_params":{
+        "train": {
+            "num_gpu": 1
+        },
+        "annotation": {
+            "train_spec": {
+                "config_file": ["configs/train.json", "configs/train_continual.json"],
+                "label_mappings": "$default_medical_label_mapping"
+            }
+        }
+    }
+}

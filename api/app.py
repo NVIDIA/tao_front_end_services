@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,12 +20,18 @@ import sys
 import math
 import json
 import shutil
+import atexit
+import os
+import threading
+import time
 
 from apispec import APISpec
 from apispec.ext.marshmallow import MarshmallowPlugin
 from apispec_webframeworks.flask import FlaskPlugin
 from flask import Flask, request, jsonify, make_response, render_template, send_from_directory, send_file
-from marshmallow import Schema, fields
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from marshmallow import Schema, fields, exceptions, validate
 from marshmallow_enum import EnumField, Enum
 
 from filter_utils import filtering, pagination
@@ -33,31 +39,87 @@ from auth_utils import credentials, authentication, access_control
 from health_utils import health_check
 
 from handlers.app_handler import AppHandler as app_handler
+from handlers.ngc_handler import mount_ngc_workspace, unmount_ngc_workspace, workspace_info, load_user_workspace_metadata, is_ngc_workspace_free
+from handlers.stateless_handlers import safe_dump_file, resolve_metadata
 from handlers.utilities import validate_uuid
-from job_utils.workflow import Workflow
+from utils.utils import run_system_command, is_pvc_space_free
+from job_utils.workflow import Workflow, report_healthy, synchronized
 
 from werkzeug.exceptions import HTTPException
-
+from datetime import timedelta
+from timeloop import Timeloop
+from functools import wraps
 
 flask_plugin = FlaskPlugin()
 marshmallow_plugin = MarshmallowPlugin()
 
 
 #
+# Utils
+#
+def sys_int_format():
+    """Get integer format based on system."""
+    if sys.maxsize > 2**31 - 1:
+        return "int64"
+    return "int32"
+
+
+def disk_space_check(f):
+    """Decorator to check disk space for API endpoints"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user_id = kwargs.get('user_id', '')
+        threshold_bytes = 100 * 1024 * 1024
+
+        pvc_free_space, pvc_free_bytes = is_pvc_space_free(threshold_bytes)
+        msg = f"PVC free space remaining is {pvc_free_bytes} bytes which is less than {threshold_bytes} bytes"
+        if not pvc_free_space:
+            return make_response(jsonify({'error': f'Disk space is nearly full. {msg}. Delete appropriate experiments/datasets'}), 500)
+
+        if os.getenv("NGC_RUNNER") == "True" and user_id:
+            workspace_free_space, workspace_free_bytes = is_ngc_workspace_free(user_id, threshold_bytes)
+            msg = f"NGC workspace free space remaining is {workspace_free_bytes} bytes which is less than {threshold_bytes} bytes"
+            if not workspace_free_space:
+                return make_response(jsonify({'error': f'Disk space is nearly full. {msg}. Delete appropriate experiments/datasets'}), 500)
+
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+#
 # Create an APISpec
 #
 spec = APISpec(
-    title='TAO Toolkit API',
+    title='NVIDIA Transfer Learning API',
     version='v5.2.0',
     openapi_version='3.0.3',
-    info={"description": 'TAO Toolkit API document'},
+    info={"description": 'NVIDIA Transfer Learning API document'},
     tags=[
         {"name": 'AUTHENTICATION', "description": 'Endpoints related to User Authentication'},
         {"name": 'DATASET', "description": 'Endpoints related to Datasets'},
-        {"name": 'MODEL', "description": 'Endpoints related to Model Experiments'}
+        {"name": 'EXPERIMENT', "description": 'Endpoints related to Experiments'},
+        {"name": "nSpectId", "description": "NSPECT-1T59-RTYH", "externalDocs": {"url": "https://nspect.nvidia.com/review?id=NSPECT-1T59-RTYH"}}
     ],
     plugins=[flask_plugin, marshmallow_plugin],
+    security=[{"bearer-token": []}],
 )
+
+api_key_scheme = {"type": "apiKey", "in": "header", "name": "ngc_api_key"}
+jwt_scheme = {"type": "http", "scheme": "bearer", "bearerFormat": "JWT", "description": "RFC8725 Compliant JWT"}
+
+spec.components.security_scheme("api-key", api_key_scheme)
+spec.components.security_scheme("bearer-token", jwt_scheme)
+
+spec.components.header("X-RateLimit-Limit", {
+    "description": "The number of allowed requests in the current period",
+    "schema": {
+        "type": "integer",
+        "format": sys_int_format(),
+        "minimum": -sys.maxsize - 1,
+        "maximum": sys.maxsize,
+    }
+})
 
 
 #
@@ -81,7 +143,7 @@ marshmallow_plugin.converter.add_attribute_function(enum_to_properties)
 class DatasetUploadSchema(Schema):
     """Class defining dataset upload schema"""
 
-    message = fields.Str(allow_none=True)
+    message = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
 
 
 class ErrorRspSchema(Schema):
@@ -91,8 +153,8 @@ class ErrorRspSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    error_desc = fields.Str()
-    error_code = fields.Int()
+    error_desc = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+    error_code = fields.Int(validate=fields.validate.Range(min=-sys.maxsize - 1, max=sys.maxsize), format=sys_int_format())
 
 
 class JobStatusEnum(Enum):
@@ -101,7 +163,16 @@ class JobStatusEnum(Enum):
     Done = 'Done'
     Running = 'Running'
     Error = 'Error'
-    Pending = "Pending"
+    Pending = 'Pending'
+    Canceled = 'Canceled'
+
+
+class PullStatus(Enum):
+    """Class defining artifact upload/download status"""
+
+    not_present = "not_present"
+    in_progress = "in_progress"
+    present = "present"
 
 
 #
@@ -110,6 +181,13 @@ class JobStatusEnum(Enum):
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 app.config['TRAP_HTTP_EXCEPTIONS'] = True
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["10000/hour"],
+    headers_enabled=True,
+    storage_uri="memory://",
+)
 
 
 @app.errorhandler(HTTPException)
@@ -137,10 +215,10 @@ class DetailedStatusSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    date = fields.Str()
-    time = fields.Str()
-    message = fields.Str()
-    status = fields.Str()
+    date = fields.Str(format="mm/dd/yyyy", validate=fields.validate.Length(max=26))
+    time = fields.Str(format="hh:mm:ss", validate=fields.validate.Length(max=26))
+    message = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+    status = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
 
 
 class GraphSchema(Schema):
@@ -150,13 +228,13 @@ class GraphSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    metric = fields.Str(allow_none=True)
-    x_min = fields.Int(allow_none=True)
-    x_max = fields.Int(allow_none=True)
+    metric = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
+    x_min = fields.Int(allow_none=True, validate=fields.validate.Range(min=-sys.maxsize - 1, max=sys.maxsize), format=sys_int_format())
+    x_max = fields.Int(allow_none=True, validate=fields.validate.Range(min=-sys.maxsize - 1, max=sys.maxsize), format=sys_int_format())
     y_min = fields.Float(allow_none=True)
     y_max = fields.Float(allow_none=True)
     values = fields.Dict(keys=fields.Int(allow_none=True), values=fields.Float(allow_none=True))
-    units = fields.Str(allow_none=True)
+    units = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
 
 
 class CategoryWiseSchema(Schema):
@@ -166,7 +244,7 @@ class CategoryWiseSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    category = fields.Str()
+    category = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
     value = fields.Float(allow_none=True)
 
 
@@ -177,8 +255,8 @@ class CategorySchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    metric = fields.Str()
-    category_wise_values = fields.List(fields.Nested(CategoryWiseSchema, allow_none=True))
+    metric = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
+    category_wise_values = fields.List(fields.Nested(CategoryWiseSchema, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
 
 
 class KPISchema(Schema):
@@ -188,7 +266,7 @@ class KPISchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    metric = fields.Str(allow_none=True)
+    metric = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
     values = fields.Dict(keys=fields.Int(allow_none=True), values=fields.Float(allow_none=True))
 
 
@@ -196,11 +274,11 @@ class CustomFloatField(fields.Float):
     """Class defining custom Float field allown NaN and Inf values in Marshmallow"""
 
     def _deserialize(self, value, attr, data, **kwargs):
-        if value == "nan" or (type(value) == float and math.isnan(value)):
+        if value == "nan" or (isinstance(value, float) and math.isnan(value)):
             return float("nan")
-        if value == "inf" or (type(value) == float and math.isinf(value)):
+        if value == "inf" or (isinstance(value, float) and math.isinf(value)):
             return float("inf")
-        if value == "-inf" or (type(value) == float and math.isinf(value)):
+        if value == "-inf" or (isinstance(value, float) and math.isinf(value)):
             return float("-inf")
         if value is None:
             return None
@@ -214,8 +292,8 @@ class AutoMLResultsSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    metric = fields.Str(allow_none=True)
-    value = CustomFloatField()
+    metric = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
+    value = CustomFloatField(allow_none=True)
 
 
 class StatsSchema(Schema):
@@ -225,8 +303,8 @@ class StatsSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    metric = fields.Str(allow_none=True)
-    value = fields.Str(allow_none=True)
+    metric = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
+    value = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=sys.maxsize))
 
 
 class JobResultSchema(Schema):
@@ -237,17 +315,19 @@ class JobResultSchema(Schema):
 
         ordered = True
     detailed_status = fields.Nested(DetailedStatusSchema, allow_none=True)
-    graphical = fields.List(fields.Nested(GraphSchema, allow_none=True))
-    categorical = fields.List(fields.Nested(CategorySchema, allow_none=True))
-    kpi = fields.List(fields.Nested(KPISchema, allow_none=True))
-    automl_result = fields.List(fields.Nested(AutoMLResultsSchema, allow_none=True))
-    stats = fields.List(fields.Nested(StatsSchema, allow_none=True))
-    epoch = fields.Int(allow_none=True)
-    max_epoch = fields.Int(allow_none=True)
-    time_per_epoch = fields.Str(allow_none=True)
-    time_per_iter = fields.Str(allow_none=True)
-    cur_iter = fields.Int(allow_none=True)
-    eta = fields.Str(allow_none=True)
+    graphical = fields.List(fields.Nested(GraphSchema, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
+    categorical = fields.List(fields.Nested(CategorySchema, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
+    kpi = fields.List(fields.Nested(KPISchema, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
+    automl_result = fields.List(fields.Nested(AutoMLResultsSchema, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
+    stats = fields.List(fields.Nested(StatsSchema, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
+    epoch = fields.Int(allow_none=True, validate=fields.validate.Range(min=-1, max=sys.maxsize), format=sys_int_format(), error="Epoch should be larger than -1. With -1 meaning non-valid.")
+    max_epoch = fields.Int(allow_none=True, validate=fields.validate.Range(min=0, max=sys.maxsize), format=sys_int_format(), error="Max epoch should be non negative.")
+    time_per_epoch = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=sys.maxsize))
+    time_per_iter = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=sys.maxsize))
+    cur_iter = fields.Int(allow_none=True, validate=fields.validate.Range(min=0, max=sys.maxsize), format=sys_int_format())
+    eta = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=sys.maxsize))
+    key_metric = fields.Float(allow_none=True)
+    message = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=sys.maxsize))
 
 
 class AllowedDockerEnvVariables(Enum):
@@ -271,7 +351,7 @@ class LoginReqSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    ngc_api_key = fields.Str()
+    ngc_api_key = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
 
 
 class LoginRspSchema(Schema):
@@ -281,11 +361,12 @@ class LoginRspSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    user_id = fields.UUID()
-    token = fields.Str()
+    user_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    token = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=sys.maxsize))
 
 
 @app.route('/api/v1/login', methods=['POST'])
+@disk_space_check
 def login():
     """User Login.
     ---
@@ -294,6 +375,8 @@ def login():
       - AUTHENTICATION
       summary: User Login
       description: Returns the user credentials
+      security:
+        - api-key: []
       requestBody:
         content:
           application/json:
@@ -306,11 +389,17 @@ def login():
           content:
             application/json:
               schema: LoginRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         401:
           description: Unauthorized
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     schema = LoginReqSchema()
     request_dict = schema.dump(schema.load(request.get_json(force=True)))
@@ -328,16 +417,31 @@ def login():
 
 # Internal endpoint for ingress controller to check authentication
 @app.route('/api/v1/auth', methods=['GET'])
+@disk_space_check
 def auth():
     """authentication endpoint"""
     # retrieve jwt from headers
     token = ''
     url = request.headers.get('X-Original-Url', '')
     print('URL: ' + str(url), flush=True)
+    method = request.headers.get('X-Original-Method', '')
+    print('Method: ' + str(method), flush=True)
+    # bypass authentication for http OPTIONS requests
+    if method == 'OPTIONS':
+        return make_response(jsonify({}), 200)
+    # retrieve authorization token, or use NGC SID/SSID cookie
     authorization = request.headers.get('Authorization', '')
     authorization_parts = authorization.split()
     if len(authorization_parts) == 2 and authorization_parts[0].lower() == 'bearer':
         token = authorization_parts[1]
+    if not token:
+        sid_cookie = request.cookies.get('SID')
+        if sid_cookie:
+            token = 'SID=' + sid_cookie
+    if not token:
+        ssid_cookie = request.cookies.get('SSID')
+        if ssid_cookie:
+            token = 'SSID=' + ssid_cookie
     print('Token: ...' + str(token)[-10:], flush=True)
     # authentication
     user_id, err = authentication.validate(token)
@@ -347,7 +451,6 @@ def auth():
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 401)
         return response
-
     # access control
     err = access_control.validate(url, user_id)
     if err:
@@ -359,17 +462,54 @@ def auth():
     return make_response(jsonify({'user_id': user_id}), 200)
 
 
+# Define enum common to Dataset and Experiment Api
+
+class ActionEnum(Enum):
+    """Class defining action type enum"""
+
+    dataset_convert = 'dataset_convert'
+    convert = 'convert'
+    convert_and_index = 'convert_and_index'
+    convert_efficientdet_tf1 = 'convert_efficientdet_tf1'
+    convert_efficientdet_tf2 = 'convert_efficientdet_tf2'
+
+    kmeans = 'kmeans'
+    augment = 'augment'
+
+    train = 'train'
+    evaluate = 'evaluate'
+    prune = 'prune'
+    retrain = 'retrain'
+    export = 'export'
+    gen_trt_engine = 'gen_trt_engine'
+    trtexec = 'trtexec'
+    inference = 'inference'
+
+    annotation = 'annotation'
+    analyze = 'analyze'
+    validate = 'validate'
+    generate = 'generate'
+    calibration_tensorfile = 'calibration_tensorfile'
+    confmat = 'confmat'
+    nextimage = 'nextimage'
+    cacheimage = 'cacheimage'
+    notify = 'notify'
+
+    auto3dseg = 'auto3dseg'
+
 #
 # DATASET API
 #
+
+
 class DatasetActions(Schema):
     """Class defining dataset actions schema"""
 
-    job = fields.UUID(allow_none=True)
-    actions = fields.List(fields.Str())
+    parent_job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    action = EnumField(ActionEnum)
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     specs = fields.Raw()
-    parent_id = fields.UUID(allow_none=True)
-    parent_job_type = fields.Str(allow_none=True)
 
 
 class DatasetTypeEnum(Enum):
@@ -392,6 +532,7 @@ class DatasetTypeEnum(Enum):
     re_identification = 're_identification'
     visual_changenet = 'visual_changenet'
     centerpose = 'centerpose'
+    user_custom = 'user_custom'
 
 
 class DatasetFormatEnum(Enum):
@@ -409,6 +550,18 @@ class DatasetFormatEnum(Enum):
     classification_pyt = 'classification_pyt'
     visual_changenet_segment = 'visual_changenet_segment'
     visual_changenet_classify = 'visual_changenet_classify'
+    medical = 'medical'
+
+
+class JobTarStatsSchema(Schema):
+    """Class defining job tar file stats schema"""
+
+    class Meta:
+        """Class enabling sorting field values by the order in which they are declared"""
+
+        ordered = True
+    sha256_digest = fields.Str(format="regex", regex=r'^[a-fA-F0-9]{64}$', validate=fields.validate.Length(max=64), allow_none=True)
+    file_size = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
 
 
 class DatasetReqSchema(Schema):
@@ -418,36 +571,19 @@ class DatasetReqSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    name = fields.Str()
-    description = fields.Str()
-    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
-    version = fields.Str()
-    logo = fields.URL()
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True))
+    version = fields.Str(format="regex", regex=r'^\d+\.\d+\.\d+$', validate=fields.validate.Length(max=10))
+    logo = fields.URL(validate=fields.validate.Length(max=2048))
     type = EnumField(DatasetTypeEnum)
     format = EnumField(DatasetFormatEnum)
-    pull = fields.URL()
-
-
-class DatasetJobResultCategoriesSchema(Schema):
-    """Class defining dataset job result categories schema"""
-
-    class Meta:
-        """Class enabling sorting field values by the order in which they are declared"""
-
-        ordered = True
-    category = fields.Str()
-    count = fields.Int()
-
-
-class DatasetJobResultTotalSchema(Schema):
-    """Class defining dataset job result total schema"""
-
-    class Meta:
-        """Class enabling sorting field values by the order in which they are declared"""
-
-        ordered = True
-    images = fields.Int()
-    labels = fields.Int()
+    pull = fields.URL(validate=fields.validate.Length(max=2048))
+    client_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    client_id = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    client_secret = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    filters = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    status = EnumField(PullStatus)
 
 
 class DatasetJobSchema(Schema):
@@ -457,13 +593,18 @@ class DatasetJobSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    id = fields.UUID()
-    parent_id = fields.UUID(allow_none=True)
-    created_on = fields.DateTime()
-    last_modified = fields.DateTime()
-    action = fields.Str()
+    id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    parent_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    action = EnumField(ActionEnum)
     status = EnumField(JobStatusEnum)
     result = fields.Nested(JobResultSchema)
+    specs = fields.Raw(allow_none=True)
+    job_tar_stats = fields.Nested(JobTarStatsSchema)
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
+    dataset_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
 
 
 class DatasetRspSchema(Schema):
@@ -473,19 +614,26 @@ class DatasetRspSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    id = fields.UUID()
-    created_on = fields.DateTime()
-    last_modified = fields.DateTime()
-    name = fields.Str()
-    description = fields.Str()
-    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
-    version = fields.Str()
-    logo = fields.URL(allow_none=True)
+        load_only = ("client_id", "client_secret", "filters")
+
+    id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True))
+    version = fields.Str(format="regex", regex=r'^\d+\.\d+\.\d+$', validate=fields.validate.Length(max=10))
+    logo = fields.URL(validate=fields.validate.Length(max=2048), allow_none=True)
     type = EnumField(DatasetTypeEnum)
     format = EnumField(DatasetFormatEnum)
-    pull = fields.URL(allow_none=True)
-    actions = fields.List(fields.Str())
-    jobs = fields.List(fields.Nested(DatasetJobSchema))
+    pull = fields.URL(validate=fields.validate.Length(max=2048), allow_none=True)
+    actions = fields.List(EnumField(ActionEnum), allow_none=True, validate=validate.Length(max=sys.maxsize))
+    jobs = fields.List(fields.Nested(DatasetJobSchema), validate=validate.Length(max=sys.maxsize))
+    client_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    client_id = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    client_secret = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    filters = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=2048), allow_none=True)
+    status = EnumField(PullStatus)
 
 
 class DatasetListRspSchema(Schema):
@@ -495,7 +643,7 @@ class DatasetListRspSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    datasets = fields.List(fields.Nested(DatasetRspSchema))
+    datasets = fields.List(fields.Nested(DatasetRspSchema), validate=validate.Length(max=sys.maxsize))
 
 
 class DatasetJobListSchema(Schema):
@@ -505,10 +653,11 @@ class DatasetJobListSchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    jobs = fields.List(fields.Nested(DatasetJobSchema))
+    jobs = fields.List(fields.Nested(DatasetJobSchema), validate=validate.Length(max=sys.maxsize))
 
 
-@app.route('/api/v1/user/<user_id>/dataset', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets', methods=['GET'])
+@disk_space_check
 def dataset_list(user_id):
     """List Datasets.
     ---
@@ -525,18 +674,25 @@ def dataset_list(user_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: skip
         in: query
         description: Optional skip for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: size
         in: query
         description: Optional size for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: sort
         in: query
         description: Optional sort
@@ -550,6 +706,15 @@ def dataset_list(user_id):
         required: false
         schema:
           type: string
+          maxLength: 5000
+          pattern: '.*'
+      - name: format
+        in: query
+        description: Optional format filter
+        required: false
+        schema:
+          type: string
+          enum: ["medical", "unet", "custom" ]
       - name: type
         in: query
         description: Optional type filter
@@ -565,6 +730,10 @@ def dataset_list(user_id):
               schema:
                 type: array
                 items: DatasetRspSchema
+                maxItems: 2147483647
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id)
     if message:
@@ -583,7 +752,8 @@ def dataset_list(user_id):
     return response
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>', methods=['GET'])
+@disk_space_check
 def dataset_retrieve(user_id, dataset_id):
     """Retrieve Dataset.
     ---
@@ -600,6 +770,7 @@ def dataset_retrieve(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID of Dataset to return
@@ -607,17 +778,24 @@ def dataset_retrieve(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Dataset
           content:
             application/json:
               schema: DatasetRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User or Dataset not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
@@ -638,7 +816,8 @@ def dataset_retrieve(user_id, dataset_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>', methods=['DELETE'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>', methods=['DELETE'])
+@disk_space_check
 def dataset_delete(user_id, dataset_id):
     """Delete Dataset.
     ---
@@ -655,6 +834,7 @@ def dataset_delete(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID of Dataset to delete
@@ -662,22 +842,32 @@ def dataset_delete(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Deleted Dataset
           content:
             application/json:
               schema: DatasetRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User or Dataset not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
@@ -698,7 +888,8 @@ def dataset_delete(user_id, dataset_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset', methods=['POST'])
+@app.route('/api/v1/users/<user_id>/datasets', methods=['POST'])
+@disk_space_check
 def dataset_create(user_id):
     """Create new Dataset.
     ---
@@ -715,6 +906,7 @@ def dataset_create(user_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         content:
           application/json:
@@ -727,11 +919,17 @@ def dataset_create(user_id):
           content:
             application/json:
               schema: DatasetRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id)
     if message:
@@ -754,7 +952,8 @@ def dataset_create(user_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>', methods=['PUT'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>', methods=['PUT'])
+@disk_space_check
 def dataset_update(user_id, dataset_id):
     """Update Dataset.
     ---
@@ -771,6 +970,7 @@ def dataset_update(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID of Dataset to update
@@ -778,6 +978,7 @@ def dataset_update(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         content:
           application/json:
@@ -790,16 +991,25 @@ def dataset_update(user_id, dataset_id):
           content:
             application/json:
               schema: DatasetRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User or Dataset not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
@@ -822,7 +1032,8 @@ def dataset_update(user_id, dataset_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>', methods=['PATCH'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>', methods=['PATCH'])
+@disk_space_check
 def dataset_partial_update(user_id, dataset_id):
     """Partial update Dataset.
     ---
@@ -839,6 +1050,7 @@ def dataset_partial_update(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID of Dataset to update
@@ -846,6 +1058,7 @@ def dataset_partial_update(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         content:
           application/json:
@@ -858,16 +1071,25 @@ def dataset_partial_update(user_id, dataset_id):
           content:
             application/json:
               schema: DatasetRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User or Dataset not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
@@ -890,7 +1112,8 @@ def dataset_partial_update(user_id, dataset_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route("/api/v1/user/<user_id>/dataset/<dataset_id>/upload", methods=["POST"])
+@app.route("/api/v1/users/<user_id>/datasets/<dataset_id>:upload", methods=["POST"])
+@disk_space_check
 def dataset_upload(user_id, dataset_id):
     """Upload Dataset.
     ---
@@ -907,6 +1130,7 @@ def dataset_upload(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID of Dataset
@@ -914,6 +1138,7 @@ def dataset_upload(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         description: Data file to upload (a tar.gz file)
         content:
@@ -924,6 +1149,7 @@ def dataset_upload(user_id, dataset_id):
                 data:
                   type: string
                   format: binary
+                  maxLength: 5000
             encoding:
               data:
                 contentType: application/gzip
@@ -934,16 +1160,25 @@ def dataset_upload(user_id, dataset_id):
           content:
             application/json:
               schema: DatasetUploadSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User or Dataset not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
@@ -952,6 +1187,16 @@ def dataset_upload(user_id, dataset_id):
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     file_tgz = request.files.get("file", None)
+
+    if file_tgz:
+        file_tgz.seek(0, 2)
+        file_size = file_tgz.tell()
+        print("Dataset size", file_size, file=sys.stderr)
+        max_file_size = 250 * 1024 * 1024
+        if file_size > max_file_size:
+            return make_response(jsonify({'error': 'File size exceeds the limit of 250 MB; Use Dataset pull feature for such datasets'}), 400)
+        file_tgz.seek(0)
+
     # Get response
     print("Triggering API call to upload data to server", file=sys.stderr)
     response = app_handler.upload_dataset(user_id, dataset_id, file_tgz)
@@ -961,7 +1206,7 @@ def dataset_upload(user_id, dataset_id):
     if response.code == 201:
         schema = DatasetUploadSchema()
         print("Returning success response", file=sys.stderr)
-        schema_dict = schema.dump({"message": "Data successfully uploaded"})
+        schema_dict = schema.dump({"message": "Server recieved file and upload process started"})
     else:
         schema = ErrorRspSchema()
         # Load metadata in schema and return
@@ -969,7 +1214,8 @@ def dataset_upload(user_id, dataset_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/specs/<action>/schema', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/specs/<action>/schema', methods=['GET'])
+@disk_space_check
 def dataset_specs_schema(user_id, dataset_id, action):
     """Retrieve Specs schema.
     ---
@@ -986,6 +1232,7 @@ def dataset_specs_schema(user_id, dataset_id, action):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID for Dataset
@@ -993,12 +1240,14 @@ def dataset_specs_schema(user_id, dataset_id, action):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: action
         in: path
         description: Action name
         required: true
         schema:
           type: string
+          enum: [ "dataset_convert", "convert", "convert_and_index", "convert_efficientdet_tf1", "convert_efficientdet_tf2", "kmeans", "augment", "train", "evaluate", "prune", "retrain", "export", "gen_trt_engine", "trtexec", "inference", "annotation", "analyze", "validate", "generate", "calibration_tensorfile", "confmat" ]
       responses:
         200:
           description: Returned the Specs schema for given action
@@ -1006,11 +1255,17 @@ def dataset_specs_schema(user_id, dataset_id, action):
             application/json:
               schema:
                 type: object
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User, Dataset or Action not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
@@ -1030,216 +1285,8 @@ def dataset_specs_schema(user_id, dataset_id, action):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/specs/<action>', methods=['GET'])
-def dataset_specs_retrieve(user_id, dataset_id, action):
-    """Retrieve Dataset Specs.
-    ---
-    get:
-      tags:
-      - DATASET
-      summary: Retrieve Dataset Specs
-      description: Returns the saved Dataset Specs for a given action
-      parameters:
-      - name: user_id
-        in: path
-        description: User ID
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: dataset_id
-        in: path
-        description: ID of Dataset
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: action
-        in: path
-        description: Action name
-        required: true
-        schema:
-          type: string
-      responses:
-        200:
-          description: Returned the saved Dataset Specs for specified action
-          content:
-            application/json:
-              schema:
-                type: object
-        404:
-          description: User, Dataset or Action not found
-          content:
-            application/json:
-              schema: ErrorRspSchema
-    """
-    message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
-    # Get response
-    response = app_handler.get_spec(user_id, dataset_id, action, "dataset")
-    # Get schema
-    schema = None
-    if response.code == 200:
-        return make_response(jsonify(response.data), response.code)
-    schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
-
-
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/specs/<action>', methods=['POST'])
-def dataset_specs_save(user_id, dataset_id, action):
-    """Save Dataset Specs.
-    ---
-    post:
-      tags:
-      - DATASET
-      summary: Save Dataset Specs
-      description: Save the Dataset Specs for a given action
-      parameters:
-      - name: user_id
-        in: path
-        description: User ID
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: dataset_id
-        in: path
-        description: ID of Dataset
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: action
-        in: path
-        description: Action name
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-        description: Dataset Specs
-        required: true
-      responses:
-        201:
-          description: Returned the saved Dataset Specs for specified action
-          content:
-            application/json:
-              schema:
-                type: object
-        400:
-          description: Invalid specs
-          content:
-            application/json:
-              schema: ErrorRspSchema
-        404:
-          description: User, Dataset or Action not found
-          content:
-            application/json:
-              schema: ErrorRspSchema
-    """
-    message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
-    request_dict = request.get_json(force=True)
-    # Get response
-    response = app_handler.save_spec(user_id, dataset_id, action, request_dict, "dataset")
-    # Get schema
-    schema = None
-    if response.code == 201:
-        return make_response(jsonify(response.data), response.code)
-    schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
-
-
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/specs/<action>', methods=['PUT'])
-def dataset_specs_update(user_id, dataset_id, action):
-    """Update Dataset Specs.
-    ---
-    put:
-      tags:
-      - DATASET
-      summary: Update Dataset Specs
-      description: Update the Dataset Specs for a given action
-      parameters:
-      - name: user_id
-        in: path
-        description: User ID
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: dataset_id
-        in: path
-        description: ID of Dataset
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: action
-        in: path
-        description: Action name
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-        description: Dataset Specs
-        required: true
-      responses:
-        200:
-          description: Returned the updated Dataset Specs for specified action
-          content:
-            application/json:
-              schema:
-                type: object
-        400:
-          description: Invalid specs
-          content:
-            application/json:
-              schema: ErrorRspSchema
-        404:
-          description: User, Dataset or Action not found
-          content:
-            application/json:
-              schema: ErrorRspSchema
-    """
-    message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
-    request_dict = request.get_json(force=True)
-    # Get response
-    response = app_handler.update_spec(user_id, dataset_id, action, request_dict, "dataset")
-    # Get schema
-    schema = None
-    if response.code == 200:
-        return make_response(jsonify(response.data), response.code)
-    schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
-
-
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job', methods=['POST'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs', methods=['POST'])
+@disk_space_check
 def dataset_job_run(user_id, dataset_id):
     """Run Dataset Jobs.
     ---
@@ -1247,7 +1294,7 @@ def dataset_job_run(user_id, dataset_id):
       tags:
       - DATASET
       summary: Run Dataset Jobs
-      description: Asynchronously starts a list of Dataset Actions and returns corresponding Job IDs
+      description: Asynchronously starts a dataset action and returns corresponding Job ID
       parameters:
       - name: user_id
         in: path
@@ -1256,6 +1303,7 @@ def dataset_job_run(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID for Dataset
@@ -1263,26 +1311,31 @@ def dataset_job_run(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         content:
           application/json:
-            schema:
-              type: array
-              items: DatasetActions
+            schema: DatasetActions
       responses:
         201:
-          description: Returned the list of Job IDs corresponding to requested Dataset Actions
+          description: Returned the Job ID corresponding to requested Dataset Action
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  type: string
+                type: string
+                format: uuid
+                maxLength: 36
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User or Dataset not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
     if message:
@@ -1293,20 +1346,23 @@ def dataset_job_run(user_id, dataset_id):
     request_data = request.get_json(force=True).copy()
     schema = DatasetActions()
     request_schema_data = schema.dump(schema.load(request_data))
-    requested_job = request_schema_data.get('job', None)
+    requested_job = request_schema_data.get('parent_job_id', None)
     if requested_job:
         requested_job = str(requested_job)
-    parent_handler_id = request_schema_data.get('parent_id', None)
-    if parent_handler_id:
-        parent_handler_id = str(parent_handler_id)
-    parent_job_type = request_schema_data.get('parent_job_type', None)
-    requested_actions = request_schema_data.get('actions', [])
+    requested_action = request_schema_data.get('action', "")
     specs = request_schema_data.get('specs', {})
+    name = request_schema_data.get('name', '')
+    description = request_schema_data.get('description', '')
     # Get response
-    response = app_handler.job_run(user_id, dataset_id, parent_handler_id, requested_job, requested_actions, "dataset", parent_job_type, specs=specs)
+    response = app_handler.job_run(user_id, dataset_id, requested_job, requested_action, "dataset", specs=specs, name=name, description=description)
+    handler_metadata = resolve_metadata(user_id, "dataset", dataset_id)
+    dataset_format = handler_metadata.get("format")
     # Get schema
     if response.code == 201:
-        if isinstance(response.data, list) and all(not validate_uuid(job_id=j) for j in response.data):
+        # MEDICAL dataset jobs are sync jobs and the response should be returned directly.
+        if dataset_format == "medical":
+            return make_response(jsonify(response.data), response.code)
+        if isinstance(response.data, str) and not validate_uuid(response.data):
             return make_response(jsonify(response.data), response.code)
         metadata = {"error_desc": "internal error: invalid job IDs", "error_code": 2}
         schema = ErrorRspSchema()
@@ -1318,7 +1374,8 @@ def dataset_job_run(user_id, dataset_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs', methods=['GET'])
+@disk_space_check
 def dataset_job_list(user_id, dataset_id):
     """List Jobs for Dataset.
     ---
@@ -1335,25 +1392,33 @@ def dataset_job_list(user_id, dataset_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID for Dataset
         required: true
         schema:
           type: string
-          format: uuid
+          pattern: '.*'
+          maxLength: 36
       - name: skip
         in: query
         description: Optional skip for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: size
         in: query
         description: Optional size for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: sort
         in: query
         description: Optional sort
@@ -1369,13 +1434,20 @@ def dataset_job_list(user_id, dataset_id):
               schema:
                 type: array
                 items: DatasetJobSchema
+                maxItems: 2147483647
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User or Dataset not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, dataset_id=dataset_id)
+    message = validate_uuid(user_id=user_id, dataset_id=None if dataset_id in ("*", "all") else dataset_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
@@ -1397,7 +1469,8 @@ def dataset_job_list(user_id, dataset_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs/<job_id>', methods=['GET'])
+@disk_space_check
 def dataset_job_retrieve(user_id, dataset_id, job_id):
     """Retrieve Job for Dataset.
     ---
@@ -1414,6 +1487,7 @@ def dataset_job_retrieve(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID of Dataset
@@ -1421,6 +1495,7 @@ def dataset_job_retrieve(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -1428,17 +1503,24 @@ def dataset_job_retrieve(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job
           content:
             application/json:
               schema: DatasetJobSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User, Dataset or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
@@ -1459,7 +1541,8 @@ def dataset_job_retrieve(user_id, dataset_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>/cancel', methods=['POST'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs/<job_id>:cancel', methods=['POST'])
+@disk_space_check
 def dataset_job_cancel(user_id, dataset_id, job_id):
     """Cancel Dataset Job.
     ---
@@ -1476,6 +1559,7 @@ def dataset_job_cancel(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID for Dataset
@@ -1483,6 +1567,7 @@ def dataset_job_cancel(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: ID for Job
@@ -1490,14 +1575,21 @@ def dataset_job_cancel(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Successfully requested cancelation of specified Job ID (asynchronous)
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User, Dataset or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
@@ -1517,7 +1609,8 @@ def dataset_job_cancel(user_id, dataset_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>', methods=['DELETE'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs/<job_id>', methods=['DELETE'])
+@disk_space_check
 def dataset_job_delete(user_id, dataset_id, job_id):
     """Delete Dataset Job.
     ---
@@ -1534,6 +1627,7 @@ def dataset_job_delete(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID for Dataset
@@ -1541,6 +1635,7 @@ def dataset_job_delete(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: ID for Job
@@ -1548,19 +1643,29 @@ def dataset_job_delete(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Successfully requested deletion of specified Job ID
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User, Dataset or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
@@ -1580,7 +1685,8 @@ def dataset_job_delete(user_id, dataset_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>/list_files', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs/<job_id>:list_files', methods=['GET'])
+@disk_space_check
 def dataset_job_files_list(user_id, dataset_id, job_id):
     """List Job Files.
     ---
@@ -1597,6 +1703,7 @@ def dataset_job_files_list(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID for Dataset
@@ -1604,6 +1711,7 @@ def dataset_job_files_list(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -1611,6 +1719,7 @@ def dataset_job_files_list(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job Files
@@ -1620,11 +1729,19 @@ def dataset_job_files_list(user_id, dataset_id, job_id):
                 type: array
                 items:
                   type: string
+                  maxLength: 1000
+                  maxLength: 1000
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User, Dataset or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
@@ -1650,7 +1767,8 @@ def dataset_job_files_list(user_id, dataset_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>/download_selective_files', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs/<job_id>:download_selective_files', methods=['GET'])
+@disk_space_check
 def dataset_job_download_selective_files(user_id, dataset_id, job_id):
     """Download selective Job Artifacts.
     ---
@@ -1667,6 +1785,7 @@ def dataset_job_download_selective_files(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID for Dataset
@@ -1674,6 +1793,7 @@ def dataset_job_download_selective_files(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -1681,6 +1801,7 @@ def dataset_job_download_selective_files(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job Artifacts
@@ -1689,11 +1810,19 @@ def dataset_job_download_selective_files(user_id, dataset_id, job_id):
               schema:
                 type: string
                 format: binary
+                maxLength: 5000
+                maxLength: 5000
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User, Dataset or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
@@ -1720,7 +1849,8 @@ def dataset_job_download_selective_files(user_id, dataset_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/dataset/<dataset_id>/job/<job_id>/download', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/datasets/<dataset_id>/jobs/<job_id>:download', methods=['GET'])
+@disk_space_check
 def dataset_job_download(user_id, dataset_id, job_id):
     """Download Job Artifacts.
     ---
@@ -1737,6 +1867,7 @@ def dataset_job_download(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: dataset_id
         in: path
         description: ID of Dataset
@@ -1744,6 +1875,7 @@ def dataset_job_download(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -1751,6 +1883,7 @@ def dataset_job_download(user_id, dataset_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job Artifacts
@@ -1759,11 +1892,19 @@ def dataset_job_download(user_id, dataset_id, job_id):
               schema:
                 type: string
                 format: binary
+                maxLength: 1000
+                maxLength: 1000
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: User, Dataset or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id, dataset_id=dataset_id, job_id=job_id)
     if message:
@@ -1787,16 +1928,16 @@ def dataset_job_download(user_id, dataset_id, job_id):
 
 
 #
-# MODEL API
+# EXPERIMENT API
 #
-class ModelActions(Schema):
-    """Class defining model actions schema"""
+class ExperimentActions(Schema):
+    """Class defining experiment actions schema"""
 
-    job = fields.UUID(allow_none=True)
-    actions = fields.List(fields.Str())
+    parent_job_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    action = EnumField(ActionEnum)
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     specs = fields.Raw()
-    parent_id = fields.UUID(allow_none=True)
-    parent_job_type = fields.Str(allow_none=True)
 
 
 class CheckpointChooseMethodEnum(Enum):
@@ -1807,7 +1948,21 @@ class CheckpointChooseMethodEnum(Enum):
     from_epoch_number = 'from_epoch_number'
 
 
-class ModelNetworkArchEnum(Enum):
+class ExperimentTypeEnum(Enum):
+    """Class defining type of experiment"""
+
+    vision = 'vision'
+    medical = 'medical'
+
+
+class ExperimentExportTypeEnum(Enum):
+    """Class defining model export type"""
+
+    tao = 'tao'
+    medical_bundle = 'medical_bundle'
+
+
+class ExperimentNetworkArchEnum(Enum):
     """Class defining model network architecure enum"""
 
     # OD Networks tf
@@ -1852,133 +2007,187 @@ class ModelNetworkArchEnum(Enum):
     analytics = "analytics"
     augmentation = "augmentation"
     auto_label = "auto_label"
+    medical_vista3d = "medical_vista3d"
+    medical_segmentation = "medical_segmentation"
+    medical_annotation = "medical_annotation"
+    medical_classification = "medical_classification"
+    medical_detection = "medical_detection"
+    medical_automl = "medical_automl"
+    medical_custom = "medical_custom"
 
 
-class ModelReqSchema(Schema):
-    """Class defining model request schema"""
+class AutoMLAlgorithm(Enum):
+    """Class defining automl algorithm enum"""
+
+    bayesian = "bayesian"
+    hyperband = "hyperband"
+
+
+class ExperimentReqSchema(Schema):
+    """Class defining experiment request schema"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    name = fields.Str()
-    description = fields.Str()
-    version = fields.Str()
-    logo = fields.URL()
-    ngc_path = fields.Str()
-    additional_id_info = fields.Str()
-    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+    version = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
+    logo = fields.URL(validate=fields.validate.Length(max=2048))
+    ngc_path = fields.Str(format="regex", regex=r'^\w+(/[\w-]+)?/[\w-]+:[\w.-]+$', validate=fields.validate.Length(max=250))
+    sha256_digest = fields.Dict(allow_none=True)
+    is_ptm_backbone = fields.Bool()
+    base_experiment_pull_complete = EnumField(PullStatus)
+    additional_id_info = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True))
     checkpoint_choose_method = EnumField(CheckpointChooseMethodEnum)
-    checkpoint_epoch_number = fields.Dict(keys=fields.Str(allow_none=True), values=fields.Int(allow_none=True))
-    encryption_key = fields.Str()
-    network_arch = EnumField(ModelNetworkArchEnum)
-    ptm = fields.List(fields.UUID())
-    eval_dataset = fields.UUID()
-    inference_dataset = fields.UUID()
-    calibration_dataset = fields.UUID()
-    train_datasets = fields.List(fields.UUID())
+    checkpoint_epoch_number = fields.Dict(keys=fields.Str(format="regex", regex=r'(from_epoch_number|latest_model|best_model)_[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$', validate=fields.validate.Length(max=100), allow_none=True), values=fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True))
+    encryption_key = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
+    network_arch = EnumField(ExperimentNetworkArchEnum)
+    base_experiment = fields.List(fields.Str(format="uuid", validate=fields.validate.Length(max=36)), validate=validate.Length(max=2))
+    eval_dataset = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    inference_dataset = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    calibration_dataset = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    train_datasets = fields.List(fields.Str(format="uuid", validate=fields.validate.Length(max=36)), validate=validate.Length(max=sys.maxsize))
     read_only = fields.Bool()
     public = fields.Bool()
     automl_enabled = fields.Bool(allow_none=True)
-    automl_algorithm = fields.Str(allow_none=True)
-    automl_max_recommendations = fields.Int(allow_none=True)
+    automl_algorithm = EnumField(AutoMLAlgorithm, allow_none=True)
+    automl_max_recommendations = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     automl_delete_intermediate_ckpt = fields.Bool(allow_none=True)
-    automl_R = fields.Int(allow_none=True)
-    automl_nu = fields.Int(allow_none=True)
-    metric = fields.Str(allow_none=True)
-    epoch_multiplier = fields.Int(allow_none=True)
-    automl_add_hyperparameters = fields.Str(allow_none=True)
-    automl_remove_hyperparameters = fields.Str(allow_none=True)
+    override_automl_disabled_params = fields.Bool(allow_none=True)
+    automl_R = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    automl_nu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    metric = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
+    epoch_multiplier = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    automl_add_hyperparameters = fields.Str(format="regex", regex=r'\[.*\]', validate=fields.validate.Length(max=5000), allow_none=True)
+    automl_remove_hyperparameters = fields.Str(format="regex", regex=r'\[.*\]', validate=fields.validate.Length(max=5000), allow_none=True)
+    type = EnumField(ExperimentTypeEnum, default=ExperimentTypeEnum.vision)
+    realtime_infer = fields.Bool(default=False)
+    model_params = fields.Dict(allow_none=True)
+    bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
+    realtime_infer_request_timeout = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
 
 
-class ModelJobSchema(Schema):
-    """Class defining model job schema"""
+class ExperimentJobSchema(Schema):
+    """Class defining experiment job schema"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    id = fields.UUID()
-    parent_id = fields.UUID(allow_none=True)
-    created_on = fields.DateTime()
-    last_modified = fields.DateTime()
-    action = fields.Str()
+    id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    parent_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    action = EnumField(ActionEnum)
     status = EnumField(JobStatusEnum)
     result = fields.Nested(JobResultSchema)
+    sync = fields.Bool()
+    specs = fields.Raw(allow_none=True)
+    job_tar_stats = fields.Nested(JobTarStatsSchema)
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True)
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
+    experiment_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
 
 
-class ModelRspSchema(Schema):
-    """Class defining model respnse schema"""
+class ExperimentRspSchema(Schema):
+    """Class defining experiment response schema"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    id = fields.UUID()
-    created_on = fields.DateTime()
-    last_modified = fields.DateTime()
-    name = fields.Str()
-    description = fields.Str()
-    version = fields.Str()
-    logo = fields.URL(allow_none=True)
-    ngc_path = fields.Str(allow_none=True)
-    additional_id_info = fields.Str(allow_none=True)
-    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(allow_none=True))
+        load_only = ("realtime_infer_endpoint", "realtime_infer_model_name")
+
+    id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
+    description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
+    version = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
+    logo = fields.URL(validate=fields.validate.Length(max=2048), allow_none=True)
+    ngc_path = fields.Str(format="regex", regex=r'^\w+(/[\w-]+)?/[\w-]+:[\w.-]+$', validate=fields.validate.Length(max=250))
+    sha256_digest = fields.Dict(allow_none=True)
+    is_ptm_backbone = fields.Bool()
+    base_experiment_pull_complete = EnumField(PullStatus)
+    additional_id_info = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
+    docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True))
     checkpoint_choose_method = EnumField(CheckpointChooseMethodEnum)
-    checkpoint_epoch_number = fields.Dict(keys=fields.Str(allow_none=True), values=fields.Int(allow_none=True))
-    encryption_key = fields.Str()
-    network_arch = EnumField(ModelNetworkArchEnum)
-    ptm = fields.List(fields.UUID())
+    checkpoint_epoch_number = fields.Dict(keys=fields.Str(format="regex", regex=r'(from_epoch_number|latest_model|best_model)_[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$', validate=fields.validate.Length(max=100), allow_none=True), values=fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True))
+    encryption_key = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
+    network_arch = EnumField(ExperimentNetworkArchEnum)
+    base_experiment = fields.List(fields.Str(format="uuid", validate=fields.validate.Length(max=36)), validate=validate.Length(max=2))
     dataset_type = EnumField(DatasetTypeEnum)
-    eval_dataset = fields.UUID(allow_none=True)
-    inference_dataset = fields.UUID(allow_none=True)
-    calibration_dataset = fields.UUID(allow_none=True)
-    train_datasets = fields.List(fields.UUID())
+    eval_dataset = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    inference_dataset = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    calibration_dataset = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
+    train_datasets = fields.List(fields.Str(format="uuid", validate=fields.validate.Length(max=36)), validate=validate.Length(max=sys.maxsize))
     read_only = fields.Bool()
     public = fields.Bool()
-    actions = fields.List(fields.Str())
-    jobs = fields.List(fields.Nested(ModelJobSchema))
+    actions = fields.List(EnumField(ActionEnum), allow_none=True, validate=validate.Length(max=sys.maxsize))
+    jobs = fields.List(fields.Nested(ExperimentJobSchema), validate=validate.Length(max=sys.maxsize))
     automl_enabled = fields.Bool(allow_none=True)
-    automl_algorithm = fields.Str(allow_none=True)
-    automl_max_recommendations = fields.Int(allow_none=True)
+    automl_algorithm = EnumField(AutoMLAlgorithm, allow_none=True)
+    automl_max_recommendations = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
     automl_delete_intermediate_ckpt = fields.Bool(allow_none=True)
-    automl_R = fields.Int(allow_none=True)
-    automl_nu = fields.Int(allow_none=True)
-    metric = fields.Str(allow_none=True)
-    epoch_multiplier = fields.Int(allow_none=True)
-    automl_add_hyperparameters = fields.Str(allow_none=True)
-    automl_remove_hyperparameters = fields.Str(allow_none=True)
+    override_automl_disabled_params = fields.Bool(allow_none=True)
+    automl_R = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    automl_nu = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    metric = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=100), allow_none=True)
+    epoch_multiplier = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
+    automl_add_hyperparameters = fields.Str(format="regex", regex=r'\[.*\]', validate=fields.validate.Length(max=5000), allow_none=True)
+    automl_remove_hyperparameters = fields.Str(format="regex", regex=r'\[.*\]', validate=fields.validate.Length(max=5000), allow_none=True)
+    type = EnumField(ExperimentTypeEnum, default=ExperimentTypeEnum.vision, allow_none=True)
+    realtime_infer = fields.Bool(allow_none=True)
+    realtime_infer_support = fields.Bool()
+    realtime_infer_endpoint = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
+    realtime_infer_model_name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
+    model_params = fields.Dict(allow_none=True)
+    realtime_infer_request_timeout = fields.Int(format="int64", validate=validate.Range(min=0, max=86400), allow_none=True)
+    bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
 
 
-class ModelListRspSchema(Schema):
-    """Class defining model list response schema"""
+class ExperimentListRspSchema(Schema):
+    """Class defining experiment list response schema"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    models = fields.List(fields.Nested(ModelRspSchema))
+    experiments = fields.List(fields.Nested(ExperimentRspSchema), validate=validate.Length(max=sys.maxsize))
 
 
-class ModelJobListSchema(Schema):
-    """Class defining model job list schema"""
+class ExperimentJobListSchema(Schema):
+    """Class defining experiment job list schema"""
 
     class Meta:
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-    jobs = fields.List(fields.Nested(ModelJobSchema))
+    jobs = fields.List(fields.Nested(ExperimentJobSchema), validate=validate.Length(max=sys.maxsize))
 
 
-@app.route('/api/v1/user/<user_id>/model', methods=['GET'])
-def model_list(user_id):
-    """List Models.
+class ExperimentDownloadSchema(Schema):
+    """Class defining experiment artifacts download schema"""
+
+    class Meta:
+        """Class enabling sorting field values by the order in which they are declared"""
+
+        ordered = True
+    export_type = EnumField(ExperimentExportTypeEnum)
+
+
+@app.route('/api/v1/users/<user_id>/experiments', methods=['GET'])
+@disk_space_check
+def experiment_list(user_id):
+    """List Experiments.
     ---
     get:
       tags:
-      - MODEL
-      summary: List Models
-      description: Returns the list of Models
+      - EXPERIMENT
+      summary: List Experiments
+      description: Returns the list of Experiments
       parameters:
       - name: user_id
         in: path
@@ -1987,18 +2196,25 @@ def model_list(user_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: skip
         in: query
         description: Optional skip for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: size
         in: query
         description: Optional size for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: sort
         in: query
         description: Optional sort
@@ -2012,6 +2228,15 @@ def model_list(user_id):
         required: false
         schema:
           type: string
+          maxLength: 5000
+          pattern: '.*'
+      - name: type
+        in: query
+        description: Optional type filter
+        required: false
+        schema:
+          type: string
+          enum: ["vision", "medical"]
       - name: arch
         in: query
         description: Optional network architecture filter
@@ -2026,14 +2251,24 @@ def model_list(user_id):
         allowEmptyValue: true
         schema:
           type: boolean
+      - name: user_only
+        in: query
+        description: Optional filter to select user owned experiments only
+        required: false
+        schema:
+          type: boolean
       responses:
         200:
-          description: Returned the list of Models
+          description: Returned the list of Experiments
           content:
             application/json:
               schema:
                 type: array
-                items: ModelRspSchema
+                items: ExperimentRspSchema
+                maxItems: 2147483647
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id)
     if message:
@@ -2041,26 +2276,28 @@ def model_list(user_id):
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
-    models = app_handler.list_models(user_id)
-    filtered_models = filtering.apply(request.args, models)
-    paginated_models = pagination.apply(request.args, filtered_models)
-    pagination_total = len(filtered_models)
-    metadata = {"models": paginated_models}
-    schema = ModelListRspSchema()
-    response = make_response(jsonify(schema.dump(schema.load(metadata))['models']))
+    user_only = str(request.args.get('user_only', None)) in {'True', 'yes', 'y', 'true', 't', '1', 'on'}
+    experiments = app_handler.list_experiments(user_id, user_only)
+    filtered_experiments = filtering.apply(request.args, experiments)
+    paginated_experiments = pagination.apply(request.args, filtered_experiments)
+    pagination_total = len(filtered_experiments)
+    metadata = {"experiments": paginated_experiments}
+    schema = ExperimentListRspSchema()
+    response = make_response(jsonify(schema.dump(schema.load(metadata))['experiments']))
     response.headers['X-Pagination-Total'] = str(pagination_total)
     return response
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>', methods=['GET'])
-def model_retrieve(user_id, model_id):
-    """Retrieve Model.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>', methods=['GET'])
+@disk_space_check
+def experiment_retrieve(user_id, experiment_id):
+    """Retrieve Experiment.
     ---
     get:
       tags:
-      - MODEL
-      summary: Retrieve Model
-      description: Returns the Model
+      - EXPERIMENT
+      summary: Retrieve Experiment
+      description: Returns the Experiment
       parameters:
       - name: user_id
         in: path
@@ -2069,37 +2306,45 @@ def model_retrieve(user_id, model_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model to return
+        description: ID of Experiment to return
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
-          description: Returned the Model
+          description: Returned the Experiment
           content:
             application/json:
-              schema: ModelRspSchema
+              schema: ExperimentRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User or Model not found
+          description: User or Experiment not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     # Get response
-    response = app_handler.retrieve_model(user_id, model_id)
+    response = app_handler.retrieve_experiment(user_id, experiment_id)
     # Get schema
     schema = None
     if response.code == 200:
-        schema = ModelRspSchema()
+        schema = ExperimentRspSchema()
     else:
         schema = ErrorRspSchema()
     # Load metadata in schema and return
@@ -2107,15 +2352,16 @@ def model_retrieve(user_id, model_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>', methods=['DELETE'])
-def model_delete(user_id, model_id):
-    """Delete Model.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>', methods=['DELETE'])
+@disk_space_check
+def experiment_delete(user_id, experiment_id):
+    """Delete Experiment.
     ---
     delete:
       tags:
-      - MODEL
-      summary: Delete Model
-      description: Cancels all related running jobs and returns the deleted Model
+      - EXPERIMENT
+      summary: Delete Experiment
+      description: Cancels all related running jobs and returns the deleted Experiment
       parameters:
       - name: user_id
         in: path
@@ -2124,37 +2370,45 @@ def model_delete(user_id, model_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model to delete
+        description: ID of Experiment to delete
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
-          description: Returned the deleted Model
+          description: Returned the deleted Experiment
           content:
             application/json:
-              schema: ModelRspSchema
+              schema: ExperimentRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User or Model not found
+          description: User or Experiment not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     # Get response
-    response = app_handler.delete_model(user_id, model_id)
+    response = app_handler.delete_experiment(user_id, experiment_id)
     # Get schema
     schema = None
     if response.code == 200:
-        schema = ModelRspSchema()
+        schema = ExperimentRspSchema()
     else:
         schema = ErrorRspSchema()
     # Load metadata in schema and return
@@ -2162,15 +2416,16 @@ def model_delete(user_id, model_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model', methods=['POST'])
-def model_create(user_id):
-    """Create new Model.
+@app.route('/api/v1/users/<user_id>/experiments', methods=['POST'])
+@disk_space_check
+def experiment_create(user_id):
+    """Create new Experiment.
     ---
     post:
       tags:
-      - MODEL
-      summary: Create new Model
-      description: Returns the new Model
+      - EXPERIMENT
+      summary: Create new Experiment
+      description: Returns the new Experiment
       parameters:
       - name: user_id
         in: path
@@ -2179,23 +2434,30 @@ def model_create(user_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         content:
           application/json:
-            schema: ModelReqSchema
-        description: Initial metadata for new Model (ptm or network_arch required)
+            schema: ExperimentReqSchema
+        description: Initial metadata for new Experiment (base_experiment or network_arch required)
         required: true
       responses:
         201:
-          description: Returned the new Model
+          description: Returned the new Experiment
           content:
             application/json:
-              schema: ModelRspSchema
+              schema: ExperimentRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id)
     if message:
@@ -2203,14 +2465,14 @@ def model_create(user_id):
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
-    schema = ModelReqSchema()
+    schema = ExperimentReqSchema()
     request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
-    response = app_handler.create_model(user_id, request_dict)
+    response = app_handler.create_experiment(user_id, request_dict)
     # Get schema
     schema = None
     if response.code == 201:
-        schema = ModelRspSchema()
+        schema = ExperimentRspSchema()
     else:
         schema = ErrorRspSchema()
     # Load metadata in schema and return
@@ -2218,15 +2480,16 @@ def model_create(user_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>', methods=['PUT'])
-def model_update(user_id, model_id):
-    """Update Model.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>', methods=['PUT'])
+@disk_space_check
+def experiment_update(user_id, experiment_id):
+    """Update Experiment.
     ---
     put:
       tags:
-      - MODEL
-      summary: Update Model
-      description: Returns the updated Model
+      - EXPERIMENT
+      summary: Update Experiment
+      description: Returns the updated Experiment
       parameters:
       - name: user_id
         in: path
@@ -2235,50 +2498,61 @@ def model_update(user_id, model_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model to update
+        description: ID of Experiment to update
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         content:
           application/json:
-            schema: ModelReqSchema
-        description: Updated metadata for Model
+            schema: ExperimentReqSchema
+        description: Updated metadata for Experiment
         required: true
       responses:
         200:
-          description: Returned the updated Model
+          description: Returned the updated Experiment
           content:
             application/json:
-              schema: ModelRspSchema
+              schema: ExperimentRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User or Model not found
+          description: User or Experiment not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
-    schema = ModelReqSchema()
+    schema = ExperimentReqSchema()
     request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
-    response = app_handler.update_model(user_id, model_id, request_dict)
+    response = app_handler.update_experiment(user_id, experiment_id, request_dict)
     # Get schema
     schema = None
     if response.code == 200:
-        schema = ModelRspSchema()
+        schema = ExperimentRspSchema()
     else:
         schema = ErrorRspSchema()
     # Load metadata in schema and return
@@ -2286,15 +2560,16 @@ def model_update(user_id, model_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>', methods=['PATCH'])
-def model_partial_update(user_id, model_id):
-    """Partial update Model.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>', methods=['PATCH'])
+@disk_space_check
+def experiment_partial_update(user_id, experiment_id):
+    """Partial update Experiment.
     ---
     patch:
       tags:
-      - MODEL
-      summary: Partial update Model
-      description: Returns the updated Model
+      - EXPERIMENT
+      summary: Partial update Experiment
+      description: Returns the updated Experiment
       parameters:
       - name: user_id
         in: path
@@ -2303,50 +2578,61 @@ def model_partial_update(user_id, model_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model to update
+        description: ID of Experiment to update
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       requestBody:
         content:
           application/json:
-            schema: ModelReqSchema
-        description: Updated metadata for Model
+            schema: ExperimentReqSchema
+        description: Updated metadata for Experiment
         required: true
       responses:
         200:
-          description: Returned the updated Model
+          description: Returned the updated Experiment
           content:
             application/json:
-              schema: ModelRspSchema
+              schema: ExperimentRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         400:
           description: Bad request, see reply body for details
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User or Model not found
+          description: User or Experiment not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
-    schema = ModelReqSchema()
+    schema = ExperimentReqSchema()
     request_dict = schema.dump(schema.load(request.get_json(force=True)))
     # Get response
-    response = app_handler.update_model(user_id, model_id, request_dict)
+    response = app_handler.update_experiment(user_id, experiment_id, request_dict)
     # Get schema
     schema = None
     if response.code == 200:
-        schema = ModelRspSchema()
+        schema = ExperimentRspSchema()
     else:
         schema = ErrorRspSchema()
     # Load metadata in schema and return
@@ -2354,12 +2640,13 @@ def model_partial_update(user_id, model_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/specs/<action>/schema', methods=['GET'])
+@app.route('/api/v1/users/<user_id>/specs/<action>/schema', methods=['GET'])
+@disk_space_check
 def specs_schema_without_handler_id(user_id, action):
     """Retrieve Specs schema.
     ---
     get:
-      summary: Retrieve Specs schema without model or dataset id
+      summary: Retrieve Specs schema without experiment or dataset id
       description: Returns the Specs schema for a given action
       parameters:
       - name: user_id
@@ -2369,12 +2656,14 @@ def specs_schema_without_handler_id(user_id, action):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: action
         in: path
         description: Action name
         required: true
         schema:
           type: string
+          enum: [ "dataset_convert", "convert", "convert_and_index", "convert_efficientdet_tf1", "convert_efficientdet_tf2", "kmeans", "augment", "train", "evaluate", "prune", "retrain", "export", "gen_trt_engine", "trtexec", "inference", "annotation", "analyze", "validate", "generate", "calibration_tensorfile", "confmat" ]
       responses:
         200:
           description: Returned the Specs schema for given action and network
@@ -2382,11 +2671,17 @@ def specs_schema_without_handler_id(user_id, action):
             application/json:
               schema:
                 type: object
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: Dataset or Action not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
     message = validate_uuid(user_id=user_id)
     if message:
@@ -2399,7 +2694,7 @@ def specs_schema_without_handler_id(user_id, action):
     format = request.args.get('format')
     train_datasets = request.args.getlist('train_datasets')
 
-    response = app_handler.get_spec_schema_without_handler_id(network, format, action, train_datasets)
+    response = app_handler.get_spec_schema_without_handler_id(user_id, network, format, action, train_datasets)
     # Get schema
     schema = None
     if response.code == 200:
@@ -2410,13 +2705,14 @@ def specs_schema_without_handler_id(user_id, action):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/specs/<action>/schema', methods=['GET'])
-def model_specs_schema(user_id, model_id, action):
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/specs/<action>/schema', methods=['GET'])
+@disk_space_check
+def experiment_specs_schema(user_id, experiment_id, action):
     """Retrieve Specs schema.
     ---
     get:
       tags:
-      - MODEL
+      - EXPERIMENT
       summary: Retrieve Specs schema
       description: Returns the Specs schema for a given action
       parameters:
@@ -2427,19 +2723,22 @@ def model_specs_schema(user_id, model_id, action):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID for Model
+        description: ID for Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: action
         in: path
         description: Action name
         required: true
         schema:
           type: string
+          enum: [ "dataset_convert", "convert", "convert_and_index", "convert_efficientdet_tf1", "convert_efficientdet_tf2", "kmeans", "augment", "train", "evaluate", "prune", "retrain", "export", "gen_trt_engine", "trtexec", "inference", "annotation", "analyze", "validate", "generate", "calibration_tensorfile", "confmat" ]
       responses:
         200:
           description: Returned the Specs schema for given action
@@ -2447,20 +2746,26 @@ def model_specs_schema(user_id, model_id, action):
             application/json:
               schema:
                 type: object
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
           description: Dataset or Action not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     # Get response
-    response = app_handler.get_spec_schema(user_id, model_id, action, "model")
+    response = app_handler.get_spec_schema(user_id, experiment_id, action, "experiment")
     # Get schema
     schema = None
     if response.code == 200:
@@ -2471,76 +2776,16 @@ def model_specs_schema(user_id, model_id, action):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/specs/<action>', methods=['GET'])
-def model_specs_retrieve(user_id, model_id, action):
-    """Retrieve Model Specs.
-    ---
-    get:
-      tags:
-      - MODEL
-      summary: Retrieve Model Specs
-      description: Returns the Model Specs for a given action
-      parameters:
-      - name: user_id
-        in: path
-        description: User ID
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: model_id
-        in: path
-        description: ID of Model
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: action
-        in: path
-        description: Action name
-        required: true
-        schema:
-          type: string
-      responses:
-        200:
-          description: Returned the Model Specs for specified action
-          content:
-            application/json:
-              schema:
-                type: object
-        404:
-          description: User, Model or Action not found
-          content:
-            application/json:
-              schema: ErrorRspSchema
-    """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
-    # Get response
-    response = app_handler.get_spec(user_id, model_id, action, "model")
-    # Get schema
-    schema = None
-    if response.code == 200:
-        return make_response(jsonify(response.data), response.code)
-    schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
-
-
-@app.route('/api/v1/user/<user_id>/model/<model_id>/specs/<action>', methods=['POST'])
-def model_specs_save(user_id, model_id, action):
-    """Save Model Specs.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs', methods=['POST'])
+@disk_space_check
+def experiment_job_run(user_id, experiment_id):
+    """Run Experiment Jobs.
     ---
     post:
       tags:
-      - MODEL
-      summary: Save Model Specs
-      description: Save the Model Specs for a given action
+      - EXPERIMENT
+      summary: Run Experiment Jobs
+      description: Asynchronously starts a Experiment Action and returns corresponding Job ID
       parameters:
       - name: user_id
         in: path
@@ -2549,206 +2794,75 @@ def model_specs_save(user_id, model_id, action):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model
+        description: ID for Experiment
         required: true
         schema:
           type: string
           format: uuid
-      - name: action
-        in: path
-        description: Action name
-        required: true
-        schema:
-          type: string
+          maxLength: 36
       requestBody:
         content:
           application/json:
-            schema:
-              type: object
-        description: Model Specs
-        required: true
+            schema: ExperimentActions
       responses:
         201:
-          description: Returned the saved Model Specs for specified action
+          description: Returned the Job ID corresponding to requested Experiment Action
           content:
             application/json:
               schema:
-                type: object
-        400:
-          description: Invalid specs
-          content:
-            application/json:
-              schema: ErrorRspSchema
+                type: string
+                format: uuid
+                maxLength: 36
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Action not found
+          description: User or Experiment not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
-    request_dict = request.get_json(force=True)
-    # Get response
-    response = app_handler.save_spec(user_id, model_id, action, request_dict, "model")
-    # Get schema
-    schema = None
-    if response.code == 201:
-        return make_response(jsonify(response.data), response.code)
-    schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
-
-
-@app.route('/api/v1/user/<user_id>/model/<model_id>/specs/<action>', methods=['PUT'])
-def model_specs_update(user_id, model_id, action):
-    """Update Model Specs.
-    ---
-    put:
-      tags:
-      - MODEL
-      summary: Update Model Specs
-      description: Update the Model Specs for a given action
-      parameters:
-      - name: user_id
-        in: path
-        description: User ID
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: model_id
-        in: path
-        description: ID of Model
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: action
-        in: path
-        description: Action name
-        required: true
-        schema:
-          type: string
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-        description: Model Specs
-        required: true
-      responses:
-        200:
-          description: Returned the updated Model Specs for specified action
-          content:
-            application/json:
-              schema:
-                type: object
-        400:
-          description: Invalid specs
-          content:
-            application/json:
-              schema: ErrorRspSchema
-        404:
-          description: User, Model or Action not found
-          content:
-            application/json:
-              schema: ErrorRspSchema
-    """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
-    request_dict = request.get_json(force=True)
-    # Get response
-    response = app_handler.save_spec(user_id, model_id, action, request_dict, "model")
-    # Get schema
-    schema = None
-    if response.code == 200:
-        return make_response(jsonify(response.data), response.code)
-    schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
-
-
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job', methods=['POST'])
-def model_job_run(user_id, model_id):
-    """Run Model Jobs.
-    ---
-    post:
-      tags:
-      - MODEL
-      summary: Run Model Jobs
-      description: Asynchronously starts a list of Model Actions and returns corresponding Job IDs
-      parameters:
-      - name: user_id
-        in: path
-        description: User ID
-        required: true
-        schema:
-          type: string
-          format: uuid
-      - name: model_id
-        in: path
-        description: ID for Model
-        required: true
-        schema:
-          type: string
-          format: uuid
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: array
-              items: ModelActions
-      responses:
-        201:
-          description: Returned the list of Job IDs corresponding to requested Model Actions
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: string
-        404:
-          description: User or Model not found
-          content:
-            application/json:
-              schema: ErrorRspSchema
-    """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     request_data = request.get_json(force=True).copy()
-    schema = ModelActions()
+    schema = ExperimentActions()
     request_schema_data = schema.dump(schema.load(request_data))
-    requested_job = request_schema_data.get('job', None)
+    requested_job = request_schema_data.get('parent_job_id', None)
     if requested_job:
         requested_job = str(requested_job)
-    parent_handler_id = request_schema_data.get('parent_id', None)
-    if parent_handler_id:
-        parent_handler_id = str(parent_handler_id)
-    parent_job_type = request_schema_data.get('parent_job_type', None)
-    requested_actions = request_schema_data.get('actions', [])
+    requested_action = request_schema_data.get('action', "")
     specs = request_schema_data.get('specs', {})
+    name = request_schema_data.get('name', '')
+    description = request_schema_data.get('description', '')
+    if isinstance(specs, dict) and "cluster" in specs:
+        metadata = {"error_desc": "cluster is an invalid spec", "error_code": 3}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
+        return response
     # Get response
-    response = app_handler.job_run(user_id, model_id, parent_handler_id, requested_job, requested_actions, "model", parent_job_type, specs=specs)
+    response = app_handler.job_run(user_id, experiment_id, requested_job, requested_action, "experiment", specs=specs, name=name, description=description)
     # Get schema
     schema = None
     if response.code == 201:
-        if isinstance(response.data, list) and all(not validate_uuid(job_id=j) for j in response.data):
+        if hasattr(response, "attachment_key") and response.attachment_key:
+            send_file_response = send_file(response.data[response.attachment_key], as_attachment=True)
+            # send_file sets correct response code as 200, should convert back to 201
+            if send_file_response.status_code == 200:
+                send_file_response.status_code = response.code
+                # remove sent file as it's useless now
+                os.remove(response.data[response.attachment_key])
+            return send_file_response
+        if isinstance(response.data, str) and not validate_uuid(response.data):
             return make_response(jsonify(response.data), response.code)
         metadata = {"error_desc": "internal error: invalid job IDs", "error_code": 2}
         schema = ErrorRspSchema()
@@ -2760,14 +2874,15 @@ def model_job_run(user_id, model_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job', methods=['GET'])
-def model_job_list(user_id, model_id):
-    """List Jobs for Model.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs', methods=['GET'])
+@disk_space_check
+def experiment_job_list(user_id, experiment_id):
+    """List Jobs for Experiment.
     ---
     get:
       tags:
-      - MODEL
-      summary: List Jobs for Model
+      - EXPERIMENT
+      summary: List Jobs for Experiment
       description: Returns the list of Jobs
       parameters:
       - name: user_id
@@ -2777,25 +2892,33 @@ def model_job_list(user_id, model_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID for Model
+        description: ID for Experiment
         required: true
         schema:
           type: string
-          format: uuid
+          pattern: '.*'
+          maxLength: 36
       - name: skip
         in: query
         description: Optional skip for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: size
         in: query
         description: Optional size for pagination
         required: false
         schema:
           type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
       - name: sort
         in: query
         description: Optional sort
@@ -2810,27 +2933,34 @@ def model_job_list(user_id, model_id):
             application/json:
               schema:
                 type: array
-                items: ModelJobSchema
+                items: ExperimentJobSchema
+                maxItems: 2147483647
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User or Model not found
+          description: User or Experiment not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id)
+    message = validate_uuid(user_id=user_id, experiment_id=None if experiment_id in ("*", "all") else experiment_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     # Get response
-    response = app_handler.job_list(user_id, model_id, "model")
+    response = app_handler.job_list(user_id, experiment_id, "experiment")
     # Get schema
     schema = None
     if response.code == 200:
         pagination_total = 0
         metadata = {"jobs": response.data}
-        schema = ModelJobListSchema()
+        schema = ExperimentJobListSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))['jobs']))
         response.headers['X-Pagination-Total'] = str(pagination_total)
         return response
@@ -2840,14 +2970,15 @@ def model_job_list(user_id, model_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>', methods=['GET'])
-def model_job_retrieve(user_id, model_id, job_id):
-    """Retrieve Job for Model.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs/<job_id>', methods=['GET'])
+@disk_space_check
+def experiment_job_retrieve(user_id, experiment_id, job_id):
+    """Retrieve Job for Experiment.
     ---
     get:
       tags:
-      - MODEL
-      summary: Retrieve Job for Model
+      - EXPERIMENT
+      summary: Retrieve Job for Experiment
       description: Returns the Job
       parameters:
       - name: user_id
@@ -2857,13 +2988,15 @@ def model_job_retrieve(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model
+        description: ID of Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -2871,30 +3004,37 @@ def model_job_retrieve(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job
           content:
             application/json:
-              schema: ModelJobSchema
+              schema: ExperimentJobSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Job not found
+          description: User, Experiment or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id, job_id=job_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     # Get response
-    response = app_handler.job_retrieve(user_id, model_id, job_id, "model")
+    response = app_handler.job_retrieve(user_id, experiment_id, job_id, "experiment")
     # Get schema
     schema = None
     if response.code == 200:
-        schema = ModelJobSchema()
+        schema = ExperimentJobSchema()
     else:
         schema = ErrorRspSchema()
         # Load metadata in schema and return
@@ -2902,15 +3042,16 @@ def model_job_retrieve(user_id, model_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>/cancel', methods=['POST'])
-def model_job_cancel(user_id, model_id, job_id):
-    """Cancel Model Job (or pause training).
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs/<job_id>:cancel', methods=['POST'])
+@disk_space_check
+def experiment_job_cancel(user_id, experiment_id, job_id):
+    """Cancel Experiment Job (or pause training).
     ---
     post:
       tags:
-      - MODEL
-      summary: Cancel Model Job or pause training
-      description: Cancel Model Job or pause training
+      - EXPERIMENT
+      summary: Cancel Experiment Job or pause training
+      description: Cancel Experiment Job or pause training
       parameters:
       - name: user_id
         in: path
@@ -2919,13 +3060,15 @@ def model_job_cancel(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID for Model
+        description: ID for Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: ID for Job
@@ -2933,23 +3076,30 @@ def model_job_cancel(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Successfully requested cancelation or training pause of specified Job ID (asynchronous)
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Job not found
+          description: User, Experiment or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id, job_id=job_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     # Get response
-    response = app_handler.job_cancel(user_id, model_id, job_id, "model")
+    response = app_handler.job_cancel(user_id, experiment_id, job_id, "experiment")
     # Get schema
     if response.code == 200:
         return make_response(jsonify({}), response.code)
@@ -2959,15 +3109,16 @@ def model_job_cancel(user_id, model_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>', methods=['DELETE'])
-def model_job_delete(user_id, model_id, job_id):
-    """Delete Model Job.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs/<job_id>', methods=['DELETE'])
+@disk_space_check
+def experiment_job_delete(user_id, experiment_id, job_id):
+    """Delete Experiment Job.
     ---
-    post:
+    delete:
       tags:
-      - MODEL
-      summary: Delete Model Job
-      description: Delete Model Job
+      - EXPERIMENT
+      summary: Delete Experiment Job
+      description: Delete Experiment Job
       parameters:
       - name: user_id
         in: path
@@ -2976,13 +3127,15 @@ def model_job_delete(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID for Model
+        description: ID for Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: ID for Job
@@ -2990,23 +3143,30 @@ def model_job_delete(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Successfully requested deletion of specified Job ID
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Job not found
+          description: User, Experiment or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id, job_id=job_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     # Get response
-    response = app_handler.job_delete(user_id, model_id, job_id, "model")
+    response = app_handler.job_delete(user_id, experiment_id, job_id, "experiment")
     # Get schema
     schema = None
     if response.code == 200:
@@ -3017,15 +3177,16 @@ def model_job_delete(user_id, model_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>/resume', methods=['POST'])
-def model_job_resume(user_id, model_id, job_id):
-    """Resume Model Job - train/retrain only.
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs/<job_id>:resume', methods=['POST'])
+@disk_space_check
+def experiment_job_resume(user_id, experiment_id, job_id):
+    """Resume Experiment Job - train/retrain only.
     ---
     post:
       tags:
-      - MODEL
-      summary: Resume Model Job
-      description: Resume Model Job - train/retrain only
+      - EXPERIMENT
+      summary: Resume Experiment Job
+      description: Resume Experiment Job - train/retrain only
       parameters:
       - name: user_id
         in: path
@@ -3034,13 +3195,15 @@ def model_job_resume(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID for Model
+        description: ID for Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: ID for Job
@@ -3048,30 +3211,37 @@ def model_job_resume(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Successfully requested resume of specified Job ID (asynchronous)
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Job not found
+          description: User, Experiment or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id, job_id=job_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
     request_data = request.get_json(force=True).copy()
-    schema = ModelActions()
+    schema = ExperimentActions()
     request_schema_data = schema.dump(schema.load(request_data))
-    requested_job = request_schema_data.get('job', None)
-    if requested_job:
-        requested_job = str(requested_job)
+    parent_job_id = request_schema_data.get('parent_job_id', None)
+    if parent_job_id:
+        parent_job_id = str(parent_job_id)
     specs = request_schema_data.get('specs', {})
     # Get response
-    response = app_handler.resume_model_job(user_id, model_id, job_id, "model", specs=specs)
+    response = app_handler.resume_experiment_job(user_id, experiment_id, job_id, parent_job_id, "experiment", specs=specs)
     # Get schema
     schema = None
     if response.code == 200:
@@ -3082,13 +3252,14 @@ def model_job_resume(user_id, model_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>/download', methods=['GET'])
-def model_job_download(user_id, model_id, job_id):
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs/<job_id>:download', methods=['GET'])
+@disk_space_check
+def experiment_job_download(user_id, experiment_id, job_id):
     """Download Job Artifacts.
     ---
     get:
       tags:
-      - MODEL
+      - EXPERIMENT
       summary: Download Job Artifacts
       description: Download the Artifacts produced by a given job
       parameters:
@@ -3099,13 +3270,15 @@ def model_job_download(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model
+        description: ID of Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -3113,6 +3286,7 @@ def model_job_download(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job Artifacts
@@ -3121,20 +3295,38 @@ def model_job_download(user_id, model_id, job_id):
               schema:
                 type: string
                 format: binary
+                maxLength: 1000
+                maxLength: 1000
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Job not found
+          description: User, Experiment or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id, job_id=job_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
+    request_data = request.get_json(force=True, silent=True)
+    request_data = {} if request_data is None else request_data
+    try:
+        request_schema_data = ExperimentDownloadSchema().load(request_data)
+    except exceptions.ValidationError as err:
+        metadata = {"error_desc": str(err)}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 404)
+        return response
+    export_type = request_schema_data.get("export_type", ExperimentExportTypeEnum.tao)
     # Get response
-    response = app_handler.job_download(user_id, model_id, job_id, "model")
+    response = app_handler.job_download(user_id, experiment_id, job_id, "experiment", export_type=export_type.name)
     # Get schema
     schema = None
     if response.code == 200:
@@ -3148,13 +3340,14 @@ def model_job_download(user_id, model_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>/list_files', methods=['GET'])
-def model_job_files_list(user_id, model_id, job_id):
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs/<job_id>:list_files', methods=['GET'])
+@disk_space_check
+def experiment_job_files_list(user_id, experiment_id, job_id):
     """List Job Files.
     ---
     get:
       tags:
-      - MODEL
+      - EXPERIMENT
       summary: List Job Files
       description: List the Files produced by a given job
       parameters:
@@ -3165,13 +3358,15 @@ def model_job_files_list(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model
+        description: ID of Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -3179,6 +3374,7 @@ def model_job_files_list(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job Files
@@ -3188,13 +3384,21 @@ def model_job_files_list(user_id, model_id, job_id):
                 type: array
                 items:
                   type: string
+                  maxLength: 1000
+                  maxLength: 1000
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Job not found
+          description: User, Experiment or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id, job_id=job_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
@@ -3203,7 +3407,7 @@ def model_job_files_list(user_id, model_id, job_id):
     # Get response
     retrieve_logs = ast.literal_eval(request.args.get("retrieve_logs", "False"))
     retrieve_specs = ast.literal_eval(request.args.get("retrieve_specs", "False"))
-    response = app_handler.job_list_files(user_id, model_id, job_id, retrieve_logs, retrieve_specs, "model")
+    response = app_handler.job_list_files(user_id, experiment_id, job_id, retrieve_logs, retrieve_specs, "experiment")
     # Get schema
     if response.code == 200:
         if isinstance(response.data, list) and (all(isinstance(f, str) for f in response.data) or response.data == []):
@@ -3218,13 +3422,14 @@ def model_job_files_list(user_id, model_id, job_id):
     return make_response(jsonify(schema_dict), response.code)
 
 
-@app.route('/api/v1/user/<user_id>/model/<model_id>/job/<job_id>/download_selective_files', methods=['GET'])
-def model_job_download_selective_files(user_id, model_id, job_id):
+@app.route('/api/v1/users/<user_id>/experiments/<experiment_id>/jobs/<job_id>:download_selective_files', methods=['GET'])
+@disk_space_check
+def experiment_job_download_selective_files(user_id, experiment_id, job_id):
     """Download selective Job Artifacts.
     ---
     get:
       tags:
-      - MODEL
+      - EXPERIMENT
       summary: Download selective Job Artifacts
       description: Download selective Artifacts produced by a given job
       parameters:
@@ -3235,13 +3440,15 @@ def model_job_download_selective_files(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
-      - name: model_id
+          maxLength: 36
+      - name: experiment_id
         in: path
-        description: ID of Model
+        description: ID of Experiment
         required: true
         schema:
           type: string
           format: uuid
+          maxLength: 36
       - name: job_id
         in: path
         description: Job ID
@@ -3249,6 +3456,7 @@ def model_job_download_selective_files(user_id, model_id, job_id):
         schema:
           type: string
           format: uuid
+          maxLength: 36
       responses:
         200:
           description: Returned Job Artifacts
@@ -3257,13 +3465,20 @@ def model_job_download_selective_files(user_id, model_id, job_id):
               schema:
                 type: string
                 format: binary
+                maxLength: 1000
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
         404:
-          description: User, Model or Job not found
+          description: User, Experiment or Job not found
           content:
             application/json:
               schema: ErrorRspSchema
+          headers:
+            X-RateLimit-Limit:
+               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    message = validate_uuid(user_id=user_id, model_id=model_id, job_id=job_id)
+    message = validate_uuid(user_id=user_id, experiment_id=experiment_id, job_id=job_id)
     if message:
         metadata = {"error_desc": message, "error_code": 1}
         schema = ErrorRspSchema()
@@ -3276,7 +3491,7 @@ def model_job_download_selective_files(user_id, model_id, job_id):
     if not (file_lists or best_model or latest_model):
         return make_response(jsonify("No files passed in list format to download or, best_model or latest_model is not enabled"), 400)
     # Get response
-    response = app_handler.job_download(user_id, model_id, job_id, "model", file_lists=file_lists, best_model=best_model, latest_model=latest_model, tar_files=tar_files)
+    response = app_handler.job_download(user_id, experiment_id, job_id, "experiment", file_lists=file_lists, best_model=best_model, latest_model=latest_model, tar_files=tar_files)
     # Get schema
     schema = None
     if response.code == 200:
@@ -3300,6 +3515,7 @@ def api_health():
 
 
 @app.route('/api/v1/health/liveness', methods=['GET'])
+@disk_space_check
 def liveness():
     """api liveness endpoint"""
     live_state = health_check.check_logging()
@@ -3309,6 +3525,7 @@ def liveness():
 
 
 @app.route('/api/v1/health/readiness', methods=['GET'])
+@disk_space_check
 def readiness():
     """api readiness endpoint"""
     ready_state = health_check.check_logging() and health_check.check_k8s() and Workflow.healthy()
@@ -3321,6 +3538,7 @@ def readiness():
 # BASIC API
 #
 @app.route('/', methods=['GET'])
+@disk_space_check
 def root():
     """api root endpoint"""
     return make_response(jsonify(['api', 'openapi.yaml', 'openapi.json', 'redoc', 'swagger', 'tao_api_notebooks.zip']))
@@ -3338,7 +3556,7 @@ def version_v1():
     return make_response(jsonify(['login', 'user', 'auth', 'health']))
 
 
-@app.route('/api/v1/user', methods=['GET'])
+@app.route('/api/v1/users', methods=['GET'])
 def user_list():
     """user list endpoint"""
     error = {"error_desc": "Listing users is not authorized: Missing User ID", "error_code": 1}
@@ -3346,7 +3564,8 @@ def user_list():
     return make_response(jsonify(schema.dump(schema.load(error))), 403)
 
 
-@app.route('/api/v1/user/<user_id>', methods=['GET'])
+@app.route('/api/v1/users/<user_id>', methods=['GET'])
+@disk_space_check
 def user(user_id):
     """user endpoint"""
     message = validate_uuid(user_id=user_id)
@@ -3355,7 +3574,7 @@ def user(user_id):
         schema = ErrorRspSchema()
         response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
         return response
-    return make_response(jsonify(['dataset', 'model']))
+    return make_response(jsonify(['dataset', 'experiment']))
 
 
 @app.route('/openapi.yaml', methods=['GET'])
@@ -3387,10 +3606,11 @@ def swagger():
 
 
 @app.route('/tao_api_notebooks.zip', methods=['GET'])
+@disk_space_check
 def download_folder():
     """Download notebooks endpoint"""
     # Create a temporary zip file containing the folder
-    shutil.make_archive("/tmp/tao_api_notebooks", 'zip', "notebooks/")
+    shutil.make_archive("/tmp/tao_api_notebooks", 'zip', "/shared/notebooks/")
 
     # Send the zip file for download
     return send_file(
@@ -3404,6 +3624,32 @@ def download_folder():
 # End of APIs
 #
 
+
+#
+# Cache part
+#
+
+time_loop = Timeloop()
+
+
+@time_loop.job(interval=timedelta(seconds=300))
+def clear_cache():
+    """Clear cache every 5 minutes"""
+    from handlers.medical_dataset_handler import MedicalDatasetHandler
+    MedicalDatasetHandler.clean_cache()
+
+
+@atexit.register
+def stop_clear_cache():
+    """Stop cache clear thread"""
+    time_loop.stop()
+    print("Exit cache clear thread.")
+
+
+#
+# End cache part
+#
+
 with app.test_request_context():
     spec.path(view=login)
     spec.path(view=dataset_list)
@@ -3414,34 +3660,99 @@ with app.test_request_context():
     spec.path(view=dataset_partial_update)
     spec.path(view=dataset_upload)
     spec.path(view=dataset_specs_schema)
-    spec.path(view=dataset_specs_retrieve)
-    spec.path(view=dataset_specs_save)
-    spec.path(view=dataset_specs_update)
     spec.path(view=dataset_job_run)
     spec.path(view=dataset_job_list)
     spec.path(view=dataset_job_retrieve)
     spec.path(view=dataset_job_cancel)
     spec.path(view=dataset_job_delete)
     spec.path(view=dataset_job_download)
-    spec.path(view=model_list)
-    spec.path(view=model_retrieve)
-    spec.path(view=model_delete)
-    spec.path(view=model_create)
-    spec.path(view=model_update)
-    spec.path(view=model_partial_update)
-    spec.path(view=model_specs_schema)
-    spec.path(view=model_specs_retrieve)
-    spec.path(view=model_specs_save)
-    spec.path(view=model_specs_update)
-    spec.path(view=model_job_run)
-    spec.path(view=model_job_list)
-    spec.path(view=model_job_retrieve)
-    spec.path(view=model_job_cancel)
-    spec.path(view=model_job_delete)
-    spec.path(view=model_job_resume)
-    spec.path(view=model_job_download)
+    spec.path(view=experiment_list)
+    spec.path(view=experiment_retrieve)
+    spec.path(view=experiment_delete)
+    spec.path(view=experiment_create)
+    spec.path(view=experiment_update)
+    spec.path(view=experiment_partial_update)
+    spec.path(view=experiment_specs_schema)
+    spec.path(view=experiment_job_run)
+    spec.path(view=experiment_job_list)
+    spec.path(view=experiment_job_retrieve)
+    spec.path(view=experiment_job_cancel)
+    spec.path(view=experiment_job_delete)
+    spec.path(view=experiment_job_resume)
+    spec.path(view=experiment_job_download)
+
+
+@synchronized
+def scan_for_workspaces():
+    """Scan to sync workspaces mounting points"""
+    while True:
+        report_healthy("App has waken up.")
+
+        if not os.path.exists("/shared/"):
+            continue
+
+        # Sync workspaces
+        for user_id in os.listdir("/shared/users"):
+            if os.path.isfile(f"/shared/users/{user_id}"):
+                continue
+            workspace_metadata_file, workspaces = load_user_workspace_metadata(user_id)
+            workspace_metadata_updated = False
+
+            for handler_id in workspaces.keys():
+                workspace = workspaces[handler_id]
+                if workspace["status"] == "DELETED":
+                    continue
+
+                user_id = workspace["user_id"]
+                mount_path = workspace["mount_path"]
+
+                if not workspace_info(user_id, handler_id):
+                    unmount_ngc_workspace(None, user_id, None, handler_id)
+                    if os.path.exists(mount_path):
+                        deletion_command = f"rm -rf {mount_path}"
+                        delete_thread = threading.Thread(target=run_system_command, args=(deletion_command,))
+                        delete_thread.start()
+                        print("Workspace local path deleted successfully.", file=sys.stderr)
+                    # Update status to DELETED
+                    workspace["status"] = "DELETED"
+                    workspace_metadata_updated = True
+                elif not os.path.ismount(mount_path):
+                    # Mount workspaces
+                    mount_ngc_workspace(user_id, handler_id)
+
+            if workspace_metadata_updated:
+                safe_dump_file(workspace_metadata_file, workspaces)
+
+        report_healthy("App daemon is going to sleep.")
+        time.sleep(15)
+
+
+def AppThreadStart():
+    """Initialize app daemon. Starts a thread if thread not exists"""
+    for thread in threading.enumerate():
+        if thread.name == "AppThreadTAO":
+            return False
+    t = threading.Thread(target=scan_for_workspaces)
+    t.name = 'AppThreadTAO'
+    t.daemon = True
+    t.start()
+    return True
+
+
+if os.getenv("DEV_MODE", "False").lower() not in ("true", "1"):
+    import uwsgi
+    if os.getenv("NGC_RUNNER", "") == "True" and uwsgi.worker_id() == 1:
+        """Start APP Daemon for ngc workspace monitor"""
+        AppThreadStart()
+elif os.getenv("NGC_RUNNER", "") == "True":
+    AppThreadStart()
 
 
 if __name__ == '__main__':
+    time_loop.start()
+
     # app.run(host='0.0.0.0', port=8000)
-    app.run()
+    if os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
+        app.run(host="0.0.0.0", port=8008)
+    else:
+        app.run()

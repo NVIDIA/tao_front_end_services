@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,12 +13,11 @@
 # limitations under the License.
 
 """AutoML read parameters modules"""
-from handlers.utilities import Code
-from handlers.utilities import get_flatten_specs, AUTOML_DISABLED_NETWORKS
+from handlers.utilities import Code, get_flatten_specs, AUTOML_DISABLED_NETWORKS
+from handlers.stateless_handlers import safe_load_file, get_root
 from specs_utils import csv_to_json_schema
 
 import os
-import json
 import pandas as pd
 
 _VALID_TYPES = ["int", "integer",
@@ -28,10 +27,12 @@ _VALID_TYPES = ["int", "integer",
                 "list_1_backbone", "list_1_normal", "list_2", "list_3"]
 
 
-def generate_hyperparams_to_search(network_arch, automl_add_hyperparameters, automl_remove_hyperparameters, handler_root):
+def generate_hyperparams_to_search(job_context, automl_add_hyperparameters, automl_remove_hyperparameters, handler_root, override_automl_disabled_params=False):
     """Use train.csv spec of the network to choose the parameters of AutoML
     Returns: a list of dict for AutoML supported networks
     """
+    network_arch = job_context.network
+    handler_root = handler_root.replace(get_root(), get_root(ngc_runner_fetch=True))
     if network_arch not in AUTOML_DISABLED_NETWORKS:
         DIR_PATH = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         CSV_PATH = os.path.join(DIR_PATH, "specs_utils", "specs", network_arch, f"{network_arch} - train.csv")
@@ -42,8 +43,7 @@ def generate_hyperparams_to_search(network_arch, automl_add_hyperparameters, aut
         original_spec_with_keys_flattened = {}
         get_flatten_specs(original_train_spec, original_spec_with_keys_flattened)
 
-        with open(f"{handler_root}/specs/train.json", "r", encoding='utf-8') as f:
-            updated_train_spec = json.load(f)
+        updated_train_spec = safe_load_file(f"{handler_root}/specs/{job_context.id}-{job_context.action}-spec.json")
         updated_spec_with_keys_flattened = {}
         get_flatten_specs(updated_train_spec, updated_spec_with_keys_flattened)
 
@@ -65,7 +65,8 @@ def generate_hyperparams_to_search(network_arch, automl_add_hyperparameters, aut
                     automl_remove_hyperparameters.remove("augmentation_config.preprocessing.output_image_width")
                 data_frame.loc[data_frame.parameter.isin(['augmentation_config.preprocessing.output_image_width']), 'automl_enabled'] = True
 
-        data_frame = data_frame.loc[data_frame['automl_enabled'] != False]  # pylint: disable=C0121  # noqa: E712
+        if not override_automl_disabled_params:
+            data_frame = data_frame.loc[data_frame['automl_enabled'] != False]  # pylint: disable=C0121  # noqa: E712
 
         # Push params that are dependent on other params to the bottom
         data_frame = data_frame.sort_values(by=['depends_on'])
@@ -77,5 +78,5 @@ def generate_hyperparams_to_search(network_arch, automl_add_hyperparameters, aut
         automl_params = data_frame.loc[data_frame['automl_enabled'] == True]  # pylint: disable=C0121  # noqa: E712
         automl_params = automl_params.loc[~automl_params['parameter'].isin(deleted_params)]
         automl_params = automl_params[["parameter", "value_type", "default_value", "valid_min", "valid_max", "valid_options", "math_cond", "parent_param", "depends_on"]]
-        return automl_params.to_dict('records')
-    return {}
+        return automl_params.to_dict('records'), automl_params["parameter"].values
+    return [{}], []

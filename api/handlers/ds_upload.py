@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,9 +24,9 @@ from handlers.utilities import get_handler_root
 class SimpleHandler:
     """Helper class holding dataset information"""
 
-    def __init__(self, handler_metadata):
+    def __init__(self, user_id, handler_metadata):
         """Initialize the Handler helper class"""
-        self.root = get_handler_root(handler_metadata.get("id"))
+        self.root = get_handler_root(user_id, "datasets", handler_metadata.get("id"), None, ngc_runner_fetch=True)
         self.type = handler_metadata.get("type")
         self.format = handler_metadata.get("format")
 
@@ -75,7 +75,7 @@ def write_dir_contents(directory, file):
             f.write(dir_files + "\n")
 
 
-def object_detection(handler_metadata):
+def object_detection(user_id, handler_metadata):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -88,7 +88,7 @@ def object_detection(handler_metadata):
     - Creates temp output folders and moves them to /images and /labels
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -108,7 +108,7 @@ def object_detection(handler_metadata):
 instance_segmentation = object_detection
 
 
-def semantic_segmentation(handler_metadata):
+def semantic_segmentation(user_id, handler_metadata):
     """
     Upload - uploads and creates .txt files
     - /images/
@@ -116,7 +116,7 @@ def semantic_segmentation(handler_metadata):
 
     No Actions
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and masks paths exist
@@ -131,7 +131,7 @@ def semantic_segmentation(handler_metadata):
         return False
 
 
-def character_recognition(handler_metadata):
+def character_recognition(user_id, handler_metadata):
     """
     LPRNET Dataset structure
     Upload - uploads and untars
@@ -140,7 +140,7 @@ def character_recognition(handler_metadata):
     - /characters.txt
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -154,7 +154,7 @@ def character_recognition(handler_metadata):
         return False
 
 
-def ocrnet(handler_metadata):
+def ocrnet(user_id, handler_metadata):
     """
     OCRNET Dataset structure
     Upload - uploads and untars
@@ -162,7 +162,7 @@ def ocrnet(handler_metadata):
     - /test/gt_new.txt: val dataset
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -176,11 +176,11 @@ def ocrnet(handler_metadata):
         return False
 
 
-def ocrnet_permission_change(handler_metadata):
+def ocrnet_permission_change(user_id, handler_metadata):
     """
     Change permission of necessary files and folders for OCRNET
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         if os.path.exists(os.path.join(handler.root, "train")):
@@ -193,7 +193,7 @@ def ocrnet_permission_change(handler_metadata):
         return False
 
 
-def ocdnet(handler_metadata):
+def ocdnet(user_id, handler_metadata):
     """
     OCDNET Dataset structure
     Upload - uploads and untars
@@ -203,7 +203,7 @@ def ocdnet(handler_metadata):
     - /test/gt: val ground_truth
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -216,7 +216,7 @@ def ocdnet(handler_metadata):
         return False
 
 
-def centerpose(handler_metadata):
+def centerpose(user_id, handler_metadata):
     """
     CenterPose Dataset structure
     Upload - uploads and preprocessed
@@ -225,7 +225,7 @@ def centerpose(handler_metadata):
     - /test: test images and ground_truth
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -238,7 +238,7 @@ def centerpose(handler_metadata):
         return False
 
 
-def optical_inspection(handler_metadata):
+def optical_inspection(user_id, handler_metadata):
     """
     Optical Inspection Dataset structure
     Upload - uploads and untars
@@ -246,7 +246,7 @@ def optical_inspection(handler_metadata):
     - dataset.csv: ground_truth
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -258,7 +258,7 @@ def optical_inspection(handler_metadata):
         return False
 
 
-def visual_changenet(handler_metadata):  # pylint: disable=R1710
+def visual_changenet(user_id, handler_metadata):  # pylint: disable=R1710
     """
     Visual Changenet Dataset structure
     Upload - uploads and untars
@@ -269,11 +269,11 @@ def visual_changenet(handler_metadata):  # pylint: disable=R1710
     For Classification use the optical inspection dataset structure
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
     try:
         # Validate each directory exists
         if handler.format == "visual_changenet_classify":
-            return optical_inspection(handler_metadata)
+            return optical_inspection(user_id, handler_metadata)
         if handler.format == "visual_changenet_segment":
             assert os.path.exists(os.path.join(handler.root, "A")) and os.path.exists(os.path.join(handler.root, "B"))
             assert os.path.exists(os.path.join(handler.root, "list")) and os.path.exists(os.path.join(handler.root, "label"))
@@ -283,7 +283,7 @@ def visual_changenet(handler_metadata):  # pylint: disable=R1710
         return False
 
 
-def ml_recog(handler_metadata):
+def ml_recog(user_id, handler_metadata):
     """
     Metric Learning Recognition Dataset structure
     Upload - uploads and untars
@@ -294,7 +294,7 @@ def ml_recog(handler_metadata):
         - unknown_classes
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -307,7 +307,7 @@ def ml_recog(handler_metadata):
         return False
 
 
-def image_classification(handler_metadata):
+def image_classification(user_id, handler_metadata):
     """
     Raw:
     images/
@@ -323,7 +323,7 @@ def image_classification(handler_metadata):
     val.csv
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
     try:
         # Validate images and labels paths exist
         assert len(glob.glob(os.path.join(handler.root, "images*"))) == 1
@@ -336,7 +336,7 @@ def image_classification(handler_metadata):
         return False
 
 
-def bpnet(handler_metadata):
+def bpnet(user_id, handler_metadata):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -349,7 +349,7 @@ def bpnet(handler_metadata):
     - Creates temp output folders and moves them to /images and /labels
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -368,11 +368,11 @@ def bpnet(handler_metadata):
         return False
 
 
-def bpnet_permission_change(handler_metadata):
+def bpnet_permission_change(user_id, handler_metadata):
     """
     Change permission of necessary files and folders for BPNet
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         if os.path.exists(os.path.join(handler.root, "coco_spec.json")):
@@ -383,7 +383,7 @@ def bpnet_permission_change(handler_metadata):
         return False
 
 
-def fpenet(handler_metadata):
+def fpenet(user_id, handler_metadata):
     """
     Default:
     data/afw
@@ -391,7 +391,7 @@ def fpenet(handler_metadata):
     ...
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
     try:
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "data", "afw"))
@@ -402,11 +402,11 @@ def fpenet(handler_metadata):
         return False
 
 
-def fpenet_permission_change(handler_metadata):
+def fpenet_permission_change(user_id, handler_metadata):
     """
     Change permission of necessary files and folders for FPENet
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
     try:
         # Validate images and labels paths exist
         if os.path.exists(os.path.join(handler.root, 'data')):
@@ -418,7 +418,7 @@ def fpenet_permission_change(handler_metadata):
         return False
 
 
-def action_recognition(handler_metadata):
+def action_recognition(user_id, handler_metadata):
     """
     Default:
     train
@@ -426,7 +426,7 @@ def action_recognition(handler_metadata):
     ...
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
     try:
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "train"))
@@ -436,7 +436,7 @@ def action_recognition(handler_metadata):
         return False
 
 
-def pointpillars(handler_metadata):
+def pointpillars(user_id, handler_metadata):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -446,7 +446,7 @@ def pointpillars(handler_metadata):
     - /calib
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
 
     try:
         # Validate images and labels paths exist
@@ -460,7 +460,7 @@ def pointpillars(handler_metadata):
         return False
 
 
-def pose_classification(handler_metadata):
+def pose_classification(user_id, handler_metadata):
     """
     Default:
     kinetics/nvidia : root_folder_path
@@ -472,7 +472,7 @@ def pose_classification(handler_metadata):
     ...
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
     try:
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "kinetics")) or os.path.exists(os.path.join(handler.root, "nvidia"))
@@ -490,7 +490,7 @@ def pose_classification(handler_metadata):
         return False
 
 
-def re_identification(handler_metadata):
+def re_identification(user_id, handler_metadata):
     """
     Default:
     sample_train
@@ -499,7 +499,7 @@ def re_identification(handler_metadata):
     ...
 
     """
-    handler = SimpleHandler(handler_metadata)
+    handler = SimpleHandler(user_id, handler_metadata)
     try:
         # Validate images and labels paths exist
         assert os.path.exists(os.path.join(handler.root, "sample_train")) and os.path.exists(os.path.join(handler.root, "sample_test")) and os.path.exists(os.path.join(handler.root, "sample_query"))

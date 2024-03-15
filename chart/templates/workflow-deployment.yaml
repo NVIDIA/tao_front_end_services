@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,6 +26,12 @@ spec:
       name: {{ .Release.Name }}-workflow-pod
   template:
     metadata:
+{{- if .Values.enableVault }}
+      {{- with.Values.vault.pod.annotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}
       name: {{ .Release.Name }}-workflow-pod
       namespace: {{ .Release.Namespace }}
       labels:
@@ -34,6 +40,8 @@ spec:
       containers:
       - name: {{ .Release.Name }}-workflow
         image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        securityContext:
+          privileged: true
         imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
         env:
         - name: NAMESPACE
@@ -52,8 +60,6 @@ spec:
           value: {{ .Values.imageTf1 | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5" | quote }}
         - name: IMAGE_PYT
           value: {{ .Values.imagePyt | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt2.1.0" | quote }}
-        - name: IMAGE_PYT_114
-          value: {{ .Values.imagePyt_114 | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt1.14.0" | quote }}
         - name: IMAGE_TF2
           value: {{ .Values.imageTf2 | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0" | quote }}
         - name: IMAGE_DEFAULT
@@ -64,6 +70,8 @@ spec:
           value: {{ .Values.imageDataservices | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-data-services" | quote }}
         - name: IMAGE_TAO_DEPLOY
           value: {{ .Values.imageTaoDeploy | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-deploy" | quote }}
+        - name: ADMIN_UUID
+          value: {{ .Values.adminUUID | default "00000000-0000-0000-0000-000000000001" | quote }}
         - name: PYTHONIOENCODING 
           value: utf-8
         - name: LC_ALL 
@@ -82,10 +90,20 @@ spec:
         - name: SSL_CERT_FILE
           value: "/etc/ssl/certs/ca-certificates.crt"
 {{- end }}
+{{- if .Values.enableVault }}
+        - name: VAULT_SECRET_PATH
+          value: "{{ .Values.vault.secretMountPath }}"
+{{- end }}
+        - name: NGC_API_BASE_URL
+          value: {{ .Values.ngcApiBaseUrl | default "https://api.ngc.nvidia.com/v2" | quote }}
         command: ["/bin/bash", "workflow_start.sh"]
         volumeMounts:
         - name: shared-data
           mountPath: /shared
+{{- if .Values.enableVault }}
+        - name: token
+          mountPath: {{ .Values.vault.volumeMounts.tokenPath }}
+{{- end }}
 {{- if .Values.myCertConfig }}
         - name: my-cert
           mountPath: /usr/local/share/ca-certificates/
@@ -98,6 +116,15 @@ spec:
       - name: shared-data
         persistentVolumeClaim:
           claimName: {{ .Release.Name }}-pvc
+{{- if .Values.enableVault }}
+      - name: token
+        projected:
+          sources:
+            - serviceAccountToken:
+                audience: {{ .Values.vault.volumes.projected.serviceAccountToken.audience }}:443
+                expirationSeconds: 3600
+                path: token
+{{- end }}
 {{- if .Values.myCertConfig }}
       - name: my-cert
         configMap:
@@ -107,4 +134,3 @@ spec:
             path: my-cert.crt
 {{- end }}
       terminationGracePeriodSeconds: 3
-

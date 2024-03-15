@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +14,13 @@
 
 """Hyperband AutoML algorithm modules"""
 import numpy as np
-import json
 import os
 import math
+
 from automl.utils import ResumeRecommendation, JobStates, get_valid_range, clamp_value, report_healthy
 from automl.automl_algorithm_base import AutoMLAlgorithmBase
-from handlers.utilities import load_json_spec, get_flatten_specs
+from handlers.utilities import get_train_spec, get_flatten_specs
+from handlers.stateless_handlers import safe_load_file, safe_dump_file
 
 np.random.seed(95051)
 
@@ -27,7 +28,7 @@ np.random.seed(95051)
 class HyperBand(AutoMLAlgorithmBase):
     """Hyperband AutoML algorithm class"""
 
-    def __init__(self, root, network, parameters, R, nu, epoch_multiplier):
+    def __init__(self, job_context, root, network, parameters, R, nu, epoch_multiplier):
         """Initialize the Hyperband algorithm class
         Args:
             root: handler root
@@ -37,7 +38,7 @@ class HyperBand(AutoMLAlgorithmBase):
             nu: an input that controls the proportion of configurations discarded in each round of SuccessiveHalving
             epoch_multiplier: multiplying factor for epochs
         """
-        super().__init__(root, network, parameters)
+        super().__init__(job_context, root, network, parameters)
         report_healthy(self.root + "/controller.log", "Hyperband init", clear=True)
         self.epoch_multiplier = int(epoch_multiplier)
         self.ni = {}
@@ -70,7 +71,7 @@ class HyperBand(AutoMLAlgorithmBase):
 
     def override_num_epochs(self, num_epochs):
         """Override num epochs parameter in train spec file"""
-        spec = load_json_spec(self.root + "/../specs/train.json")
+        spec = get_train_spec(self.job_context, self.handler_root)
         for key1 in spec:
             if key1 in ("training_config", "train_config", "train"):
                 for key2 in spec[key1]:
@@ -84,12 +85,7 @@ class HyperBand(AutoMLAlgorithmBase):
                                         spec[key1][key2][key3][key4] = num_epochs
             elif key1 in ("num_epochs"):
                 spec[key1] = num_epochs
-
-        with open(self.root + "/../specs/train.json", 'w', encoding='utf-8') as f:
-            json.dump(spec, f,
-                      separators=(',', ':'),
-                      sort_keys=True,
-                      indent=4)
+        safe_dump_file(self.handler_root + f"/specs/{self.job_context.id}-train-spec.json", spec)
 
     def generate_automl_param_rec_value(self, parameter_config):
         """Generate a random value for the parameter passed"""
@@ -129,23 +125,18 @@ class HyperBand(AutoMLAlgorithmBase):
         state_dict["ri"] = self.ri
 
         file_path = self.root + "/brain.json"
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(state_dict, f,
-                      separators=(',', ':'),
-                      sort_keys=True,
-                      indent=4)
+        safe_dump_file(file_path, state_dict)
 
     @staticmethod
-    def load_state(root, network, parameters, R, nu, epoch_multiplier):
+    def load_state(job_context, root, network, parameters, R, nu, epoch_multiplier):
         """Load the Hyperband algorithm related variables to brain.json"""
         file_path = root + "/brain.json"
         if not os.path.exists(file_path):
-            return HyperBand(root, network, parameters, R, nu, epoch_multiplier)
+            return HyperBand(job_context, root, network, parameters, R, nu, epoch_multiplier)
 
-        with open(file_path, 'r', encoding='utf-8') as f:
-            json_loaded = json.loads(f.read())
+        json_loaded = safe_load_file(file_path)
 
-        brain = HyperBand(root, network, parameters, R, nu, epoch_multiplier)
+        brain = HyperBand(job_context, root, network, parameters, R, nu, epoch_multiplier)
         # Load state (Remember everything)
         brain.bracket = json_loaded["bracket"]  # Bracket
         brain.sh_iter = json_loaded["sh_iter"]  # SH iteration

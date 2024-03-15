@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +15,11 @@
 """AutoML controller modules"""
 import os
 import time
-import json
 import sys
 from copy import deepcopy
 from automl.utils import Recommendation, ResumeRecommendation, JobStates, report_healthy
-from handlers.utilities import StatusParser, _ITER_MODELS,  network_metric_mapping, read_network_config, get_total_epochs
-from handlers.stateless_handlers import update_job_status, get_handler_metadata, write_handler_metadata
+from handlers.utilities import StatusParser, _ITER_MODELS, NO_VAL_METRICS_DURING_TRAINING_NETWORKS, MISSING_EPOCH_FORMAT_NETWORKS, network_metric_mapping, read_network_config, get_total_epochs, archive_job_results, generate_job_tar_stats
+from handlers.stateless_handlers import update_job_status, get_handler_metadata, write_handler_metadata, safe_load_file, safe_dump_file, get_root
 from job_utils.automl_job_utils import on_new_automl_job, on_delete_automl_job, on_cancel_automl_job
 import uuid
 import shutil
@@ -60,6 +59,8 @@ class Controller:
         self.recommendations = []
 
         self.root = root
+        self.automl_experiments_root = root.replace(get_root(), get_root(ngc_runner_fetch=True))
+        self.handler_root = "/".join(self.automl_experiments_root.split("/")[0:-2])
         self.network = network
         self.completed_recommendations = 0
         self.max_recommendations = int(max_recommendations)
@@ -67,7 +68,7 @@ class Controller:
         self.automl_algorithm = automl_algorithm
 
         self.metric = metric
-        if self.automl_algorithm in ("hyperband", "h") and self.network in ("bpnet", "multitask_classification", "unet"):
+        if self.automl_algorithm in ("hyperband", "h") and self.network in NO_VAL_METRICS_DURING_TRAINING_NETWORKS:
             self.metric_key = "loss"
             self.metric = "loss"
         elif self.metric == "kpi":
@@ -81,7 +82,7 @@ class Controller:
             self.brain.reverse_sort = False
             self.min_max = min
 
-        self.best_epoch_number = 0
+        self.best_epoch_number = {}
         self.brain_epoch_number = -2
         self.best_model_copied = False
         self.ckpt_path = {}
@@ -104,21 +105,23 @@ class Controller:
         try:
             report_healthy(self.root + "/controller.log", "Starting", clear=False)
             self._execute_loop()
-            update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Done")
-            on_delete_automl_job(self.automl_context.handler_id, self.automl_context.id)
+            status = "Error"
+            if self.best_model_copied:
+                status = "Done"
+            archive_job_results(self.handler_root, self.automl_context.id)
+            generate_job_tar_stats(self.automl_context.user_id, self.automl_context.handler_id, self.automl_context.id, self.handler_root)
+            update_job_status(self.automl_context.user_id, self.automl_context.handler_id, self.automl_context.id, status=status)
+
+            on_delete_automl_job(self.automl_context.user_id, self.automl_context.handler_id, self.automl_context.id)
         except Exception:
             print(f"AutoMLpipeline loop for network {self.network} failed due to exception {traceback.format_exc()}", file=sys.stderr)
-            update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Error")
+            update_job_status(self.automl_context.user_id, self.automl_context.handler_id, self.automl_context.id, status="Error")
 
     def save_state(self):
         """Save the self.recommendations into a controller.json"""
         recs_dict = [ele.__dict__ for ele in self.recommendations]
         file_path = self.root + "/controller.json"
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(recs_dict, f,
-                      separators=(',', ':'),
-                      sort_keys=True,
-                      indent=4)
+        safe_dump_file(file_path, recs_dict)
 
     @staticmethod
     def load_state(root, network, brain, automl_context, max_recommendations, delete_intermediate_ckpt, metric, automl_algorithm):
@@ -127,8 +130,7 @@ class Controller:
         ctrl.recommendations = []
         # Restore the recommendations
         file_path = root + "/controller.json"
-        with open(file_path, 'r', encoding='utf-8') as f:
-            recs_dict = json.loads(f.read())
+        recs_dict = safe_load_file(file_path)
 
         for rec_dict in recs_dict:
             rec = Recommendation(rec_dict["id"], rec_dict["specs"])
@@ -141,8 +143,7 @@ class Controller:
         # temp_rec is a recommendation that started, but never ended
         # Usually, if the controller is stopped before a recommendation is done, it might have to be started / resumed again
         file_path = root + "/current_rec.json"
-        with open(file_path, 'r', encoding='utf-8') as f:
-            temp_rec = json.loads(f.read())
+        temp_rec = safe_load_file(file_path)
         ctrl.recommendations[temp_rec].update_status(JobStates.success)
         ctrl.save_state()
         # ctrl.on_new_automl_job(ctrl.recommendations[temp_rec])
@@ -155,28 +156,29 @@ class Controller:
         2.Reads results of newly done experiments
         3.Writes AutoML status into a file which can be shown to the end user
         """
-        update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Running")
+        update_job_status(self.automl_context.user_id, self.automl_context.handler_id, self.automl_context.id, status="Running")
         while True:
             automl_status_file = self.root + "/controller.json"
             if os.path.exists(automl_status_file):
-                with open(automl_status_file, encoding='utf-8') as f:
-                    automl_status = json.load(f)
+                automl_status = safe_load_file(automl_status_file)
                 self.completed_recommendations = len(automl_status)
                 if (self.completed_recommendations == self.max_recommendations and automl_status[self.max_recommendations - 1]['status'] in ('success', 'failure') and self.automl_algorithm in ("bayesian", "b")) or (self.automl_algorithm in ("hyperband", "h") and self.brain.done()):
                     report_healthy(self.root + "/controller.log", "Stopping", clear=False)
                     # Find best model based on mAP
+                    print("Finding best model", file=sys.stderr)
                     self.find_best_model()
+                    print("best_model_copied result", self.best_model_copied, file=sys.stderr)
 
                     if self.best_model_copied:
                         # Delete final extra checkpoints after finish training
                         for rec in self.recommendations:
-                            expt_root = os.path.join(self.root, "experiment_" + str(rec.id))
+                            expt_root = os.path.join(self.automl_experiments_root, "experiment_" + str(rec.id))
                             self.get_best_checkpoint_path(expt_root, rec)
                             self.delete_not_best_model_checkpoints(expt_root, rec, True)
-                            handler_metadata = get_handler_metadata(self.automl_context.handler_id)
-                            handler_metadata["checkpoint_epoch_number"][f"best_model_{self.automl_context.id}"] = self.best_epoch_number
-                            handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.automl_context.id}"] = self.best_epoch_number
-                            write_handler_metadata(self.automl_context.handler_id, handler_metadata)
+                            handler_metadata = get_handler_metadata(self.automl_context.user_id, self.automl_context.handler_id)
+                            handler_metadata["checkpoint_epoch_number"][f"best_model_{self.automl_context.id}"] = self.best_epoch_number[rec.id]
+                            handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.automl_context.id}"] = self.best_epoch_number[rec.id]
+                            write_handler_metadata(self.automl_context.user_id, self.automl_context.handler_id, handler_metadata)
 
                     self.eta = 0.0
                     self.remaining_epochs_in_experiment = 0.0
@@ -186,7 +188,8 @@ class Controller:
             self.run_experiments()
             self.read_results()
             self.write_results()
-            time.sleep(4)
+            if not os.getenv("CI_PROJECT_DIR", None):
+                time.sleep(10)
 
     def run_experiments(self):
         """Generate recommendation from brain
@@ -200,19 +203,16 @@ class Controller:
         assert len(recommended_specs) in [0, 1], "At most one recommendation"
         for spec in recommended_specs:
             print("Recommendation gotten", file=sys.stderr)
-            self.best_epoch_number = 0
             if type(spec) is dict:
                 # Save brain state and update current recommendation
                 self.hyperband_cancel_condition_seen = False
                 self.brain.save_state()
                 # update temp_rec
                 new_id = len(self.recommendations)
+                self.best_epoch_number[new_id] = 0
                 file_path = self.root + "/current_rec.json"
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(new_id, f,
-                              separators=(',', ':'),
-                              sort_keys=True,
-                              indent=4)
+                safe_dump_file(file_path, new_id)
+
                 # Run new recommendation
                 rec = Recommendation(new_id, spec)
                 job_id = str(uuid.uuid4())  # Assign job_id for this recommendation
@@ -225,27 +225,26 @@ class Controller:
             elif type(spec) is ResumeRecommendation:
                 self.hyperband_cancel_condition_seen = False
                 rec_id = spec.id
+                self.best_epoch_number[rec_id] = 0
                 # Save brain state and update current recommendation
                 self.brain.save_state()
                 # update temp_rec
                 file_path = self.root + "/current_rec.json"
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(rec_id, f,
-                              separators=(',', ':'),
-                              sort_keys=True,
-                              indent=4)
+                safe_dump_file(file_path, rec_id)
                 assert self.recommendations[rec_id].id == rec_id  # Make sure the self.recommendations[rec_id] indeed has 'id' field = rec_id
                 self.recommendations[rec_id].specs = spec.specs.copy()
                 self.recommendations[rec_id].update_status(JobStates.pending)
 
                 # Remove previous files (except checkpoints) from experiment folder.
+                def remove_files(expt_path):
+                    if os.path.exists(expt_path):
+                        expt_file_name = glob.glob(expt_path + "/**/*.txt", recursive=True) + glob.glob(expt_path + "/**/*.json", recursive=True) + glob.glob(expt_path + "/**/*event*", recursive=True) + glob.glob(expt_path + "/**/*lightning_logs*", recursive=True)
+                        for file_name in expt_file_name:
+                            if os.path.isfile(file_name):
+                                os.remove(file_name)
                 expt_name = "experiment_" + str(rec_id)
-                expt_path = os.path.join(self.root, expt_name)
-                if os.path.exists(expt_path):
-                    expt_file_name = glob.glob(expt_path + "/**/*.txt", recursive=True) + glob.glob(expt_path + "/**/*.json", recursive=True) + glob.glob(expt_path + "/**/*event*", recursive=True) + glob.glob(expt_path + "/**/*lightning_logs*", recursive=True)
-                    for file_name in expt_file_name:
-                        if os.path.isfile(file_name):
-                            os.remove(file_name)
+                remove_files(os.path.join(self.automl_experiments_root, expt_name))
+                remove_files(os.path.join(self.root, expt_name))
 
                 self.save_state()
                 self.on_new_automl_job(self.recommendations[rec_id])
@@ -262,19 +261,18 @@ class Controller:
                 continue
 
             expt_name = "experiment_" + str(rec.id)
-            expt_root = os.path.join(self.root, expt_name)
+            expt_root = os.path.join(self.automl_experiments_root, expt_name)
 
             # If rec already changed to Success, no need to check
             if rec.status in [JobStates.success, JobStates.failure]:
                 if self.delete_intermediate_ckpt:
-                    self.delete_checkpoint_files(expt_root)
+                    self.delete_checkpoint_files(expt_root, rec)
                     # Remove the checkpoints from not best model
                     brain_file_path = self.root + "/brain.json"
                     if os.path.exists(brain_file_path):
-                        with open(brain_file_path, 'r', encoding='utf-8') as u:
-                            brain_dict = json.loads(u.read())
-                            if self.automl_algorithm in ("bayesian", "b") or self.old_bracket != brain_dict.get("bracket", 0):
-                                flag = self.delete_not_best_model_checkpoints(expt_root, rec, flag)
+                        brain_dict = safe_load_file(brain_file_path)
+                        if self.automl_algorithm in ("bayesian", "b") or self.old_bracket != brain_dict.get("bracket", 0):
+                            flag = self.delete_not_best_model_checkpoints(expt_root, rec, flag)
                 continue
 
             status_file = os.path.join(self.root, expt_name, "status.json")
@@ -287,25 +285,23 @@ class Controller:
             if self.automl_algorithm in ("hyperband", "h"):
                 brain_file_path = self.root + "/brain.json"
                 if os.path.exists(brain_file_path):
-                    with open(brain_file_path, 'r', encoding='utf-8') as u:
-                        brain_dict = json.loads(u.read())
-                        # if the experiment is in the last set of bracket, do not cancel job.
-                        for result_key in new_results.keys():
-                            if self.hyperband_cancel_condition_seen or result_key in ("epoch", "cur_iter"):
-                                if not isinstance(new_results.get(result_key, None), type(None)):
-                                    self.brain_epoch_number = float(brain_dict.get("epoch_number", float('inf')))
-                                    if len(brain_dict.get("ni", [float('-inf')])[str(brain_dict.get("bracket", 0))]) != (brain_dict.get("sh_iter", float('inf')) + 1):
-                                        if self.hyperband_cancel_condition_seen or new_results.get(result_key) > self.brain_epoch_number:
-                                            self.hyperband_cancel_condition_seen = True
-                                            # Cancel the current running job and change the job state to success
-                                            validation_map, self.best_epoch_number, _ = status_parser.read_metric(results=new_results, metric=self.metric, automl_algorithm=self.automl_algorithm, automl_root=self.root, brain_epoch_number=self.brain_epoch_number)
-                                            if validation_map != 0.0:
-                                                rec.update_status(JobStates.success)
-                                                validation_map_processed = True
-                                                self.hyperband_cancel_condition_seen = False
-                                                on_cancel_automl_job(rec.job_id)
-                                                self.get_best_checkpoint_path(expt_root, rec)
-                                                self.delete_checkpoint_files(expt_root)
+                    brain_dict = safe_load_file(brain_file_path)
+                    # if the experiment is in the last set of bracket, do not cancel job.
+                    for result_key in new_results.keys():
+                        if self.hyperband_cancel_condition_seen or result_key in ("epoch", "cur_iter"):
+                            if not isinstance(new_results.get(result_key, None), type(None)):
+                                self.brain_epoch_number = float(brain_dict.get("epoch_number", float('inf')))
+                                if len(brain_dict.get("ni", [float('-inf')])[str(brain_dict.get("bracket", 0))]) != (brain_dict.get("sh_iter", float('inf')) + 1):
+                                    if self.hyperband_cancel_condition_seen or new_results.get(result_key) > self.brain_epoch_number:
+                                        self.hyperband_cancel_condition_seen = True
+                                        # Cancel the current running job and change the job state to success
+                                        validation_map, self.best_epoch_number[rec.id], _ = status_parser.read_metric(results=new_results, metric=self.metric, automl_algorithm=self.automl_algorithm, automl_root=self.root, brain_epoch_number=self.brain_epoch_number)
+                                        if validation_map != 0.0:
+                                            rec.update_status(JobStates.success)
+                                            validation_map_processed = True
+                                            self.hyperband_cancel_condition_seen = False
+                                            on_cancel_automl_job(rec.job_id)
+                                            self.delete_checkpoint_files(expt_root, rec)
 
             # Status is read from the status.json and not from K8s
             # status.json needs to be reliable
@@ -320,9 +316,9 @@ class Controller:
                 if not validation_map_processed:
                     brain_epoch_number = self.brain_epoch_number
                     if self.automl_algorithm in ("bayesian", "b"):
-                        self.brain.num_epochs_per_experiment = get_total_epochs(self.root, automl=True, automl_experiment_id=rec.id)
+                        self.brain.num_epochs_per_experiment = get_total_epochs(self.automl_context, self.handler_root, automl=True, automl_experiment_id=rec.id)
                         brain_epoch_number = self.brain.num_epochs_per_experiment
-                    validation_map, self.best_epoch_number, _ = status_parser.read_metric(results=new_results, metric=self.metric, automl_algorithm=self.automl_algorithm, automl_root=self.root, brain_epoch_number=brain_epoch_number)
+                    validation_map, self.best_epoch_number[rec.id], _ = status_parser.read_metric(results=new_results, metric=self.metric, automl_algorithm=self.automl_algorithm, automl_root=self.root, brain_epoch_number=brain_epoch_number)
                 if status == JobStates.failure:
                     if self.brain.reverse_sort:
                         validation_map = 1e-7
@@ -335,15 +331,16 @@ class Controller:
                 rec.update_status(status)
                 self.save_state()
                 if status == JobStates.success:
-                    container_log_file = f"{self.root}/experiment_{rec.id}/log.txt"
+                    if os.getenv("NGC_RUNNER") == "True":
+                        on_cancel_automl_job(rec.job_id)
+                    container_log_file = f"{self.automl_experiments_root}/experiment_{rec.id}/log.txt"
                     if os.path.exists(container_log_file):
                         with open(container_log_file, "a", encoding='utf-8') as f:
                             f.write("\nEOF\n")
 
             if rec.status in [JobStates.success, JobStates.failure] and self.delete_intermediate_ckpt:
                 # Retain the latest checkpoint and remove others in experiment folder
-                self.get_best_checkpoint_path(expt_root, rec)
-                self.delete_checkpoint_files(expt_root)
+                self.delete_checkpoint_files(expt_root, rec)
 
         if self.automl_algorithm in ("hyperband", "h"):
             if os.path.exists(brain_file_path):
@@ -395,7 +392,7 @@ class Controller:
 
     def write_results(self):
         """Update stats value and write to automl_metadata.json"""
-        controller_json = os.path.join(self.root, "automl_metadata.json")
+        automl_brain_metadata_json = os.path.join(self.root, "automl_metadata.json")
         # Best mAP seen till now
         result_dict = {}
         try:
@@ -419,13 +416,10 @@ class Controller:
             result_dict["Number of epochs yet to start"] = self.remaining_epochs_in_experiment
             result_dict["Time per epoch in seconds"] = round(self.average_time_per_epoch, 2)
 
-        # Num failed jobs is one KPI
-        # Num successful jobs is one KPI
-        with open(controller_json, "w+", encoding='utf-8') as f:
-            f.write(json.dumps(result_dict, indent=4))
+        safe_dump_file(automl_brain_metadata_json, result_dict)
 
     def find_best_model(self):
-        """Find best model based on metric value chosen and copy those artifacts to best_model folder"""
+        """Find best model based on metric value chosen and move those artifacts to best_model folder"""
         print("Finding best recommendation config", file=sys.stderr)
         try:
             best_mAP = self.min_max(self.recommendations, key=lambda rec: rec.result).result
@@ -434,29 +428,34 @@ class Controller:
             return
 
         for rec in self.recommendations:
+            print("Recommendation in function find_best_model", rec, file=sys.stderr)
             job_name = rec.job_id
             if not job_name:
                 continue
-            expt_folder = os.path.join(self.root, "experiment_" + str(rec.id))
+            expt_folder = os.path.join(self.automl_experiments_root, "experiment_" + str(rec.id))
+            print("Experiment folder", expt_folder, file=sys.stderr)
+            print("Checkpoints in find best_model", glob.glob(expt_folder + "/**/*.tlt", recursive=True) + glob.glob(expt_folder + "/**/*.hdf5", recursive=True) + glob.glob(expt_folder + "/**/*.pth", recursive=True), file=sys.stderr)
             if os.path.exists(expt_folder) and (rec.status == JobStates.success and rec.result == best_mAP) and (glob.glob(expt_folder + "/**/*.tlt", recursive=True) + glob.glob(expt_folder + "/**/*.hdf5", recursive=True) + glob.glob(expt_folder + "/**/*.pth", recursive=True)):
                 self.best_model_copied = True
                 api_params = read_network_config(self.network)["api_params"]
-                spec_path = os.path.join(self.root, f"recommendation_{rec.id}.{api_params['spec_backend']}")
-                best_model_folder = os.path.join(self.root, "best_model")
+                spec_path = os.path.join(self.automl_experiments_root, f"recommendation_{rec.id}.{api_params['spec_backend']}")
+                print("Best recommendation Spec path", spec_path, os.path.exists(spec_path), file=sys.stderr)
+                best_model_folder = os.path.join(self.automl_experiments_root, "best_model")
 
-                shutil.copytree(expt_folder, best_model_folder)
-                shutil.copy(spec_path, os.path.join(self.root, "best_model"))
+                shutil.move(expt_folder, best_model_folder)
+                shutil.copy(spec_path, best_model_folder)
                 shutil.copy(os.path.join(self.root, "controller.json"), best_model_folder)
                 break
 
     def get_best_checkpoint_path(self, path, recommendation):
         """Assign the checkpoint with the best metric value for supported models; for others call the 'find latest checkpoint method'"""
         self.ckpt_path[path] = {}
-        if self.network in ("bpnet", "classification_pyt", "detectnet_v2", "fpenet", "pointpillars", "efficientdet_tf1", "faster_rcnn", "mask_rcnn", "segformer", "unet"):
-            format_epoch_number = str(self.best_epoch_number)
+        if self.network in MISSING_EPOCH_FORMAT_NETWORKS:
+            format_epoch_number = str(self.best_epoch_number[recommendation.id])
         else:
-            format_epoch_number = f"{self.best_epoch_number:03}"
+            format_epoch_number = f"{self.best_epoch_number[recommendation.id]:03}"
         recommendation.best_epoch_number = format_epoch_number
+        print("Best epoch number", recommendation.best_epoch_number, path, file=sys.stderr)
         find_trained_tlt = glob.glob(f"{path}/*{format_epoch_number}.tlt") + glob.glob(f"{path}/train/*{format_epoch_number}.tlt") + glob.glob(f"{path}/weights/*{format_epoch_number}.tlt")
         find_trained_hdf5 = glob.glob(f"{path}/*{format_epoch_number}.hdf5") + glob.glob(f"{path}/train/*{format_epoch_number}.hdf5") + glob.glob(f"{path}/weights/*{format_epoch_number}.hdf5")
         find_trained_pth = glob.glob(f"{path}/*{format_epoch_number}.pth") + glob.glob(f"{path}/train/*{format_epoch_number}.pth") + glob.glob(f"{path}/weights/*{format_epoch_number}.pth")
@@ -470,13 +469,22 @@ class Controller:
         if find_trained_ckzip:
             self.ckpt_path[path]["ckzip"] = find_trained_ckzip[0]
 
-    def delete_checkpoint_files(self, path):
+    def delete_checkpoint_files(self, path, rec):
         """Remove the extra checkpoints generated after the on_cancel_automl_job"""
+        if not os.getenv("CI_PROJECT_DIR", None):
+            time.sleep(30)  # Mounted paths can take time to reflect files generated on remote locally
         trained_files = glob.glob(path + "/**/*.tlt", recursive=True) + glob.glob(path + "/**/*.hdf5", recursive=True) + glob.glob(path + "/**/*.pth", recursive=True) + glob.glob(path + "/**/*.ckzip", recursive=True) + glob.glob(path + "/**/*.resume", recursive=True) + glob.glob(path + "/**/*lightning_logs*", recursive=True)
+        print("Available checkpoints in delete_checkpoint_files function", trained_files, file=sys.stderr)
+        self.get_best_checkpoint_path(path, rec)
+        print("self.ckpt_path in delete_checkpoint_files function", self.ckpt_path, file=sys.stderr)
         for files in trained_files:
             if files not in self.ckpt_path[path].values():
                 if os.path.isfile(files):
+                    print("Removing files in delete_checkpoint_files function", files, file=sys.stderr)
                     os.remove(files)
+                elif ".tlt" in files and self.network == "unet":
+                    print("Removing folder in delete_checkpoint_files function", files, file=sys.stderr)
+                    shutil.rmtree(files)
 
     def delete_not_best_model_checkpoints(self, path, rec, flag):
         """Remove the checkpoints which don't correspond to the best result"""
@@ -488,11 +496,17 @@ class Controller:
         except:
             best_mAP = 0.0
 
+        print("delete_not_best_model_checkpoints function arguments", path, rec, flag, file=sys.stderr)
         if rec.result != best_mAP or bool(flag):
             trained_files = glob.glob(path + "/**/*.tlt", recursive=True) + glob.glob(path + "/**/*.hdf5", recursive=True) + glob.glob(path + "/**/*.pth", recursive=True) + glob.glob(path + "/**/*.ckzip", recursive=True) + glob.glob(path + "/**/*.resume", recursive=True) + glob.glob(path + "/**/*event*", recursive=True) + glob.glob(path + "/**/*lightning_logs*", recursive=True)
+            print("Available checkpoints in delete_not_best_model_checkpoints function", trained_files, file=sys.stderr)
             for files in trained_files:
                 if os.path.isfile(files):
+                    print("Removing files in delete_not_best_model_checkpoints function", files, file=sys.stderr)
                     os.remove(files)
+                elif ".tlt" in files and self.network == "unet":
+                    print("Removing folder in delete_not_best_model_checkpoints function", files, file=sys.stderr)
+                    shutil.rmtree(files)
         else:
             flag = True
         return flag

@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 
-ROOT_DIR = os.getenv("NV_TAO_API_TOP", os.getcwd())
+ROOT_DIR = os.getenv("NV_NVTL_API_TOP", os.getcwd())
 
 with open(os.path.join(ROOT_DIR, "docker/manifest.json"), "r") as m_file:
     docker_config = json.load(m_file)
@@ -137,7 +137,7 @@ def instantiate_dev_docker(gpus, mount_file,
 
     assert check_mounts(formatted_mounts), "Mounts don't exists, Please make sure the paths all exist."
 
-    mount_string = "-v {}:/tao-api ".format(os.getenv("NV_TAO_API_TOP", os.getcwd()))
+    mount_string = "-v {}:/tao-api ".format(os.getenv("NV_NVTL_API_TOP", os.getcwd()))
 
     # Defining env variables.
     env_variables = "-e PYTHONPATH={}:$PYTHONPATH ".format("/tao-api/api")

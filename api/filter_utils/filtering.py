@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,16 +22,36 @@ def apply(args, data):
     filter_type = args.get('type')
     filter_arch = args.get('network_arch')
     filter_read_only = args.get('read_only')
+    filter_format = args.get('format')
 
     if filter_name is not None:
-        data = list(filter(lambda d: d.get('name') == filter_name, data))
+        if filter_name.startswith('!'):
+            filter_name = filter_name[1:]
+            data = list(filter(lambda d: d.get('name') != filter_name, data))
+        else:
+            data = list(filter(lambda d: d.get('name') == filter_name, data))
     if filter_type is not None:
-        data = list(filter(lambda d: d.get('type') == filter_type, data))
+        if filter_type.startswith('!'):
+            filter_type = filter_type[1:]
+            data = list(filter(lambda d: d.get('type') != filter_type, data))
+        else:
+            data = list(filter(lambda d: d.get('type') == filter_type, data))
     if filter_arch is not None:
-        data = list(filter(lambda d: d.get('network_arch') == filter_arch, data))
+        if filter_arch.startswith('!'):
+            filter_arch = filter_arch[1:]
+            data = list(filter(lambda d: d.get('network_arch') != filter_arch, data))
+        else:
+            data = list(filter(lambda d: d.get('network_arch') == filter_arch, data))
     if filter_read_only is not None:
         filter_read_only_as_boolean = filter_read_only == 'true'
         data = list(filter(lambda d: d.get('read_only') == filter_read_only_as_boolean, data))
+
+    if filter_format is not None:
+        if filter_format.startswith('!'):
+            filter_format = filter_format[1:]
+            data = list(filter(lambda d: d.get('format') != filter_format, data))
+        else:
+            data = list(filter(lambda d: d.get('format') == filter_format, data))
 
     if filter_sort == 'name-ascending':
         data = sorted(data, key=lambda d: '' + d.get('name') + ':' + d.get('version'), reverse=False)

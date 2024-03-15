@@ -60,10 +60,10 @@ training_config.num_epochs,Number of Epochs,integer,The total number of epochs t
 training_config.enable_qat,Enable Quantization Aware Training,bool,bool,FALSE,,,,,yes,Yes,,FALSE,,,
 training_config.learning_rate,Learning rate during Training,collection,,,,,,,,,,FALSE,,,
 training_config.learning_rate.soft_start_annealing_schedule,Soft start annealing schedule Learning rate type,collection,,,,,,,,,,FALSE,,,
-training_config.learning_rate.soft_start_annealing_schedule.min_learning_rate,Minimum Learning Rate,float,The minimum learning rate in the learning rate schedule.,5.00E-06,,0,1,,yes,Yes,,TRUE,,,< training_config.learning_rate.soft_start_annealing_schedule.max_learning_rate
-training_config.learning_rate.soft_start_annealing_schedule.max_learning_rate,Maximum Learning Rate,float,The maximum learning rate in the learning rate schedule.,5.00E-04,,0,1,,yes,Yes,,,,TRUE,
-training_config.learning_rate.soft_start_annealing_schedule.soft_start,Soft Start,float,The time to ramp up the learning rate from minimum learning rate to maximum learning rate.,0.100000001,,0,1,,yes,Yes,,TRUE,,,< training_config.learning_rate.soft_start_annealing_schedule.annealing
-training_config.learning_rate.soft_start_annealing_schedule.annealing,Annealing,float,The time to cool down the learning rate from maximum learning rate to minimum learning rate. Greater than soft_start.,0.699999988,,0,1,,yes,Yes,,TRUE,,TRUE,
+training_config.learning_rate.soft_start_annealing_schedule.min_learning_rate,Minimum Learning Rate,float,The minimum learning rate in the learning rate schedule.,5.00E-07,,0,1,,yes,Yes,,TRUE,,,< training_config.learning_rate.soft_start_annealing_schedule.max_learning_rate
+training_config.learning_rate.soft_start_annealing_schedule.max_learning_rate,Maximum Learning Rate,float,The maximum learning rate in the learning rate schedule.,5.00E-05,,0,1,,yes,Yes,,,,TRUE,
+training_config.learning_rate.soft_start_annealing_schedule.soft_start,Soft Start,float,The time to ramp up the learning rate from minimum learning rate to maximum learning rate.,0.0100000001,,0,1,,yes,Yes,,TRUE,,,< training_config.learning_rate.soft_start_annealing_schedule.annealing
+training_config.learning_rate.soft_start_annealing_schedule.annealing,Annealing,float,The time to cool down the learning rate from maximum learning rate to minimum learning rate. Greater than soft_start.,0.0699999988,,0,1,,yes,Yes,,TRUE,,TRUE,
 training_config.learning_rate.early_stopping_annealing_schedule,Early stopping annealing schedule Learning rate type,collection,,,,,,,,,,FALSE,,,
 training_config.learning_rate.early_stopping_annealing_schedule.min_learning_rate,Minimum Learning Rate,float,The minimum learning rate in the learning rate schedule.,,,0,1,,yes,Yes,,,,,< training_config.learning_rate.early_stopping_annealing_schedule.max_learning_rate
 training_config.learning_rate.early_stopping_annealing_schedule.max_learning_rate,Maximum Learning Rate,float,The maximum learning rate in the learning rate schedule.,,,0,1,,yes,Yes,,,,TRUE,
@@ -99,7 +99,7 @@ evaluation_config.average_precision_mode,Average Precision Mode,ordered,The mode
 evaluation_config.validation_period_during_training,Validation Period During Training,integer,The interval at which evaluation is run during training. The evaluation is run at this interval starting from the value of the first validation epoch parameter as specified below.,10,,0,inf,,yes,,,FALSE,,,
 evaluation_config.first_validation_epoch,First Validation Epoch,integer,"The first epoch to start running validation. Ideally it is preferred to wait for at least 20-30% of the total number of epochs before starting evaluation,since the predictions in the initial epochs would be fairly inaccurate. Too many candidate boxes may be sent to clustering and this can cause the evaluation to slow down.",30,,1,inf,,yes,,,FALSE,,,
 cost_function_config,Cost function ,collection,,,,,,,,,,FALSE,,,
-cost_function_config.enable_autoweighting,Auto-Weighting,bool,,TRUE,,,,,yes,,,FALSE,,,
+cost_function_config.enable_autoweighting,Auto-Weighting,bool,,FALSE,,,,,yes,,,FALSE,,,
 cost_function_config.max_objective_weight,Maximum Objective Weight,float,,0.999899983,,,,,,,,FALSE,,,
 cost_function_config.min_objective_weight,Minimum Objective Weight,float,,1.00E-04,,,,,,,,FALSE,,,
 classwise_config,Class-wise organized parameters,list,,,,,,,,,,FALSE,,,

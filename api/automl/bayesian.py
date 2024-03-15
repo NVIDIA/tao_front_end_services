@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
 """Bayesian AutoML algorithm modules"""
 import numpy as np
 import os
-import json
 import math
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern
@@ -24,6 +23,7 @@ from scipy.optimize import minimize
 from automl.utils import JobStates, get_valid_range, clamp_value, report_healthy
 from automl.automl_algorithm_base import AutoMLAlgorithmBase
 from handlers.utilities import get_total_epochs, get_flatten_specs
+from handlers.stateless_handlers import safe_load_file, safe_dump_file
 
 np.random.seed(95051)
 
@@ -31,14 +31,14 @@ np.random.seed(95051)
 class Bayesian(AutoMLAlgorithmBase):
     """Bayesian AutoML algorithm class"""
 
-    def __init__(self, root, network, parameters):
+    def __init__(self, job_context, root, network, parameters):
         """Initialize the Bayesian algorithm class
         Args:
             root: handler root
             network: model we are running AutoML on
             parameters: automl sweepable parameters
         """
-        super().__init__(root, network, parameters)
+        super().__init__(job_context, root, network, parameters)
         report_healthy(self.root + "/controller.log", "Bayesian init", clear=True)
         length_scale = [1.0] * len(self.parameters)
         m52 = ConstantKernel(1.0) * Matern(length_scale=length_scale, nu=2.5)
@@ -57,7 +57,7 @@ class Bayesian(AutoMLAlgorithmBase):
         self.xi = 0.01
         self.num_restarts = 5
 
-        self.num_epochs_per_experiment = get_total_epochs(self.root)
+        self.num_epochs_per_experiment = get_total_epochs(job_context, self.handler_root)
 
     def generate_automl_param_rec_value(self, parameter_config, suggestion):
         """Convert 0 to 1 GP prediction into a possible value"""
@@ -79,7 +79,7 @@ class Bayesian(AutoMLAlgorithmBase):
             quantized = clamp_value(normalized, v_min, v_max)
 
             if not (type(parent_param) is float and math.isnan(parent_param)):
-                if (type(parent_param) is str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) == bool and parent_param):
+                if (isinstance(parent_param, str) and parent_param != "nan" and parent_param == "TRUE") or (isinstance(parent_param, bool) and parent_param):
                     self.parent_params[parameter_name] = quantized
             return quantized
 
@@ -92,26 +92,21 @@ class Bayesian(AutoMLAlgorithmBase):
         state_dict["ys"] = np.array(self.ys).tolist()  # List
 
         file_path = self.root + "/brain.json"
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(state_dict, f,
-                      separators=(',', ':'),
-                      sort_keys=True,
-                      indent=4)
+        safe_dump_file(file_path, state_dict)
 
     @staticmethod
-    def load_state(root, network, parameters):
+    def load_state(job_context, root, network, parameters):
         """Load the Bayesian algorithm related variables to brain.json"""
         file_path = root + "/brain.json"
         if not os.path.exists(file_path):
-            return Bayesian(root, network)
+            return Bayesian(job_context, root, network)
 
-        with open(file_path, 'r', encoding='utf-8') as f:
-            json_loaded = json.loads(f.read())
-            Xs = []
-            for x in json_loaded["Xs"]:
-                Xs.append(np.array(x))
-            ys = json_loaded["ys"]
-        bayesian = Bayesian(root, network, parameters)
+        json_loaded = safe_load_file(file_path)
+        Xs = []
+        for x in json_loaded["Xs"]:
+            Xs.append(np.array(x))
+        ys = json_loaded["ys"]
+        bayesian = Bayesian(job_context, root, network, parameters)
         # Load state (Remember everything)
         bayesian.Xs = Xs
         bayesian.ys = ys

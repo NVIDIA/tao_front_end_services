@@ -1,7 +1,7 @@
 # TAO Toolkit API container info
 image:
-  repository: nvcr.io/nvidia/tao/tao-toolkit
-  tag: 5.2.0-api
+  repository: nvcr.io/nvstaging/tao/nvtl-api
+  tag: v5.2.0-nightly-latest
 imagePullSecret: imagepullsecret
 imagePullPolicy: Always
 
@@ -10,8 +10,12 @@ imagePullPolicy: Always
 #myCertConfig: my-cert
 
 # Optional JupyterLab service
-ngcCollaterals: nvidia/tao/tao-getting-started:5.2.0
-notebooksDir: tao-getting-started_v5.2.0/notebooks/tao_api_starter_kit
+ngcCollaterals: nvidia/tao/tao-getting-started:5.0.0
+notebooksDir: notebooks
+# notebooksDir: tao-getting-started_v5.0.0/notebooks/tao_api_starter_kit
+
+# NGC API BASE URL
+#ngcApiBaseUrl: https://api.ngc.nvidia.com/v2
 
 # Optional HTTPS settings for ingress controller
 #host: mydomain.com
@@ -23,19 +27,16 @@ storageClassName: nfs-client
 storageAccessMode: ReadWriteMany
 storageSize: 900Gi
 
-# Optional NVIDIA Starfleet authentication
+# Authentication
 #authClientId: bnSePYullXlG-504nOZeNAXemGF6DhoCdYR8ysm088w
 
-# Starting TAO Toolkit jobs info
+adminUUID: "00000000-0000-0000-0000-000000000001"
+
 backend: local-k8s
 maxNumGpuPerNode: 1
 imageTf1: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
-imagePyt: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt2.1.0
-imagePyt_114: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt1.14.0
+imagePyt: nvcr.io/nvstaging/tao/tao-toolkit-pyt_v5.2.0-nightly-latest
 imageTf2: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0
-imageTaoDeploy: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-deploy
-imageDataservices: nvcr.io/nvidia/tao/tao-toolkit:5.2.0-data-services
+imageTaoDeploy: nvcr.io/nvstaging/tao/tao-toolkit-deploy_v5.2.0-nightly-latest
+imageDataservices: nvcr.io/nvstaging/tao/tao-toolkit-ds_v5.0.0-nightly-latest
 imageDefault: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5
-
-# To opt out of providing anonymous telemetry data to NVIDIA
-#telemetryOptOut: no

@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,14 +31,18 @@ spec:
           containers:
           - name: {{ .Release.Name }}-cronjob
             image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+            securityContext:
+              privileged: true
             imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
             env:
-            - name: IMAGEPULLSECRET
+            - name: NGC_RUNNER
+              value: {{ .Values.ngcRunner | default "False" | quote }}
+            - name: BCPCLUSTERSECRET
               valueFrom:
                 secretKeyRef:
-                  name: imagepullsecret
+                  name: bcpclustersecret
                   key: .dockerconfigjson
-            command: ["python3", "pretrained_models.py", "--shared_folder_path", "/shared", "--teamNames", "nvidia/tao,nvstaging/tao,nvaie,nvstaging/nvaie", "--ngcApiKey", "$(IMAGEPULLSECRET)"]
+            command: ["/bin/bash", "cronjob_start.sh", "nvidia/tao,nvstaging/tao,nvaie,nvstaging/nvaie,iasixjqzw1hj/no-team", "$(BCPCLUSTERSECRET)"]
             volumeMounts:
             - name: shared-data
               mountPath: /shared

@@ -1,0 +1,26 @@
+{
+    "api_params": {
+        "dataset_type": "semantic_segmentation",
+        "formats": [
+            "medical"
+        ],
+        "actions": [
+            "inference"
+        ],
+        "image": "medical",
+        "version": "0.0.1",
+        "spec_backend": "yaml",
+        "classwise": "False",
+        "chaining_rules": "cvaction",
+        "realtime_infer_support": false,
+        "actions_pipe": {
+            "inference": "inference"
+        }
+    },
+    "cli_params": {},
+    "spec_params": {
+        "inference": {
+            "num_gpu": 1
+        }
+    }
+}

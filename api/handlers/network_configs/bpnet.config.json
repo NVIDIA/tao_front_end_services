@@ -6,7 +6,6 @@
         "image":"tlt-tf1",
         "spec_backend":"yaml",
         "classwise":"False",
-        "chaining_rules":"cvaction",
         "actions_pipe":{
             "dataset_convert":"purpose_built_models_ds_convert",
             "train":"train",

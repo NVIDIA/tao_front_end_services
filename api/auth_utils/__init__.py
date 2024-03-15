@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""API authentication utils moduke"""
+"""API authentication utils module"""
 
-import jwt
-
-__ngc_jwks_client = jwt.PyJWKClient("https://authn.nvidia.com/pubJWKS")
-__starfleet_jwks_client = jwt.PyJWKClient("https://login.nvidia.com/.well-known/jwks.json")
+#
+# import jwt
+#
+# __ngc_jwks_client = jwt.PyJWKClient("https://authn.nvidia.com/pubJWKS")
+# __starfleet_jwks_client = jwt.PyJWKClient("https://login.nvidia.com/.well-known/jwks.json")
+#

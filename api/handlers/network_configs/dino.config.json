@@ -6,7 +6,6 @@
         "image":"tlt-pytorch",
         "spec_backend":"yaml",
         "classwise":"False",
-        "chaining_rules":"cvaction",
         "actions_pipe":{
             "train":"train",
             "evaluate":"evaluate",
@@ -38,6 +37,7 @@
         "train": {
             "train.num_gpus":"from_csv",
             "model.pretrained_backbone_path":"ptm_if_no_resume_model",
+            "train.pretrained_model_path":"ptm_if_no_resume_model",
             "train.resume_training_checkpoint_path":"resume_model",
             "encryption_key":"key",
             "results_dir":"output_dir"
@@ -75,6 +75,7 @@
     "automl_spec_params":{
         "train.num_gpus":"from_csv",
         "model.pretrained_backbone_path":"automl_assign_ptm",
+        "train.pretrained_model_path":"ptm_if_no_resume_model",
         "train.resume_training_checkpoint_path":"automl_resume_model",
         "train.checkpoint_interval":"assign_const_value,train.num_epochs",
         "train.validation_interval":"assign_const_value,train.num_epochs,train.checkpoint_interval",

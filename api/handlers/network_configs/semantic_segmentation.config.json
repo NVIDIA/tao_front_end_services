@@ -5,7 +5,6 @@
         "image":"tlt-tf1",
         "spec_backend":"protobuf",
         "classwise":"False",
-        "chaining_rules":"odaction",
         "actions_pipe":{
             "convert":"unetdatasetconvert"
         }

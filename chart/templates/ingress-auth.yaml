@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,13 +26,14 @@ metadata:
       error_page 497 https://$server_name:$server_port$request_uri;
 {{- end }}
     nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /api/v1/user/$2
+    nginx.ingress.kubernetes.io/rewrite-target: /api/v1/users/$2
     nginx.ingress.kubernetes.io/auth-url: http://{{ .Release.Name }}-service.{{ .Release.Namespace }}.svc.cluster.local:8000/api/v1/auth
     nginx.ingress.kubernetes.io/client-max-body-size: 0m
     nginx.ingress.kubernetes.io/proxy-body-size: 0m
     nginx.ingress.kubernetes.io/body-size: 0m
     nginx.ingress.kubernetes.io/client-body-buffer-size: 50m
-    nginx.ingress.kubernetes.io/proxy-buffer-size: 8k
+    nginx.ingress.kubernetes.io/proxy-buffer-size: 128k
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "4"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
@@ -59,7 +60,7 @@ spec:
   rules:
   - http:
       paths:
-      - path: /{{ .Release.Namespace }}/api/v1/user(/|$)(.*)
+      - path: /{{ .Release.Namespace }}/api/v1/users(/|$)(.*)
         pathType: Prefix
         backend:
           service:
@@ -67,7 +68,7 @@ spec:
             port:
               number: 8000
 {{- if eq .Release.Namespace "default" }}
-      - path: /api/v1/user(/|$)(.*)
+      - path: /api/v1/users(/|$)(.*)
         pathType: Prefix
         backend:
           service:

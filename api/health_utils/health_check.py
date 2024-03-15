@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,10 +37,14 @@ def check_logging():
 def check_k8s():
     """Checks if we are able to initialize kubernetes client"""
     try:
-        with open('/var/run/secrets/kubernetes.io/serviceaccount/namespace', 'r', encoding='utf-8') as f:
-            current_name_space = f.read()
-        os.getenv('NAMESPACE', default=current_name_space)
-        config.load_incluster_config()
+        if os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
+            os.getenv('NAMESPACE', default="default")
+            config.load_kube_config()
+        else:
+            with open('/var/run/secrets/kubernetes.io/serviceaccount/namespace', 'r', encoding='utf-8') as f:
+                current_name_space = f.read()
+            os.getenv('NAMESPACE', default=current_name_space)
+            config.load_incluster_config()
         client.BatchV1Api()
         return True
     except:

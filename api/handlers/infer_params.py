@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,8 +25,9 @@ import sys
 import shutil
 import uuid
 
-from handlers.utilities import search_for_ptm, get_model_results_path, read_network_config
-from handlers.stateless_handlers import get_handler_root, get_handler_spec_root, get_handler_job_metadata, load_json_data
+from handlers.utilities import search_for_base_experiment, get_model_results_path, read_network_config
+from handlers.stateless_handlers import get_handler_root, get_handler_spec_root, get_handler_job_metadata, safe_load_file, get_handler_metadata, get_handler_kind, admin_uuid
+from handlers.medical.helpers import find_matching_bundle_dir
 
 
 def infer_verbose(job_context, handler_metadata):
@@ -42,10 +43,18 @@ def infer_key(job_context, handler_metadata):
         return None
 
 
+def infer_create_od_tf_records(job_context, handler_metadata):
+    """Returns TFRecords path"""
+    kind = get_handler_kind(handler_metadata)
+    od_tf_records_path = get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True) + "/tfrecords/"
+    return od_tf_records_path
+
+
 def infer_output_dir(job_context, handler_metadata):
     """Creates output directory within handler root"""
     job_id = str(job_context.id)
-    outroot = get_handler_root(handler_metadata.get("id"))
+    kind = get_handler_kind(handler_metadata)
+    outroot = get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True)
     results_dir = os.path.join(outroot, job_id)
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
@@ -59,7 +68,7 @@ def infer_spec_file(job_context, handler_metadata):
     network_config = read_network_config(network)
     api_params = network_config.get("api_params", {})
 
-    spec_root = get_handler_spec_root(handler_metadata.get("id"))
+    spec_root = get_handler_spec_root(job_context.user_id, handler_metadata.get("id"))
     job_id = str(job_context.id)
 
     if job_context.action == "convert_efficientdet_tf2":
@@ -73,20 +82,21 @@ def infer_spec_file(job_context, handler_metadata):
 def infer_ptm(job_context, handler_metadata):
     """Returns a list of path of the ptm files of a network"""
     network = job_context.network
-    handler_ptms = handler_metadata.get("ptm", None)
+    handler_ptms = handler_metadata.get("base_experiment", None)
     if handler_ptms is None:
         return None
     ptm_file = []
     for handler_ptm in handler_ptms:
         if handler_ptm:
-            ptm_root = get_handler_root(handler_ptm)
-            ptm_file.append(search_for_ptm(ptm_root, network=network))
+            ptm_root = get_handler_root(admin_uuid, "experiments", admin_uuid, handler_ptm, ngc_runner_fetch=True)
+            ptm_file.append(search_for_base_experiment(ptm_root, network=network))
     return ",".join(ptm_file)
 
 
 def infer_pruned_model(job_context, handler_metadata):
     """Returns path of the pruned model"""
-    handler_root = get_handler_root(handler_metadata.get("id"))
+    kind = get_handler_kind(handler_metadata)
+    handler_root = get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True)
     if not handler_root:
         return None
     if handler_metadata["network_arch"] in ("efficientdet_tf2", "classification_tf2"):
@@ -103,7 +113,7 @@ def infer_pruned_model(job_context, handler_metadata):
 
 def infer_parent_model(job_context, handler_metadata):
     """Returns path of the weight file of the parent job"""
-    parent_model = get_model_results_path(handler_metadata, job_context.parent_id)
+    parent_model = get_model_results_path(job_context, handler_metadata, job_context.parent_id)
     if os.path.exists(str(parent_model)):
         return parent_model
     return None
@@ -111,7 +121,7 @@ def infer_parent_model(job_context, handler_metadata):
 
 def infer_resume_model(job_context, handler_metadata):
     """Returns path of the weight file of the current job"""
-    parent_model = get_model_results_path(handler_metadata, job_context.id)
+    parent_model = get_model_results_path(job_context, handler_metadata, job_context.id)
     if os.path.exists(str(parent_model)):
         return parent_model
     return None
@@ -178,7 +188,7 @@ def infer_automl_assign_resume_epoch(job_context, handler_metadata, job_root, re
         additional_epoch = 1  # epoch numbers indexed by 1
     resume_epoch_number = 0 + additional_epoch
     if infer_automl_resume_model(job_context, handler_metadata, job_root, rec_number):
-        brain_dict = load_json_data(json_file=f"{job_root}/brain.json")
+        brain_dict = safe_load_file(f"{job_root}/brain.json")
         resume_epoch_number = int(brain_dict.get("resume_epoch_number", -1)) + additional_epoch
     return resume_epoch_number
 
@@ -196,12 +206,13 @@ def infer_parent_model_evaluate(job_context, handler_metadata):
     # If extension exists, then search for that extension
     parent_job_id = job_context.parent_id
     handler_id = handler_metadata.get("id")
-    parent_action = get_handler_job_metadata(handler_id, parent_job_id).get("action")
+    parent_action = get_handler_job_metadata(job_context.user_id, handler_id, parent_job_id).get("action")
 
     if parent_action == "export":
-        parent_model = os.path.join(get_handler_root(handler_metadata.get("id")), str(job_context.parent_id), "model.engine")
+        kind = get_handler_kind(handler_metadata)
+        parent_model = os.path.join(get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True), str(job_context.parent_id), "model.engine")
     else:
-        parent_model = get_model_results_path(handler_metadata, job_context.parent_id)
+        parent_model = get_model_results_path(job_context, handler_metadata, job_context.parent_id)
 
     if os.path.exists(str(parent_model)):
         return parent_model
@@ -215,7 +226,7 @@ def infer_framework_evaluate(job_context, handler_metadata):
     """Returns framework to evaluate model on based on the parent action"""
     parent_job_id = job_context.parent_id
     handler_id = handler_metadata.get("id")
-    parent_action = get_handler_job_metadata(handler_id, parent_job_id).get("action")
+    parent_action = get_handler_job_metadata(job_context.user_id, handler_id, parent_job_id).get("action")
 
     if parent_action == "export":
         return "tensorrt"
@@ -308,14 +319,15 @@ def infer_parent_spec(job_context, handler_metadata):
     network_config = read_network_config(network)
     api_params = network_config.get("api_params", {})
 
-    parent_action = get_handler_job_metadata(handler_metadata.get("id"), job_context.parent_id).get("action")
+    parent_action = get_handler_job_metadata(job_context.user_id, handler_metadata.get("id"), job_context.parent_id).get("action")
     if handler_metadata.get("automl_enabled") is True and parent_action == "train":
-        root = get_handler_root(handler_id)
+        kind = get_handler_kind(handler_metadata)
+        root = get_handler_root(job_context.user_id, kind, handler_id, None, ngc_runner_fetch=True)
         automl_root = os.path.join(root, parent_job_id, "best_model")
         spec_file = (glob.glob(f"{automl_root}/*recommendation*.protobuf") + glob.glob(f"{automl_root}/*recommendation*.yaml"))[0]
-        spec_file_copy = os.path.join(get_handler_spec_root(handler_id), job_context.id + "." + api_params["spec_backend"])
+        spec_file_copy = os.path.join(get_handler_spec_root(job_context.user_id, handler_id), job_context.id + "." + api_params["spec_backend"])
     else:
-        spec_file = os.path.join(get_handler_spec_root(handler_id), parent_job_id + "." + api_params["spec_backend"])
+        spec_file = os.path.join(get_handler_spec_root(job_context.user_id, handler_id), parent_job_id + "." + api_params["spec_backend"])
         spec_file_copy = spec_file.replace(parent_job_id, job_context.id)
 
     os.makedirs(os.path.dirname(os.path.abspath(spec_file_copy)), exist_ok=True)
@@ -327,8 +339,8 @@ def infer_parents_parent_spec(job_context, handler_metadata):
     """Returns path of the spec file of the parent's parent job"""
     handler_id = handler_metadata.get("id")
     parent_job_id = job_context.parent_id
-    parents_parent_job_id = get_handler_job_metadata(handler_id, parent_job_id).get("parent_id", "")
-    parents_parent_action = get_handler_job_metadata(handler_metadata.get("id"), parents_parent_job_id).get("action")
+    parents_parent_job_id = get_handler_job_metadata(job_context.user_id, handler_id, parent_job_id).get("parent_id", "")
+    parents_parent_action = get_handler_job_metadata(job_context.user_id, handler_metadata.get("id"), parents_parent_job_id).get("action")
 
     if parents_parent_action == "dataset_convert":
         print("Dataset convert spec can't be used for this job, returning parent's spec now", file=sys.stderr)
@@ -344,12 +356,13 @@ def infer_parents_parent_spec(job_context, handler_metadata):
     api_params = network_config.get("api_params", {})
 
     if handler_metadata.get("automl_enabled") is True and parents_parent_action == "train":
-        root = get_handler_root(handler_id)
+        kind = get_handler_kind(handler_metadata)
+        root = get_handler_root(job_context.user_id, kind, handler_id, None, ngc_runner_fetch=True)
         automl_root = os.path.join(root, parents_parent_job_id, "best_model")
         spec_file = (glob.glob(f"{automl_root}/*recommendation*.protobuf") + glob.glob(f"{automl_root}/*recommendation*.yaml"))[0]
-        spec_file_copy = os.path.join(get_handler_spec_root(handler_id), job_context.id + "." + api_params["spec_backend"])
+        spec_file_copy = os.path.join(get_handler_spec_root(job_context.user_id, handler_id), job_context.id + "." + api_params["spec_backend"])
     else:
-        spec_file = os.path.join(get_handler_spec_root(handler_id), parents_parent_job_id + "." + api_params["spec_backend"])
+        spec_file = os.path.join(get_handler_spec_root(job_context.user_id, handler_id), parents_parent_job_id + "." + api_params["spec_backend"])
         spec_file_copy = spec_file.replace(parents_parent_job_id, job_context.id)
 
     if not os.path.exists(spec_file):
@@ -369,14 +382,15 @@ def infer_parent_spec_copied(job_context, handler_metadata):
     network_config = read_network_config(network)
     api_params = network_config.get("api_params", {})
 
-    parent_action = get_handler_job_metadata(handler_metadata.get("id"), job_context.parent_id).get("action")
+    parent_action = get_handler_job_metadata(job_context.user_id, handler_metadata.get("id"), job_context.parent_id).get("action")
     if handler_metadata.get("automl_enabled") is True and parent_action == "train":
-        root = get_handler_root(handler_id)
+        kind = get_handler_kind(handler_metadata)
+        root = get_handler_root(job_context.user_id, kind, handler_id, None, ngc_runner_fetch=True)
         automl_root = os.path.join(root, parent_job_id, "best_model")
         spec_file = (glob.glob(f"{automl_root}/*recommendation*.protobuf") + glob.glob(f"{automl_root}/*recommendation*.yaml"))[0]
-        spec_file_copy = os.path.join(get_handler_spec_root(handler_id), job_context.id + "." + api_params["spec_backend"])
+        spec_file_copy = os.path.join(get_handler_spec_root(job_context.user_id, handler_id), job_context.id + "." + api_params["spec_backend"])
     else:
-        spec_file = os.path.join(get_handler_spec_root(handler_id), parent_job_id + "." + api_params["spec_backend"])
+        spec_file = os.path.join(get_handler_spec_root(job_context.user_id, handler_id), parent_job_id + "." + api_params["spec_backend"])
         spec_file_copy = spec_file.replace(parent_job_id, job_context.id)
 
     os.makedirs(os.path.dirname(os.path.abspath(spec_file_copy)), exist_ok=True)
@@ -387,7 +401,8 @@ def infer_parent_spec_copied(job_context, handler_metadata):
 def infer_parent_cal_cache(job_context, handler_metadata):
     """Returns path of the cal.bin of the parent job"""
     parent_job_id = job_context.parent_id
-    cal_file = os.path.join(get_handler_root(handler_metadata.get("id")), parent_job_id, "cal.bin")
+    kind = get_handler_kind(handler_metadata)
+    cal_file = os.path.join(get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True), parent_job_id, "cal.bin")
 
     if os.path.exists(cal_file):
         return cal_file
@@ -402,7 +417,7 @@ def infer_lprnet_inference_input(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_path = get_handler_root(infer_ds) + "/image/"
+    images_path = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True) + "/image/"
     if os.path.exists(images_path):
         return images_path
     return None
@@ -414,7 +429,7 @@ def infer_classification_val_input(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_root = get_handler_root(infer_ds)
+    images_root = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True)
     if os.path.exists(images_root + "/images/"):
         images_path = images_root + "/images/"
         return images_path
@@ -434,7 +449,7 @@ def infer_od_inference_input(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_root = get_handler_root(infer_ds)
+    images_root = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True)
     if os.path.exists(images_root + "/images/"):
         images_path = images_root + "/images/"
         return images_path
@@ -451,7 +466,7 @@ def infer_od_inference_labels(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_root = get_handler_root(infer_ds)
+    images_root = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True)
     if os.path.exists(images_root + "/labels/"):
         images_path = images_root + "/labels/"
         return images_path
@@ -465,7 +480,7 @@ def infer_od_inference_label_map(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    label_map_path = get_handler_root(infer_ds) + "/label_map.txt"
+    label_map_path = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True) + "/label_map.txt"
     if os.path.exists(label_map_path):
         return label_map_path
     if os.path.exists(label_map_path.replace(".txt", ".yaml")):
@@ -486,7 +501,8 @@ def infer_od_inference_input_image(job_context, handler_metadata):
 
 def infer_od_dir(job_context, handler_metadata, dirname):
     """Returns joined-path of handler_root and dirname"""
-    handler_root = get_handler_root(handler_metadata.get("id"))
+    kind = get_handler_kind(handler_metadata)
+    handler_root = get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True)
     path = f"{handler_root}/{dirname}"
     if os.path.exists(path):
         return path
@@ -509,7 +525,7 @@ def infer_unet_val_images(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_root = get_handler_root(infer_ds)
+    images_root = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True)
     if os.path.exists(images_root + "/images/val/"):
         images_path = images_root + "/images/val/"
         return images_path
@@ -523,7 +539,7 @@ def infer_unet_val_labels(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_root = get_handler_root(infer_ds)
+    images_root = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True)
     if os.path.exists(images_root + "/masks/val/"):
         images_path = images_root + "/masks/val/"
         return images_path
@@ -537,7 +553,7 @@ def infer_unet_test_images(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_root = get_handler_root(infer_ds)
+    images_root = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True)
     if os.path.exists(images_root + "/images/test/"):
         images_path = images_root + "/images/test/"
         return images_path
@@ -551,7 +567,7 @@ def infer_unet_test_labels(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    images_root = get_handler_root(infer_ds)
+    images_root = get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True)
     if os.path.exists(images_root + "/masks/test/"):
         images_path = images_root + "/masks/test/"
         return images_path
@@ -573,23 +589,24 @@ def infer_parent_classmap(job_context, handler_metadata):
     # Check if inference dataset has classmap file
     infer_ds = handler_metadata.get("inference_dataset", None)
     if infer_ds is not None:
-        classmap_path = os.path.join(get_handler_root(infer_ds), "classmap.json")
+        classmap_path = os.path.join(get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True), "classmap.json")
         if os.path.exists(str(classmap_path)):
             return classmap_path
 
     # Else check for classmap presence in the parent job's artifacts
-    parent_action = get_handler_job_metadata(handler_metadata.get("id"), job_context.parent_id).get("action")
+    parent_action = get_handler_job_metadata(job_context.user_id, handler_metadata.get("id"), job_context.parent_id).get("action")
     automl_path = ""
     if handler_metadata.get("automl_enabled") is True and parent_action == "train":
         automl_path = "best_model"
 
+    kind = get_handler_kind(handler_metadata)
     if parent_job_id:
-        classmap_path = glob.glob(f'{os.path.join(get_handler_root(handler_metadata.get("id")), str(parent_job_id), automl_path)}/**/*classmap.json', recursive=True)
+        classmap_path = glob.glob(f'{os.path.join(get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True), str(parent_job_id), automl_path)}/**/*classmap.json', recursive=True)
         if not classmap_path:
-            classmap_path = glob.glob(f'{os.path.join(get_handler_root(handler_metadata.get("id")), str(parent_job_id), automl_path)}/**/*class_mapping.json', recursive=True)
+            classmap_path = glob.glob(f'{os.path.join(get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True), str(parent_job_id), automl_path)}/**/*class_mapping.json', recursive=True)
     if classmap_path and os.path.exists(str(classmap_path[0])):
         # Copy parent classmap as current classmap - needed for consecutive jobs which uses parent classmap
-        os.makedirs(os.path.join(get_handler_root(handler_metadata.get("id")), str(job_context.id)), exist_ok=True)
+        os.makedirs(os.path.join(get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True), str(job_context.id)), exist_ok=True)
         shutil.copy(classmap_path[0], classmap_path[0].replace(parent_job_id, job_context.id).replace(automl_path, "").replace(parent_action, ""))
         return classmap_path[0]
     print("Warning: classmap.json needs to be uploaded with inference dataset", file=sys.stderr)
@@ -606,11 +623,11 @@ def infer_cal_image_dir(job_context, handler_metadata):
         return None
 
     if job_context.network == "unet":
-        images_path = get_handler_root(calib_ds) + "/images/train/"
+        images_path = get_handler_root(job_context.user_id, "datasets", calib_ds, None, ngc_runner_fetch=True) + "/images/train/"
     elif job_context.network == "ocdnet":
-        images_path = get_handler_root(calib_ds) + "/train/img/"
+        images_path = get_handler_root(job_context.user_id, "datasets", calib_ds, None, ngc_runner_fetch=True) + "/train/img/"
     else:
-        images_path = get_handler_root(calib_ds) + "/images/"
+        images_path = get_handler_root(job_context.user_id, "datasets", calib_ds, None, ngc_runner_fetch=True) + "/images/"
 
     if os.path.exists(images_path):
         return images_path
@@ -632,11 +649,11 @@ def infer_cal_image_dir_list(job_context, handler_metadata):
         return None
 
     if job_context.network == "ml_recog":
-        images_path = get_handler_root(calib_ds) + "/metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/test/"
+        images_path = get_handler_root(job_context.user_id, "datasets", calib_ds, None, ngc_runner_fetch=True) + "/metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/test/"
     elif job_context.network == "ocrnet":
-        images_path = get_handler_root(calib_ds) + "/train/"
+        images_path = get_handler_root(job_context.user_id, "datasets", calib_ds, None, ngc_runner_fetch=True) + "/train/"
     else:
-        images_path = get_handler_root(calib_ds) + "/images/"
+        images_path = get_handler_root(job_context.user_id, "datasets", calib_ds, None, ngc_runner_fetch=True) + "/images/"
     if os.path.exists(images_path):
         return [images_path]
     if os.path.exists(images_path.replace("/images/", "/images_train/")):
@@ -649,7 +666,7 @@ def infer_cal_image_dir_list(job_context, handler_metadata):
 def infer_bpnet_coco_spec(job_context, handler_metadata):
     """Returns path of coco_spec file for bpnet"""
     train_ds = handler_metadata.get("train_datasets", [])[0]
-    handler_root = get_handler_root(train_ds)
+    handler_root = get_handler_root(job_context.user_id, "datasets", train_ds, None, ngc_runner_fetch=True)
     infer_json = handler_root + "/coco_spec.json"
     return infer_json
 
@@ -657,7 +674,7 @@ def infer_bpnet_coco_spec(job_context, handler_metadata):
 def infer_bpnet_inference(job_context, handler_metadata):
     """Returns path of inference dataset for bpnet"""
     train_ds = handler_metadata.get("train_datasets", [])[0]
-    handler_root = get_handler_root(train_ds)
+    handler_root = get_handler_root(job_context.user_id, "datasets", train_ds, None, ngc_runner_fetch=True)
     infer_path = handler_root + "/val2017"
     return infer_path
 
@@ -665,17 +682,18 @@ def infer_bpnet_inference(job_context, handler_metadata):
 def infer_data_json(job_context, handler_metadata):
     """Returns path of data json"""
     train_ds = handler_metadata.get("train_datasets", [])
+    kind = get_handler_kind(handler_metadata)
     if train_ds != []:
-        handler_root = get_handler_root(train_ds[0])
+        handler_root = get_handler_root(job_context.user_id, "datasets", train_ds[0], None, ngc_runner_fetch=True)
     else:
-        handler_root = get_handler_root(handler_metadata.get("id"))
+        handler_root = get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=True)
     return os.path.join(handler_root, "data.json")
 
 
 def infer_inference_data(job_context, handler_metadata):
     """Returns path of dataset to run sample inference on"""
     train_ds = handler_metadata.get("train_datasets", [])[0]
-    handler_root = get_handler_root(train_ds)
+    handler_root = get_handler_root(job_context.user_id, "datasets", train_ds, None, ngc_runner_fetch=True)
     return handler_root
 
 
@@ -685,7 +703,7 @@ def infer_gt_cache(job_context, handler_metadata):
     if infer_ds is None:
         return None
 
-    gt_cache_path = os.path.join(get_handler_root(infer_ds), "label.json")
+    gt_cache_path = os.path.join(get_handler_root(job_context.user_id, "datasets", infer_ds, None, ngc_runner_fetch=True), "label.json")
     if os.path.exists(gt_cache_path):
         return gt_cache_path
     return None
@@ -696,6 +714,25 @@ def infer_label_output(job_context, handler_metadata):
     results_dir = infer_output_dir(job_context, handler_metadata)
     label_output = os.path.join(results_dir, "label.json")
     return label_output
+
+
+def infer_medical_output_dir(job_context, handler_metadata):
+    """Returns path of medical output dir based on the bundle configs"""
+    job_id = str(job_context.id)
+    kind = get_handler_kind(handler_metadata)
+    ngc_runner_fetch = not (job_context.specs and "cluster" in job_context.specs and job_context.specs["cluster"] == "local")
+    outroot = get_handler_root(job_context.user_id, kind, handler_metadata.get("id"), None, ngc_runner_fetch=ngc_runner_fetch)
+    results_dir = os.path.join(outroot, job_id)
+    ptm_model_list = get_handler_metadata(job_context.user_id, job_context.handler_id)["base_experiment"]
+    ptm_model = ptm_model_list[0] if ptm_model_list else ""
+    ptm_model_path = get_handler_root(admin_uuid, "experiments", admin_uuid, ptm_model, ngc_runner_fetch=True) if ptm_model else ""
+    if ptm_model and not ptm_model_path:
+        # If ptm_model is not found in the admin's experiments, then search in the user's experiments
+        ptm_model_path = get_handler_root(user_id=job_context.user_id, kind="experiments", handler_id=ptm_model, ngc_runner_fetch=True)
+    bundle_name = find_matching_bundle_dir(ptm_model_path, [r'(.+?)_v\d+\.\d+\.\d+'])
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+    return ptm_model_path, bundle_name, results_dir + "/"
 
 
 CLI_CONFIG_TO_FUNCTIONS = {"output_dir": infer_output_dir,
@@ -749,12 +786,10 @@ CLI_CONFIG_TO_FUNCTIONS = {"output_dir": infer_output_dir,
                            "unet_val_labels": infer_unet_val_labels,
                            "unet_test_images": infer_unet_test_images,
                            "unet_test_labels": infer_unet_test_labels,
-                           "create_od_tfrecords": lambda a, b: get_handler_root(b.get("id")) + "/tfrecords/",
+                           "create_od_tfrecords": infer_create_od_tf_records,
                            "output_dir_images_annotated": lambda a, b: infer_output_dir(a, b) + "/images_annotated/",
                            "output_dir_labels": lambda a, b: infer_output_dir(a, b) + "/labels/",
                            "output_dir_inference_json": lambda a, b: infer_output_dir(a, b) + "/annotations_mal.json",
-                           "root": lambda a, b: get_handler_root(b.get("id")),  # Just return the root of the handler object
-                           "augment_out": lambda a, b: get_handler_root(b.get("id")) + "/augment",
                            "from_csv": lambda a, b: None,  # Used to infer the param from spec sheet
                            "parent_classmap": infer_parent_classmap,
                            "bpnet_coco_spec": infer_bpnet_coco_spec,
@@ -762,4 +797,5 @@ CLI_CONFIG_TO_FUNCTIONS = {"output_dir": infer_output_dir,
                            "fpenet_data_json": infer_data_json,
                            "fpenet_inference_data": infer_inference_data,
                            "label_gt_cache": infer_gt_cache,
-                           "auto_label_output": infer_label_output}
+                           "auto_label_output": infer_label_output,
+                           "medical_output_dir": infer_medical_output_dir}

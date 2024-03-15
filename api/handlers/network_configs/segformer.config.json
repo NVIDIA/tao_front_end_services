@@ -3,10 +3,9 @@
         "dataset_type":"semantic_segmentation",
         "actions": ["train","evaluate","export","inference","gen_trt_engine"],
         "formats":["default"],
-        "image":"tlt-pytorch-114",
+        "image":"tlt-pytorch",
         "spec_backend":"yaml",
         "classwise":"False",
-        "chaining_rules":"cvaction",
         "actions_pipe":{
             "train":"train",
             "evaluate":"evaluate",
@@ -75,7 +74,7 @@
         "train.resume_training_checkpoint_path":"automl_resume_model",
         "train.checkpoint_interval":"assign_const_value,train.max_iters",
         "train.validation_interval":"assign_const_value,train.max_iters,train.checkpoint_interval",
-        "train.logging_interval":"assign_const_value",
+        "train.logging_interval":"assign_const_value,train.validation_interval",
         "encryption_key":"key",
         "results_dir":"automl_output_dir"
     },

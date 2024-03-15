@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# http://<server>:<port>/<namespace>/api/v1/user/<user_id>/model?<params>
-# ['', '<namespace', 'api', 'v1', 'user', '<user_id>', 'model']
+# http://<server>:<port>/<namespace>/api/v1/users/<user_id>/experiments?<params>
+# ['', '<namespace', 'api', 'v1', 'users', '<user_id>', 'experiments']
 
 """Authentication utils access control modeules"""
-import os.path
 
 
 class AccessControlError(Exception):
@@ -42,18 +41,8 @@ def validate(url, user_id):
     tmp = tmp.split('?')[0]
     parts = tmp.split('/')
     # check for user ID match in URL path, with or without domain name in path
-    if (len(parts) >= 5 and parts[3] == 'user' and parts[4] == user_id):
+    if (len(parts) >= 5 and parts[3] == 'users' and parts[4] == user_id):
         err = None
-    elif (len(parts) >= 6 and parts[4] == 'user' and parts[5] == user_id):
+    elif (len(parts) >= 6 and parts[4] == 'users' and parts[5] == user_id):
         err = None
-    if err is None:
-        # validate user_id in whitelist
-        # if no whitelist, assume everybody is allowed
-        filename = '/shared/whitelist.txt'
-        if os.path.isfile(filename):
-            err = AccessControlError("No access granted for user " + user_id)
-            with open(filename, 'r', encoding='utf-8') as f:
-                allowed_users = [line.rstrip('\n') for line in f]
-                if user_id in allowed_users:
-                    err = None
     return err

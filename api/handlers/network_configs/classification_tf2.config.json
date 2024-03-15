@@ -5,7 +5,6 @@
         "image":"tlt-tf2",
         "spec_backend":"yaml",
         "classwise":"True",
-        "chaining_rules":"cvaction",
         "actions_pipe":{
             "train":"train",
             "evaluate":"evaluate",

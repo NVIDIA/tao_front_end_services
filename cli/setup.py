@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Setup script to build the TAO Toolkit client package."""
+"""Setup script to build the NVIDIA Transfer Learning client package."""
 
 import os
 import setuptools
@@ -63,7 +63,7 @@ def main(args=sys.argv[1:]):
     print(f'Building wheel with version number {version_locals["__version__"]}')
 
     PACKAGE_LIST = [
-        "tao_cli"
+        "nvtl_cli"
     ]
 
     setuptools_packages = []
@@ -103,7 +103,8 @@ def main(args=sys.argv[1:]):
         zip_safe=False,
         entry_points={
             'console_scripts': [
-                'tao-client=tao_cli.tao:cli',
+                'tao-client=nvtl_cli.nvtl:cli',
+                'nvtl=nvtl_cli.nvtl:cli',
             ]
         }
     )

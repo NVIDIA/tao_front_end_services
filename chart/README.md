@@ -1,4 +1,4 @@
-# Helm chart for deploying TAO Toolkit API 
+# Helm chart for deploying NVIDIA Transfer Learning API 
 
 ## Prerequisites
 - Hardware setup (GPU Node(s) with Ubuntu 18.04 or latest)
@@ -119,7 +119,7 @@ One must update the chart's values.yaml before deployment.
 If your cluster has no default Storage Provisioner, you would have to set StorageClassName to [for example] local-path.
 For HTTPS, you would have to set your host and tlsSecret.
 ```
-helm install tao-toolkit-api chart/ --namespace default
+helm install nvtl-api chart/ --namespace default
 ```
 
 ## <a name='License'></a>License

@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,25 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pipeline construction for all model actions"""
-import os
+"""Pipeline construction for all experiment actions"""
+import copy
+import datetime
+import glob
 import json
+import os
+import shutil
+import subprocess
+import sys
 import threading
 import time
-import uuid
-import copy
-import sys
 import traceback
-import yaml
+import uuid
 
-from job_utils import executor as jobDriver
-from handlers.docker_images import DOCKER_IMAGE_MAPPER, DOCKER_IMAGE_VERSION
-from handlers.infer_params import CLI_CONFIG_TO_FUNCTIONS
-from handlers.infer_data_sources import DS_CONFIG_TO_FUNCTIONS
-from handlers.stateless_handlers import get_handler_root, get_handler_spec_root, get_handler_log_root, get_handler_job_metadata, get_handler_metadata, write_handler_metadata, update_job_results, update_job_status, get_toolkit_status, load_json_data
-from handlers.utilities import StatusParser, build_cli_command, write_nested_dict, read_nested_dict, read_network_config, load_json_spec, search_for_ptm, process_classwise_config, validate_gpu_param_value, get_total_epochs, NO_SPEC_ACTIONS_MODEL, _OD_NETWORKS, _TF1_NETWORKS, AUTOML_DISABLED_NETWORKS
+import yaml
 from automl.utils import delete_lingering_checkpoints, wait_for_job_completion
+from handlers import ngc_handler
+from handlers.docker_images import DOCKER_IMAGE_MAPPER, DOCKER_IMAGE_VERSION
+from handlers.infer_data_sources import DS_CONFIG_TO_FUNCTIONS
+from handlers.infer_params import CLI_CONFIG_TO_FUNCTIONS
+from handlers.ngc_handler import load_user_workspace_metadata
+# TODO: force max length of characters in a line to be 120
+from handlers.stateless_handlers import (admin_uuid, get_base_experiment_path, get_base_experiment_metadata, get_handler_job_metadata,
+                                         get_handler_log_root, get_handler_metadata, get_handler_root,
+                                         safe_dump_file, safe_load_file, update_job_metadata, update_job_status, write_handler_metadata,
+                                         get_handler_spec_root, get_handler_user, get_root, get_toolkit_status, printc)
+from handlers.utilities import (_OD_NETWORKS, _TF1_NETWORKS, AUTOML_DISABLED_NETWORKS, NO_SPEC_ACTIONS_MODEL,
+                                StatusParser, archive_job_results, build_cli_command, generate_bundle_train_script, generate_cl_script,
+                                generate_dicom_segmentation_convert_script, generate_job_tar_stats, get_total_epochs,
+                                load_json_spec, process_classwise_config, read_nested_dict, read_network_config,
+                                search_for_base_experiment, validate_gpu_param_value, validate_medical_bundle_params,
+                                write_nested_dict)
+from job_utils import executor as jobDriver
+from network_utils.network_constants import ptm_mapper
 from specs_utils import json_to_kitti, json_to_yaml
+from utils.utils import remove_key_by_flattened_string
 
 SPEC_BACKEND_TO_FUNCTIONS = {"protobuf": json_to_kitti.kitti, "yaml": json_to_yaml.yml}
 
@@ -47,7 +64,7 @@ class ActionPipeline:
     - Processes spec requirements
         - Prepares specs (generate_specs step)
             - dataset config (defined for each network's train, evaluate, retrain)
-            - ptm config (for train, evaluate)
+            - base_experiment config (for train, evaluate)
             - parent model and load graph (for retrain)
             - CLI paramters (for all actions)
             - Classwise configs (for all applicable train, evaluate, retrain) => currently for OD networks only
@@ -81,14 +98,14 @@ class ActionPipeline:
         self.network = self.job_context.network
         self.network_config = read_network_config(self.network)
         self.api_params = self._read_api_params()
-        self.handler_metadata = get_handler_metadata(self.job_context.handler_id)
-        self.handler_spec_root = get_handler_spec_root(self.job_context.handler_id)
-        self.handler_root = get_handler_root(self.job_context.handler_id)
-        self.handler_log_root = get_handler_log_root(self.job_context.handler_id)
+        self.handler_metadata = get_handler_metadata(self.job_context.user_id, self.job_context.handler_id)
+        self.handler_spec_root = get_handler_spec_root(self.job_context.user_id, self.job_context.handler_id)
+        self.handler_root = get_handler_root(self.job_context.user_id, None, self.job_context.handler_id, None, ngc_runner_fetch=True)
+        self.handler_log_root = get_handler_log_root(self.job_context.user_id, self.job_context.handler_id)
         self.handler_id = self.job_context.handler_id
         self.tao_deploy_actions = False
         self.action_suffix = ""
-        self.parent_job_action = get_handler_job_metadata(self.handler_id, self.job_context.parent_id).get("action")
+        self.parent_job_action = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_context.parent_id).get("action")
         if self.job_context.action in ("gen_trt_engine", "trtexec") or (self.parent_job_action in ("gen_trt_engine", "trtexec") and self.network != "bpnet"):
             self.tao_deploy_actions = True
             if self.job_context.action in ("evaluate", "inference") and self.job_context.network in _TF1_NETWORKS:
@@ -118,6 +135,11 @@ class ActionPipeline:
         self.run_command = ""
         self.status_file = None
         self.logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
+        self.ngc_runner = False
+        self.workspaces_for_job = []
+        if os.getenv("NGC_RUNNER", "") == "True":
+            self.ngc_runner = True
+            self.workspaces_for_job = ngc_handler.get_workspaces_for_job(self.job_context.user_id, self.job_context.handler_id, self.job_context.parent_id, self.handler_metadata)
 
     def _read_api_params(self):
         """Read network config json file and return api_params key"""
@@ -135,6 +157,51 @@ class ActionPipeline:
         """Run & modify internal variables after toolkit job is done; Actions may override"""
         return
 
+    def generate_dgx_job_metadata(self, container_run_command, dgx_job_metadata, docker_env_vars):
+        """Convert run command generated into format that """
+        orgName, teamName, _, aceName = ngc_handler.get_ngc_admin_info()
+        dgx_job_metadata["user_id"] = self.job_context.user_id
+        dgx_job_metadata["orgName"] = orgName
+        dgx_job_metadata["teamName"] = teamName
+        dgx_job_metadata["command"] = container_run_command
+        dgx_job_metadata["dockerImageName"] = self.image
+        dgx_job_metadata["aceName"] = aceName
+        dgx_job_metadata["aceInstance"] = "dgxa100.80g.1.norm"
+        dgx_job_metadata["runPolicy"] = {}
+        dgx_job_metadata["runPolicy"]["preemptClass"] = "RESUMABLE"
+
+        dgx_job_metadata["resultContainerMountPoint"] = "/result"
+        if self.job_context.action in ("train", "retrain"):
+            dgx_job_metadata["aceInstance"] = "dgxa100.80g.2.norm"
+
+        workspace_mount_list = []
+        for workspace in self.workspaces_for_job:
+            workspace_dict = {}
+            workspace_dict["containerMountPoint"] = workspace['mount_path']
+            workspace_dict["id"] = workspace['id']
+            workspace_dict["mountMode"] = "RW"
+            workspace_mount_list.append(workspace_dict)
+        dgx_job_metadata["workspaceMounts"] = workspace_mount_list
+
+        dgx_job_metadata["envs"] = [{"name": "TELEMETRY_OPT_OUT", "value": os.getenv('TELEMETRY_OPT_OUT', default='no')}]
+        if docker_env_vars:
+            for docker_env_var_key, docker_env_var_value in docker_env_vars.items():
+                dgx_job_metadata["envs"].append({"name": docker_env_var_key, "value": docker_env_var_value})
+
+    def handle_multiple_ptm_fields(self):
+        """Remove one of end-end or backbone related PTM field based on the Handler metadata info"""
+        if self.handler_metadata.get("is_ptm_backbone"):
+            parameter_to_remove = ptm_mapper.get("end_to_end", {}).get(self.network)  # if ptm is a backbone remove end_to_end field from config and spec
+        else:
+            parameter_to_remove = ptm_mapper.get("backbone", {}).get(self.network)  # if ptm is not a backbone remove it field from config and spec
+        if parameter_to_remove:
+            remove_key_by_flattened_string(self.spec, parameter_to_remove)
+            remove_key_by_flattened_string(self.config, parameter_to_remove)
+
+    def detailed_print(self, *args, **kwargs):
+        """Prints the details of the job to the console"""
+        printc(*args, context=vars(self.job_context), **kwargs)
+
     def run(self):
         """Calls necessary setup functions; calls job creation; monitors and update status of the job"""
         # Set up
@@ -142,6 +209,7 @@ class ActionPipeline:
         try:
             # Generate config
             self.spec, self.config = self.generate_config()
+            self.handle_multiple_ptm_fields()
             # Generate run command
             self.run_command, self.status_file, outdir = self.generate_run_command()
             # Pipe logs into logfile: <output_dir>/logs_from_toolkit.txt
@@ -154,107 +222,123 @@ class ActionPipeline:
             # After command runs, make sure artifact files permission allows anyone to delete
             self.run_command += f"; find {outdir} -type f | xargs chmod 666"
             # Optionally, pipe self.run_command into a log file
-            print(self.run_command, self.status_file, file=sys.stderr)
+            self.detailed_print(self.run_command, self.status_file, file=sys.stderr)
             # Set up StatusParser
             status_parser = StatusParser(str(self.status_file), self.job_context.network, outdir)
-            print(self.image, file=sys.stderr)
+            self.detailed_print(self.image, file=sys.stderr)
 
             # Convert self.spec to a backend and post it into a <self.handler_spec_root><job_id>.txt file
             if self.spec:
-                if self.api_params["spec_backend"] == "json":
+                file_type = self.api_params["spec_backend"]
+                if file_type == "json":
                     kitti_out = self.spec
-                    kitti_out = json.dumps(kitti_out, indent=4)
+                    kitti_out = json.dumps(kitti_out)
                 elif self.job_context.action == "convert_efficientdet_tf2":
-                    kitti_out = SPEC_BACKEND_TO_FUNCTIONS["yaml"](self.spec)
+                    file_type = "yaml"
+                    kitti_out = SPEC_BACKEND_TO_FUNCTIONS[file_type](self.spec)
                 else:
-                    kitti_out = SPEC_BACKEND_TO_FUNCTIONS[self.api_params["spec_backend"]](self.spec)
+                    kitti_out = SPEC_BACKEND_TO_FUNCTIONS[file_type](self.spec)
                 # store as kitti
                 action_spec_path_kitti = CLI_CONFIG_TO_FUNCTIONS["experiment_spec"](self.job_context, self.handler_metadata)
-                with open(action_spec_path_kitti, "w", encoding='utf-8') as f:
-                    f.write(kitti_out)
+                safe_dump_file(action_spec_path_kitti, kitti_out, file_type=file_type)
 
             # Submit to K8s
             # Platform is None, but might be updated in self.generate_config() or self.generate_run_command()
             # If platform is indeed None, jobDriver.create would take care of it.
-            num_gpu = -1
+            spec = self.job_context.specs
+            num_gpu = spec.get("num_gpu", -1) if spec else -1
             if self.job_context.action not in ['train', 'retrain', 'finetune']:
                 num_gpu = 1
             docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
-            jobDriver.create(self.job_name, self.image, self.run_command, num_gpu=num_gpu, accelerator=self.platform, docker_env_vars=docker_env_vars)
-            print("Job created", self.job_name, file=sys.stderr)
-            # Poll every 5 seconds
-            k8s_status = jobDriver.status(self.job_name)
+            dgx_job_metadata = {}
+            if self.ngc_runner:
+                self.generate_dgx_job_metadata(self.run_command, dgx_job_metadata, docker_env_vars)
+            else:
+                dgx_job_metadata = None
             metric = self.handler_metadata.get("metric", "")
             if not metric:
                 metric = "loss"
-            while k8s_status in ["Done", "Error", "Running", "Pending", "Creating"]:
-                time.sleep(5)
+            jobDriver.create(self.job_context.user_id, self.job_name, self.image, self.run_command, num_gpu=num_gpu, accelerator=self.platform, docker_env_vars=docker_env_vars, dgx_job_metadata=dgx_job_metadata)
+            self.detailed_print("Job created", self.job_name, file=sys.stderr)
+            k8s_status = jobDriver.status(self.job_name, use_ngc=self.ngc_runner)
+            while k8s_status in ["Done", "Error", "Running", "Pending"]:
                 # If Done, try running self.post_run()
+                metadata_status = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_id).get("status", "Error")
+                if metadata_status == "Canceled" and k8s_status == "Running":
+                    self.detailed_print(f"Canceling job {self.job_id}", file=sys.stderr)
+                    jobDriver.delete(self.job_id, use_ngc=self.ngc_runner)
                 if k8s_status == "Done":
-                    update_job_status(self.handler_id, self.job_id, status="Running")
+                    update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Running")
                     # Retrieve status one last time!
                     new_results = status_parser.update_results()
-                    update_job_results(self.handler_id, self.job_id, result=new_results)
+                    update_job_metadata(self.job_context.user_id, self.handler_id, self.job_id, metadata_key="result", data=new_results)
                     try:
-                        print("Post running", file=sys.stderr)
+                        self.detailed_print("Post running", file=sys.stderr)
                         # If post run is done, make it done
                         self.post_run()
                         if self.job_context.action in ['train', 'retrain']:
-                            epoch_value = get_total_epochs(self.handler_root)
+                            epoch_value = get_total_epochs(self.job_context, self.handler_root)
                             _, best_checkpoint_epoch_number, latest_checkpoint_epoch_number = status_parser.read_metric(results=new_results, metric=metric, brain_epoch_number=epoch_value)
                             self.handler_metadata["checkpoint_epoch_number"][f"best_model_{self.job_name}"] = best_checkpoint_epoch_number
                             self.handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.job_name}"] = latest_checkpoint_epoch_number
-                            write_handler_metadata(self.handler_id, self.handler_metadata)
-                        update_job_status(self.handler_id, self.job_id, status="Done")
+                            write_handler_metadata(self.job_context.user_id, self.handler_id, self.handler_metadata)
+                        shutil.copy(self.logfile, f"{self.handler_root}/{self.job_id}/logs_from_toolkit.txt")
+                        archive_job_results(self.handler_root, self.job_id)
+                        generate_job_tar_stats(self.job_context.user_id, self.handler_id, self.job_id, self.handler_root)
+                        update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Done")
                         break
                     except:
                         # If post run fails, call it Error
-                        update_job_status(self.handler_id, self.job_id, status="Error")
+                        self.detailed_print(traceback.format_exc(), file=sys.stderr)
+                        update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
                         break
                 # If running in K8s, update results to job_context
                 elif k8s_status == "Running":
-                    update_job_status(self.handler_id, self.job_id, status="Running")
+                    update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Running")
                     # Update results
                     new_results = status_parser.update_results()
-                    update_job_results(self.handler_id, self.job_id, result=new_results)
+                    update_job_metadata(self.job_context.user_id, self.handler_id, self.job_id, metadata_key="result", data=new_results)
 
                 # Pending is if we have queueing systems down the road
                 elif k8s_status == "Pending":
-                    continue
-
-                # Creating is if moebius-cloud job is in process of creating batch job
-                elif k8s_status == "Creating":
-                    # need to get current status and make sure its going from creating to running
-                    # till now moebius-job manager would have created batchjob
-                    k8s_status = jobDriver.status(self.job_name)
+                    k8s_status = jobDriver.status(self.job_name, use_ngc=self.ngc_runner)
                     continue
 
                 # If the job never submitted or errored out!
                 else:
-                    update_job_status(self.handler_id, self.job_id, status="Error")
+                    update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
                     break
+                # Poll every 30 seconds
+                time.sleep(30)
 
-                k8s_status = jobDriver.status(self.job_name)
+                k8s_status = jobDriver.status(self.job_name, use_ngc=self.ngc_runner)
+            metadata_status = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_id).get("status", "Error")
 
-            toolkit_status = get_toolkit_status(self.handler_id, self.job_id)
-            print(f"Toolkit status for {self.job_id} is {toolkit_status}", file=sys.stderr)
-            if toolkit_status != "SUCCESS" and self.job_context.action != "trtexec":
-                update_job_status(self.handler_id, self.job_id, status="Error")
+            toolkit_status = get_toolkit_status(self.job_context.user_id, self.handler_id, self.job_id)
+            self.detailed_print(f"Toolkit status for {self.job_id} is {toolkit_status}", file=sys.stderr)
+            if metadata_status != "Canceled" and toolkit_status != "SUCCESS" and self.job_context.action != "trtexec":
+                update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
 
-            final_status = get_handler_job_metadata(self.handler_id, self.job_id).get("status", "Error")
-            print(f"Job Done: {self.job_name} Final status: {final_status}", file=sys.stderr)
+            self.detailed_print(f"Job Done: {self.job_name} Final status: {metadata_status}", file=sys.stderr)
             with open(self.logfile, "a", encoding='utf-8') as f:
-                f.write(f"\n{final_status} EOF\n")
+                f.write(f"\n{metadata_status} EOF\n")
+            if self.ngc_runner:
+                jobDriver.delete(self.job_name)
             return
 
-        except Exception:
+        except Exception as e:
             # Something went wrong inside...
-            print(traceback.format_exc(), file=sys.stderr)
-            print(f"Job {self.job_name} did not start", file=sys.stderr)
+            self.detailed_print(traceback.format_exc(), file=sys.stderr)
+            self.detailed_print(f"Job {self.job_name} did not start", file=sys.stderr)
             with open(self.logfile, "a", encoding='utf-8') as f:
+                f.write(f"Error log: \n {e}")
                 f.write("\nError EOF\n")
-            update_job_status(self.handler_id, self.job_id, status="Error")
-            update_job_results(self.handler_id, self.job_id, result={"detailed_status": {"message": "Error due to unmet dependencies"}})
+            shutil.copy(self.logfile, f"{self.handler_root}/{self.job_id}/logs_from_toolkit.txt")
+            update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
+            result_dict = {"detailed_status": {"message": "Error due to unmet dependencies"}}
+            if isinstance(e, TimeoutError):
+                result_dict = {"detailed_status": {"message": "Data downloading from cloud storage failed."}}
+            update_job_metadata(self.job_context.user_id, self.handler_id, self.job_id, metadata_key="result", data=result_dict)
             return
 
 
@@ -292,7 +376,7 @@ class CLIPipeline(ActionPipeline):
         # Get some variables
         action = self.job_context.action
         # User stored CLI param in a json file
-        spec_json_path = os.path.join(self.handler_spec_root, action + ".json")
+        spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
         if os.path.exists(spec_json_path):
             config = load_json_spec(spec_json_path)
         else:
@@ -346,7 +430,7 @@ class CLIPipeline(ActionPipeline):
         status_file = os.path.join(self.handler_root, self.job_name, "status.json")
         if self.action == "dataset_convert" and self.network == "ocrnet":
             ds = self.handler_metadata.get("id")
-            root = get_handler_root(ds)
+            root = get_handler_root(self.job_context.user_id, "datasets", ds, None, ngc_runner_fetch=True)
             sub_folder = "train"
             if "test" in os.listdir(root):
                 sub_folder = "test"
@@ -357,7 +441,7 @@ class CLIPipeline(ActionPipeline):
 
 # Specs are modified as well => Train, Evaluate, Retrain Actions
 class TrainVal(CLIPipeline):
-    """Class for model actions which involves both spec file as well as cli params"""
+    """Class for experiment actions which involves both spec file as well as cli params"""
 
     def generate_config(self):
         """Generates spec and cli params
@@ -377,10 +461,12 @@ class TrainVal(CLIPipeline):
                     config[field_name] = field_value
 
         # Read spec from <action>.json for train, resume train, evaluate, retrain. If not there, use train.json
-        spec_json_path = os.path.join(self.handler_spec_root, action + ".json")
+        spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
         if not os.path.exists(spec_json_path):
             if action in NO_SPEC_ACTIONS_MODEL:
-                spec_json_path = os.path.join(self.handler_spec_root, action + "train.json")
+                spec_json_path = glob.glob(f"{self.handler_spec_root}/**/*train*.json", recursive=True)
+                if spec_json_path:
+                    spec_json_path = spec_json_path[0]
         spec = load_json_spec(spec_json_path)
         if "experiment_spec_file" in network_config["cli_params"][f"{action}{self.action_suffix}"].keys() and network_config["cli_params"][f"{action}{self.action_suffix}"]["experiment_spec_file"] == "parent_spec_copied":
             spec_path = config["experiment_spec_file"]
@@ -408,11 +494,11 @@ class TrainVal(CLIPipeline):
             cnd3 = type(spec[field_name]) in [str, float, int, bool]
             if cnd1 and cnd2 and cnd3:
                 config[field_name] = spec.pop(field_name)
-        print("Loaded specs", file=sys.stderr)
+        self.detailed_print("Loaded specs", file=sys.stderr)
 
         # Infer dataset config
         spec = DS_CONFIG_TO_FUNCTIONS[network](spec, self.job_context, self.handler_metadata)
-        print("Loaded dataset", file=sys.stderr)
+        self.detailed_print("Loaded dataset", file=sys.stderr)
 
         # Add classwise config
         classwise = self.api_params["classwise"] == "True"
@@ -429,7 +515,7 @@ class TrainVal(CLIPipeline):
             inference_fn = "parent_model"
             pruned_model_path = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
             _, file_extension = os.path.splitext(pruned_model_path)
-            print(f"Copying pruned model {pruned_model_path} after retrain to {self.handler_root}/{self.job_id}/pruned_model{file_extension}\n", file=sys.stderr)
+            self.detailed_print(f"Copying pruned model {pruned_model_path} after retrain to {self.handler_root}/{self.job_id}/pruned_model{file_extension}\n", file=sys.stderr)
             os.system(f"cp {pruned_model_path} {self.handler_root}/{self.job_id}/pruned_model{file_extension}")
 
 
@@ -442,7 +528,7 @@ class ODConvert(CLIPipeline):
     def generate_config(self):
         """Modify the spec parameters necessary for object detection convert and return the modified dictionary"""
         # Read json
-        spec_json_path = os.path.join(self.handler_spec_root, f'{self.job_context.action}.json')
+        spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
         spec = load_json_spec(spec_json_path)
         config = {}
 
@@ -477,7 +563,7 @@ class ODConvert(CLIPipeline):
         """Carry's out functions after the job is executed"""
         if self.network not in ("efficientdet_tf1", "mask_rcnn"):
             # Get classes information into a file
-            categorical = get_handler_job_metadata(self.handler_id, self.job_id).get("result").get("categorical", [])
+            categorical = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_id).get("result").get("categorical", [])
             classes = ["car", "person"]
             if len(categorical) > 0:
                 cwv = categorical[0]["category_wise_values"]
@@ -556,7 +642,7 @@ class Dnv2Inference(CLIPipeline):
                     config[field_name] = field_value
 
         # Read spec from <action>.json for train, resume train, evaluate, retrain. If not there, use train.json
-        spec_json_path = os.path.join(self.handler_spec_root, action + ".json")
+        spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{action}-spec.json")
         spec = load_json_spec(spec_json_path)  # Dnv2 NEEDS inference spec
 
         # As per regular TrainVal, do not infer spec params, no need to move spec to cli
@@ -564,7 +650,7 @@ class Dnv2Inference(CLIPipeline):
         # Instead do the following: if parent is tlt, enter tlt config and parent is trt, enter trt config
 
         parent_job_id = self.job_context.parent_id
-        parent_action = get_handler_job_metadata(self.handler_id, parent_job_id).get("action")  # This should not fail if dependency passed
+        parent_action = get_handler_job_metadata(self.job_context.user_id, self.handler_id, parent_job_id).get("action")  # This should not fail if dependency passed
         if parent_action in ["export", "gen_trt_engine", "trtexec"]:
             key = "inferencer_config.tensorrt_config.trt_engine"
         else:
@@ -591,11 +677,13 @@ class AutoMLPipeline(ActionPipeline):
     def __init__(self, job_context):
         """Initialize the AutoMLPipeline class"""
         super().__init__(job_context)
-        self.job_root = self.handler_root + f"/{self.job_context.id}"
+        self.automl_brain_job_id = self.job_context.id
+        self.job_root = self.handler_root + f"/{self.automl_brain_job_id}"
+        self.job_metadata_root = self.job_root.replace(get_root(ngc_runner_fetch=True), get_root())
         self.rec_number = self.get_recommendation_number()
         self.expt_root = f"{self.job_root}/experiment_{self.rec_number}"
-        self.recs_dict = load_json_data(json_file=f"{self.job_root}/controller.json")
-        self.brain_dict = load_json_data(json_file=f"{self.job_root}/brain.json")
+        self.recs_dict = safe_load_file(f"{self.job_metadata_root}/controller.json")
+        self.brain_dict = safe_load_file(f"{self.job_metadata_root}/brain.json")
 
         if not os.path.exists(self.expt_root):
             os.makedirs(self.expt_root)
@@ -610,11 +698,13 @@ class AutoMLPipeline(ActionPipeline):
                     ptm_id = dep.name
                     break
         if ptm_id:
-            recommended_values["ptm"] = search_for_ptm(get_handler_root(ptm_id))
+            recommended_values["base_experiment"] = search_for_base_experiment(
+                get_handler_root(admin_uuid, "experiments", admin_uuid, ptm_id, ngc_runner_fetch=True)
+            )
 
     def generate_config(self, recommended_values):
         """Generate config for AutoML experiment"""
-        spec_json_path = os.path.join(get_handler_spec_root(self.job_context.handler_id), "train.json")
+        spec_json_path = os.path.join(get_handler_spec_root(self.job_context.user_id, self.job_context.handler_id), f"{self.automl_brain_job_id}-train-spec.json")
         spec = load_json_spec(spec_json_path)
 
         epoch_multiplier = self.brain_dict.get("epoch_multiplier", None)
@@ -651,7 +741,7 @@ class AutoMLPipeline(ActionPipeline):
                         self.config[field_name] = field_value
 
         spec = DS_CONFIG_TO_FUNCTIONS[self.network](spec, self.job_context, self.handler_metadata)
-        print("Loaded AutoML specs", file=sys.stderr)
+        self.detailed_print("Loaded AutoML specs", file=sys.stderr)
 
         for param_name, param_value in recommended_values.items():
             write_nested_dict(spec, param_name, param_value)
@@ -668,14 +758,15 @@ class AutoMLPipeline(ActionPipeline):
 
         if self.network not in AUTOML_DISABLED_NETWORKS:
             spec = process_classwise_config(spec)
+        return spec
 
-        # Save specs to a yaml/kitti file as well as json file
-        self.write_json(file_path=os.path.join(self.expt_root, f"recommendation_{self.rec_number}.json"), json_dict=spec)
-        updated_spec_string = SPEC_BACKEND_TO_FUNCTIONS[self.api_params["spec_backend"]](spec)
-        action_spec_path = os.path.join(self.job_root, f"recommendation_{self.rec_number}.{self.api_params['spec_backend']}")
-
-        with open(action_spec_path, "w", encoding='utf-8') as f:
-            f.write(updated_spec_string)
+    def save_recommendation_specs(self):
+        """Save recommendation specs to a yaml/kitti file as well as json file"""
+        safe_dump_file(os.path.join(self.job_root, f"recommendation_{self.rec_number}.json"), self.spec)
+        updated_spec = SPEC_BACKEND_TO_FUNCTIONS[self.api_params["spec_backend"]](self.spec)
+        extension = self.api_params['spec_backend']
+        action_spec_path = os.path.join(self.job_root, f"recommendation_{self.rec_number}.{extension}")
+        safe_dump_file(action_spec_path, updated_spec, file_type=extension)
 
     def generate_run_command(self):
         """Generate the command to be run inside docker for AutoML experiment"""
@@ -694,63 +785,410 @@ class AutoMLPipeline(ActionPipeline):
                 break
         return rec_number
 
-    def write_json(self, file_path, json_dict):
-        """Write a json file"""
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(json_dict, f,
-                      separators=(',', ':'),
-                      sort_keys=True,
-                      indent=4)
-
     def run(self):
         """Calls necessary setup functions; calls job creation; update status of the job"""
         try:
             recommended_values = self.recs_dict[self.rec_number].get("specs", {})
             self.add_ptm_dependency(recommended_values)
-            self.generate_config(recommended_values)
+
+            self.spec = self.generate_config(recommended_values)
+            self.handle_multiple_ptm_fields()
+            self.save_recommendation_specs()
             run_command = self.generate_run_command()
 
             # Assign a new job id if not assigned already
             job_id = self.recs_dict[self.rec_number].get("job_id", None)
             if not job_id:
                 job_id = str(uuid.uuid4())
-                print("New job id being assigned to recommendation", job_id, file=sys.stderr)
+                self.detailed_print("New job id being assigned to recommendation", job_id, file=sys.stderr)
                 self.recs_dict[self.rec_number]["job_id"] = job_id
-                self.write_json(file_path=f"{self.job_root}/controller.json", json_dict=self.recs_dict)
+                safe_dump_file(f"{self.job_metadata_root}/controller.json", self.recs_dict)
 
-            print(run_command, file=sys.stderr)
+            self.detailed_print(run_command, file=sys.stderr)
 
             # Wait for existing AutoML jobs to complete
             wait_for_job_completion(job_id)
 
             delete_lingering_checkpoints(self.recs_dict[self.rec_number].get("best_epoch_number", ""), self.expt_root)
             docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
-            jobDriver.create(job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars)
-            print(f"AutoML recommendation with experiment id {self.rec_number} and job id {job_id} submitted", file=sys.stderr)
+            dgx_job_metadata = {}
+            if self.ngc_runner:
+                self.generate_dgx_job_metadata(run_command, dgx_job_metadata, docker_env_vars)
+            jobDriver.create(self.job_context.user_id, job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars, dgx_job_metadata=dgx_job_metadata)
+            self.detailed_print(f"AutoML recommendation with experiment id {self.rec_number} and job id {job_id} submitted", file=sys.stderr)
             k8s_status = jobDriver.status(job_id)
             while k8s_status in ["Done", "Error", "Running", "Pending", "Creating"]:
                 time.sleep(5)
                 if os.path.exists(os.path.join(self.expt_root, "log.txt")):
                     break
                 if k8s_status == "Error":
-                    print(f"Relaunching job {job_id}", file=sys.stderr)
+                    self.detailed_print(f"Relaunching job {job_id}", file=sys.stderr)
                     wait_for_job_completion(job_id)
-                    jobDriver.create(job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars)
+                    jobDriver.create(self.job_context.user_id, job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars, dgx_job_metadata=dgx_job_metadata)
                 k8s_status = jobDriver.status(job_id)
 
             return True
 
         except Exception:
-            print(f"AutoMLpipeline for network {self.network} failed due to exception {traceback.format_exc()}", file=sys.stderr)
+            self.detailed_print(f"AutoMLpipeline for network {self.network} failed due to exception {traceback.format_exc()}", file=sys.stderr)
             job_id = self.recs_dict[self.rec_number].get("job_id", "")
-            print(job_id, file=sys.stderr)
+            self.detailed_print(job_id, file=sys.stderr)
 
             self.recs_dict[self.rec_number]["status"] = "failure"
-            self.write_json(file_path=f"{self.job_root}/controller.json", json_dict=self.recs_dict)
+            safe_dump_file(f"{self.job_metadata_root}/controller.json", self.recs_dict)
 
-            update_job_status(self.handler_id, self.job_context.id, status="Error")
+            update_job_status(self.job_context.user_id, self.handler_id, self.job_context.id, status="Error")
             jobDriver.delete(self.job_context.id)
             return False
+
+
+class ContinualLearning(ActionPipeline):
+    """Class for continual learning specific changes required during annotation action."""
+
+    def __init__(self, job_context):
+        """Initialize the ContinualLearning class"""
+        super().__init__(job_context)
+        self.ngc_runner = False
+        # override the ActionPipeline's handler_root
+        self.handler_root = get_handler_root(self.job_context.user_id, "experiments", self.job_context.handler_id, None, ngc_runner_fetch=False)
+        self.handler_log_root = os.path.join(self.handler_root, "logs")
+        self.logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
+        self.train_ds = self.handler_metadata["train_datasets"]
+        self.image = DOCKER_IMAGE_MAPPER["api"]
+        self.job_root = os.path.join(self.handler_root, self.job_context.id)
+
+    def generate_convert_script(self, notify_record):
+        """Generate a script to perform continual learning"""
+        cl_script = generate_cl_script(notify_record, self.job_context, self.handler_root, self.logfile)
+        cl_script_path = os.path.join(self.job_root, "continual_learning.py")
+        with open(cl_script_path, "w", encoding="utf-8") as f:
+            f.write(cl_script)
+
+        return cl_script_path
+
+    def run(self):
+        """Run the continual learning pipeline"""
+        # Set up
+        self.thread = threading.current_thread()
+        try:
+            # Find the train dataset path
+            if len(self.train_ds) != 1:
+                raise ValueError("Continual Learning only supports one train dataset.")
+            train_dataset = self.train_ds[0]
+            dataset_path = get_handler_root(self.job_context.user_id, "datasets", train_dataset, None, ngc_runner_fetch=False)
+
+            # Track the current training manifest file
+            notify_record = os.path.join(dataset_path, "notify_record.json")
+            cl_script = self.generate_convert_script(notify_record)
+
+            outdir = self.job_root
+            self.detailed_print("Continual Learning started", file=sys.stderr)
+            self.run_command = f"python {cl_script} 2>&1 | tee {self.logfile}"
+            # After command runs, make sure subdirs permission allows anyone to enter and delete
+            self.run_command += f"; find {outdir} -type d | xargs chmod 777"
+            # After command runs, make sure artifact files permission allows anyone to delete
+            self.run_command += f"; find {outdir} -type f | xargs chmod 666"
+            # Optionally, pipe self.run_command into a log file
+            self.detailed_print(self.run_command, file=sys.stderr)
+            jobDriver.create(self.job_context.user_id, self.job_name, self.image, self.run_command, num_gpu=0)
+            self.detailed_print("Job created", self.job_name, file=sys.stderr)
+            k8s_status = jobDriver.status(self.job_name, use_ngc=False)
+            while k8s_status in ["Running", "Pending"]:
+                # Poll every 30 seconds
+                time.sleep(30)
+                k8s_status = jobDriver.status(self.job_name, use_ngc=False)
+            self.detailed_print(f"Job status: {k8s_status}", file=sys.stderr)
+            if k8s_status == "Error":
+                update_job_status(self.job_context.user_id, self.handler_id, self.job_context.id, status="Error")
+            self.detailed_print("Continual Learning finished.", file=sys.stderr)
+        except Exception:
+            self.detailed_print(f"ContinualLearning for {self.network} failed because {traceback.format_exc()}", file=sys.stderr)
+            shutil.copy(self.logfile, f"{self.handler_root}/{self.job_id}/logs_from_toolkit.txt")
+            update_job_status(self.job_context.user_id, self.handler_id, self.job_context.id, status="Error")
+
+
+class BundleTrain(ActionPipeline):
+    """Class for MEDICAL bundle specific changes required during training"""
+
+    def __init__(self, job_context):
+        """Initialize the BundleTrain class"""
+        super().__init__(job_context)
+        spec = self.get_spec()
+        # override the ActionPipeline's handler_root
+        self.handler_root = get_handler_root(self.job_context.user_id, "experiments", self.job_context.handler_id, None, ngc_runner_fetch=True)
+        if "cluster" in spec and spec["cluster"] == "local":
+            self.ngc_runner = False
+            self.handler_root = get_handler_root(self.job_context.user_id, "experiments", self.job_context.handler_id, None, ngc_runner_fetch=False)
+        self.handler_log_root = os.path.join(self.handler_root, "logs")
+        self.logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
+        self.network = job_context.network
+        self.action = job_context.action
+        self.job_root = os.path.join(self.handler_root, self.job_context.id)
+        train_datasets = self.handler_metadata["train_datasets"]
+        eval_dataset_id = self.handler_metadata["eval_dataset"]
+        self.train_datasets_path = [get_handler_root(self.job_context.user_id, "datasets", dataset_id, None, ngc_runner_fetch=self.ngc_runner) for dataset_id in train_datasets] if train_datasets else []
+        self.eval_dataset_path = get_handler_root(self.job_context.user_id, "datasets", eval_dataset_id, None, ngc_runner_fetch=self.ngc_runner) if eval_dataset_id else None
+        self.model_script_path = os.path.join(self.job_root, "train.py")
+
+    def get_spec(self):
+        """Get spec from spec file or job context"""
+        if self.job_context.specs is not None:
+            specs = self.job_context.specs.copy()
+            spec = specs
+        else:
+            spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
+            if not os.path.exists(spec_json_path):
+                self.detailed_print(f"Spec file {spec_json_path} does not exist", file=sys.stderr)
+                raise RuntimeError(f"Spec file {spec_json_path} does not exist")
+            spec = load_json_spec(spec_json_path)
+
+        for k, v in spec.items():
+            if isinstance(v, str) and v == "$default_medical_label_mapping":
+                labels = self.handler_metadata.get("model_params", {}).get("labels", None)
+                spec[k] = {"default": [[int(i), int(i)] for i in labels]}
+                self.detailed_print(f"Using default {k}: {spec[k]}", file=sys.stderr)
+        return spec
+
+    def generate_config(self):
+        """
+        Generate config for medical bundle train
+        Returns:
+        spec: contains the params for building medical bundle train command
+        Notes:
+        Similar to TrainVal.generate_config, but we have the following differences:
+        - Drop using network config files
+        - Drop using the csv spec file
+        But we cannot delete the network config and the csv spec file, because they are used by the app_handler, e.g. save_spec and job_run methods.
+        """
+        spec = self.get_spec()
+        success, msg = validate_medical_bundle_params(spec)
+        if not success:
+            self.detailed_print(msg, file=sys.stderr)
+            raise RuntimeError(msg)
+        # prepare dataset and update spec
+        self.detailed_print("Loaded specs", file=sys.stderr)
+        spec = DS_CONFIG_TO_FUNCTIONS[self.network](spec, self.job_context, self.handler_metadata)
+        self.detailed_print("Loaded dataset", file=sys.stderr)
+        return spec, {}
+
+    def save_model_script(self, model_script):
+        """save model script"""
+        with open(self.model_script_path, "w", encoding="utf-8") as f:
+            f.write(model_script)
+
+    def generate_convert_script(self):
+        """
+        Generate a script to convert dicom segmentation
+        The function temporarily fixes the issue: https://github.com/Project-MEDICAL/MEDICAL/issues/7055
+        """
+        labels = self.handler_metadata.get("model_params", {}).get("labels", None)
+        convert_script = generate_dicom_segmentation_convert_script(self.spec, labels)
+        convert_script_path = os.path.join(self.job_root, "convert_labels.py")
+        with open(convert_script_path, "w", encoding="utf-8") as f:
+            f.write(convert_script)
+
+        return convert_script_path
+
+    def generate_run_command(self):
+        """Generate run command"""
+        _, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["medical_output_dir"](self.job_context, self.handler_metadata)
+        status_file = os.path.join(self.handler_root, self.job_name, "status.json")
+        dicom_convert = self.spec.pop("dicom_convert", False)
+        copy_in_job = self.spec.pop("copy_in_job", None)
+        model_script = generate_bundle_train_script(self.job_root, bundle_name, status_file, override=self.spec)
+        self.save_model_script(model_script)
+
+        if copy_in_job:
+            run_command = copy_in_job + " && "
+        else:
+            run_command = ""
+
+        if dicom_convert:
+            convert_script_path = self.generate_convert_script()
+            run_command += f"python {convert_script_path} && python {self.model_script_path}"
+        else:
+            run_command += f"python {self.model_script_path}"
+
+        run_command = f"({run_command}) 2>&1"
+
+        return run_command, status_file, overriden_output_dir
+
+
+class Auto3DSegTrain(BundleTrain):
+    """MEDICAL Auto3DSeg training action pipeline"""
+
+    def generate_config(self):
+        """
+        Generate config for auto3dseg train
+        """
+        # load spec
+        if self.job_context.specs is not None:
+            specs = self.job_context.specs.copy()
+        else:
+            spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
+            if not os.path.exists(spec_json_path):
+                self.detailed_print(f"Spec file {spec_json_path} does not exist", file=sys.stderr)
+                raise RuntimeError(f"Spec file {spec_json_path} does not exist")
+            specs = load_json_spec(spec_json_path)
+        self.detailed_print("Specs are loaded.", file=sys.stderr)
+
+        # create datalist.json
+        specs = DS_CONFIG_TO_FUNCTIONS[self.network](specs, self.job_context, self.handler_metadata, self.job_root)
+        self.detailed_print("Dataset are loaded.", file=sys.stderr)
+
+        # set work directory for auto3dseg
+        specs["work_dir"] = self.job_root
+
+        # get the path to algorithm templates files
+        base_experiment_id = self.handler_metadata["base_experiment"][0]
+        base_experiment_version = get_base_experiment_metadata(base_experiment_id).get("version")
+        templates_path = os.path.join(
+            get_base_experiment_path(base_experiment_id),
+            f"auto3dseg_v{base_experiment_version}",
+            "algorithm_templates",
+        )
+        # set the path to algorithm templates files
+        specs["templates_path_or_url"] = templates_path
+
+        return specs, {}
+
+    def generate_run_command(self):
+        """Generate run command"""
+        status_file = os.path.join(self.handler_root, self.job_name, "status.json")
+        train_script_src = os.path.join(os.path.abspath(os.path.dirname(__file__)), "medical", f"train_{self.action}.py")
+        shutil.copyfile(train_script_src, self.model_script_path)
+        run_command = f"python {self.model_script_path} '{json.dumps(self.spec)}' {status_file} 2>&1"
+        return run_command, status_file, ""
+
+    def post_run(self):
+        """Create a new model after the job is executed"""
+        from handlers.app_handler import AppHandler
+
+        best_model_path = os.path.join(self.job_root, "best_model")
+
+        # update the hyper_parameters.yaml file to include relative paths
+        with open(os.path.join(best_model_path, "configs", "hyper_parameters.yaml"), "r", encoding="utf-8") as f:
+            hyper_conf = yaml.safe_load(f)
+        hyper_conf["bundle_root"] = "."
+        hyper_conf["data_file_base_dir"] = os.path.join("..", "datasets")
+        hyper_conf["data_list_file_path"] = os.path.join("..", "datalist.json")
+        hyper_conf["infer"]["log_output_file"] = os.path.join("..", "inference.log")
+        hyper_conf["infer"]["output_path"] = os.path.join("..", "predictions")
+        with open(os.path.join(best_model_path, "configs", "hyper_parameters.yaml"), "w", encoding="utf-8") as f:
+            yaml.safe_dump(hyper_conf, f)
+
+        # create a new experiment
+        request_dict = {
+            "name": self.spec.get("output_experiment_name", "auto3dseg_automl_experiment"),
+            "description": self.spec.get("output_experiment_description", "AutoML Generated Segmentation Model based on MEDICAL Auto3DSeg"),
+            "type": "medical",
+            "network_arch": "medical_segmentation",
+            "inference_dataset": self.spec.get("inference_dataset"),
+            "realtime_infer": False
+        }
+        user_id = get_handler_user(self.handler_id)
+        ret_code = AppHandler.create_experiment(user_id, request_dict)
+        new_model_id = ret_code.data["id"]
+        self.detailed_print(f"New model is generated with id: {new_model_id}", file=sys.stderr)
+
+        # copy/upload the best model to the new model
+        if self.ngc_runner:
+            _, workspaces = load_user_workspace_metadata(user_id)
+            new_workspace_id = workspaces[new_model_id]['id']
+            copy_command = f"ngc workspace upload --source {best_model_path} --destination bundle {new_workspace_id}"
+        else:
+            new_model_path = os.path.join(get_handler_root(self.job_context.user_id, kind="experiments", handler_id=new_model_id, ngc_runner_fetch=True), "bundle")
+            copy_command = f"cp -rp {best_model_path} {new_model_path}"
+        try:
+            subprocess.run(copy_command, shell=True, check=True)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError('Failed to copy the best model to the new model.') from e
+        self.detailed_print("The best model is copied/uploaded to the new experiment.", file=sys.stderr)
+
+        # update the status file to include newly generated model id
+        status_dict = {
+            "date": datetime.date.today().isoformat(),
+            "time": datetime.datetime.now().isoformat(),
+            "status": "SUCCESS",
+            "message": f"A segmentation experiment (id={new_model_id}) is successfully created by MEDICAL AuoML.",
+            "model_id": new_model_id,
+        }
+        with open(self.status_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(status_dict) + "\n")
+
+
+class MedicalInference(BundleTrain):
+    """MEDICAL inference action pipeline"""
+
+    def generate_config(self):
+        """
+        Generate spec for medical inference and creates "datalist.json"
+
+        Returns:
+            spec: contains the params for building medical bundle train command
+        """
+        # load spec
+        if self.job_context.specs is not None:
+            specs = self.job_context.specs.copy()
+        else:
+            spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
+            if not os.path.exists(spec_json_path):
+                self.detailed_print(f"Spec file {spec_json_path} does not exist", file=sys.stderr)
+                raise RuntimeError(f"Spec file {spec_json_path} does not exist")
+            specs = load_json_spec(spec_json_path)
+        self.detailed_print("Specs are loaded.", file=sys.stderr)
+
+        # create datalist.json
+        specs = DS_CONFIG_TO_FUNCTIONS[self.network](specs, self.job_context, self.handler_metadata, self.job_root)
+        self.detailed_print("Dataset are loaded.", file=sys.stderr)
+
+        # set work directory for auto3dseg
+        specs["work_dir"] = self.job_root
+
+        return specs, {}
+
+    def generate_run_command(self):
+        """Generate run command for medical inference"""
+        # Check if "infer.py" exists for this models
+        src_model_root = os.path.join(
+            get_handler_root(self.job_context.user_id, kind="experiments", handler_id=self.handler_metadata["id"], ngc_runner_fetch=True),
+            "bundle"
+        )
+        infer_script_path = os.path.join(src_model_root, "scripts", "infer.py")
+        if not os.path.exists(infer_script_path):
+            raise RuntimeError(
+                f"Currenlty, inference script file (infer.py) is required for MEDICAL inference! "
+                f"'{infer_script_path}' does not exist."
+            )
+
+        # copy the model into the job root
+        model_root = os.path.join(self.job_root, "bundle")
+        shutil.copytree(src_model_root, model_root)
+        self.detailed_print("Model copied to the job root.", file=sys.stderr)
+
+        # generate the run command
+        config_dir = os.path.join(model_root, "configs")
+        config_files = ','.join([os.path.join(config_dir, f) for f in os.listdir(config_dir)])
+        num_gpu = self.spec.get("num_gpu", 1)
+        run_command = f"cd {model_root};"
+        if num_gpu <= 1:
+            run_command += "python"
+        else:
+            run_command += f"torchrun --nnodes=1 --nproc_per_node={num_gpu}"
+        run_command += f' -m scripts.infer run --config_file {config_files}'
+
+        # create the file to report the job status
+        status_file = os.path.join(self.job_root, "status.json")
+        status_dict = {
+            "date": datetime.date.today().isoformat(),
+            "time": datetime.datetime.now().isoformat(),
+            "status": "SUCCESS",
+            "message": "The data and model are prepared and ready for inference.",
+        }
+        with open(status_file, "w", encoding="utf-8") as f:
+            json.dump(status_dict, f)
+
+        return run_command, status_file, self.job_root
 
 
 # Each Element can be called with a job_context and returns an ActionPipeline (or its derivative) object
@@ -775,5 +1213,9 @@ ACTIONS_TO_FUNCTIONS = {"train": TrainVal,
                         "odconvertefficientdet_tf1": ODConvert,
                         "odconvertefficientdet_tf2": ODConvert,
                         "odaugment": ODAugment,
-                        "data_services": TrainVal
+                        "data_services": TrainVal,
+                        "medical_annotation": ContinualLearning,
+                        "medical_auto3dseg": Auto3DSegTrain,
+                        "medical_train": BundleTrain,
+                        "medical_inference": MedicalInference,
                         }

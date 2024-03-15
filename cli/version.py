@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Launcher ."""
-"""TAO-Client SDK version"""
+"""NVTL-Client SDK version"""
 
 MAJOR = "5"
 MINOR = "2.0"
@@ -51,9 +51,9 @@ __version__ = '.'.join(map(str, VERSION[:3])) + ''.join(VERSION[3:])
 __format_version__ = 2
 
 # Other package info.
-__package_name__ = "nvidia-tao-client"
-__description__ = "NVIDIA's package for using REST-API via TAO-Client."
-__keywords__ = "nvidia, tao, api"
+__package_name__ = "nvidia-transfer-learning-client"
+__description__ = "NVIDIA's package for using NVTL-REST-API via NVTL-Client."
+__keywords__ = "nvidia, nvtl, api"
 
 __contact_names__ = "Varun Praveen"
 __contact_emails__ = "vpraveen@nvidia.com"

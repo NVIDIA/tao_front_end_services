@@ -72,7 +72,7 @@ echo "TAO_API_REGISTRY=${TAO_API_REGISTRY}"
 echo "TAO_API_ORG=${TAO_API_ORG}"
 echo "TAO_API_TEAM=${TAO_API_TEAM}"
 
-TAO_API_REPOSITORY=$TAO_API_REGISTRY/$TAO_API_ORG/$TAO_API_TEAM/tao-toolkit
+TAO_API_REPOSITORY=$TAO_API_REGISTRY/$TAO_API_ORG/$TAO_API_TEAM/nvtl-api
 export TAO_API_REPOSITORY=$TAO_API_REPOSITORY
 echo $TAO_API_REPOSITORY > TAO_API_REPOSITORY.txt
 echo $UUID_TAO_HELM > UUID_TAO_HELM.txt
@@ -87,11 +87,14 @@ if [ $BUILD_DOCKER = "1" ]; then
     else
         NO_CACHE=""
     fi
-    DOCKER_BUILDKIT=1 docker build --build-arg NGC_KEY=$NGC_KEY --pull -f $NV_TAO_API_TOP/docker/Dockerfile -t $TAO_API_REPOSITORY:$tag $NO_CACHE \
-        --network=host $NV_TAO_API_TOP/.
+    DOCKER_BUILDKIT=1 docker build --build-arg NGC_KEY=$NGC_KEY --build-arg ORG_NAME=$TAO_API_ORG --build-arg TEAM_NAME=$TAO_API_TEAM --pull -f $NV_NVTL_API_TOP/docker/Dockerfile -t $TAO_API_REPOSITORY:$tag $NO_CACHE \
+        --network=host $NV_NVTL_API_TOP/.
     if [ $PUSH_DOCKER = "1" ]; then
         echo "Pushing docker ..."
         docker push $TAO_API_REPOSITORY:$tag
+        digest=$(docker inspect --format='{{index .RepoDigests 0}}' $TAO_API_REPOSITORY:$tag)
+        echo -e "\033[1;33mUpdate the digest in the manifest.json file to:\033[0m"
+        echo $digest
     else
         echo "Skip pushing docker ..."
     fi

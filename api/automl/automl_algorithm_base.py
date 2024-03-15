@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,18 +20,22 @@ from automl.utils import fix_input_dimension
 from network_utils import network_constants
 from network_utils import automl_helper
 from handlers.utilities import get_train_spec
+from handlers.stateless_handlers import get_root
 
 
 class AutoMLAlgorithmBase:
     """AutoML algorithms base class"""
 
-    def __init__(self, root, network, parameters):
+    def __init__(self, job_context, root, network, parameters):
         """AutoML algorithm Base class"""
+        self.job_context = job_context
         self.root = root
+        shared_handler_root = "/".join(self.root.split("/")[0:-2])
+        self.handler_root = shared_handler_root.replace(get_root(), get_root(ngc_runner_fetch=True))
         self.network = network
         self.parameters = parameters
         self.parent_params = {}
-        self.default_train_spec = get_train_spec(self.root)
+        self.default_train_spec = get_train_spec(self.job_context, self.handler_root)
         self.default_train_spec_flattened = {}
 
     def generate_automl_param_rec_value(self, parameter_config):
@@ -69,7 +73,7 @@ class AutoMLAlgorithmBase:
                 random_int = fix_input_dimension(random_int, factor)
 
             if not (type(parent_param) is float and math.isnan(parent_param)):  # parent_param is not a float or if it is a float but not a NaN (Not-a-Number) value (because we can use isnan on float numbers only).
-                if (type(parent_param) is str and parent_param != "nan" and parent_param == "TRUE") or (type(parent_param) == bool and parent_param):
+                if (isinstance(parent_param, str) and parent_param != "nan" and parent_param == "TRUE") or (isinstance(parent_param, bool) and parent_param):
                     self.parent_params[parameter_name] = random_int
 
             return random_int

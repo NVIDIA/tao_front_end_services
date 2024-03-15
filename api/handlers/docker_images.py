@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ import os
 DOCKER_IMAGE_MAPPER = {
     "tlt-tf1": os.getenv('IMAGE_TF1', default='nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5'),
     "tlt-pytorch": os.getenv('IMAGE_PYT', default='nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt2.1.0'),
-    "tlt-pytorch-114": os.getenv('IMAGE_PYT_114', default='nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt1.14.0'),
     "tlt-tf2": os.getenv('IMAGE_TF2', default='nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0'),
     "tao-deploy": os.getenv('IMAGE_TAO_DEPLOY', default='nvcr.io/nvidia/tao/tao-toolkit:5.2.0-deploy'),
     "": os.getenv('IMAGE_DEFAULT', default='nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5'),  # Default
@@ -33,7 +32,7 @@ DOCKER_IMAGE_VERSION = {  # (Release tao version for DNN framework, Overriden ve
     "auto_label": ("5.2.0", "5.2.0"),
     "annotations": ("5.2.0", "5.2.0"),
     "augmentation": ("5.2.0", "5.2.0"),
-    "bpnet": ("5.0.0", "5.0.0"),
+    "bpnet": ("5.2.0", "5.0.0"),
     "centerpose": ("5.2.0", "5.2.0"),
     "classification_tf1": ("5.0.0", "5.0.0"),
     "classification_tf2": ("5.0.0", "5.0.0"),

@@ -4,11 +4,11 @@ SHELL := /bin/bash
 
 helm_install: helm_uninstall helm_push
 	@sleep 90; \
-	rm -rf tao-toolkit-api-$(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM).tgz; \
+	rm -rf nvtl-api-$(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM).tgz; \
 	rm -rf docker/TAO_API_REPOSITORY.txt docker/UUID_TAO_HELM.txt; \
-	if ! helm status tao-toolkit-api >/dev/null 2>&1; \
+	if ! helm status nvtl-api >/dev/null 2>&1; \
 	then \
-		helm repo update && helm install tao-toolkit-api $(TAO_API_ORG)-$(TAO_API_TEAM)/tao-toolkit-api --version $(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM) --namespace default ;\
+		helm repo update && helm install nvtl-api $(TAO_API_ORG)-$(TAO_API_TEAM)/nvtl-api --version $(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM) --namespace default ;\
 	fi; \
 	rm .env; \
 
@@ -19,8 +19,10 @@ helm_push:
 	helm plugin install https://github.com/chartmuseum/helm-push ;\
 	OUTFILE="/tmp/helm-push-$$(date "+%Y.%m.%d-%H.%M.%S").out" ;\
 	cp chart/values.yaml chart/values.yaml.default ; \
-	sed -i "s#repository: nvcr.io/nvidia/tao/tao-toolkit#repository: $(TAO_API_REGISTRY)/$(TAO_API_ORG)/$(TAO_API_TEAM)/tao-toolkit#" "chart/values.yaml"; \
-	sed -i "s#tag: $(TAO_VERSION)-api#tag: $(USER)-$(UUID_TAO_HELM)#" "chart/values.yaml"; \
+	sed -i "s#repository: nvcr.io/nvstaging/tao/nvtl-api#repository: $(TAO_API_REGISTRY)/$(TAO_API_ORG)/$(TAO_API_TEAM)/nvtl-api#" "chart/values.yaml"; \
+	sed -i "s#tag: v$(TAO_VERSION)-nightly-latest#tag: $(USER)-$(UUID_TAO_HELM)#" "chart/values.yaml"; \
+	echo -e "\norgName: $(TAO_API_ORG)" >> "chart/values.yaml"; \
+	echo "teamName: $(TAO_API_TEAM)" >> "chart/values.yaml"; \
 	HASH=$$(git rev-parse --short HEAD:./chart) ;\
 	head chart/Chart.yaml ;\
 	helm lint chart ;\
@@ -28,13 +30,13 @@ helm_push:
 	helm package chart --version $(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM) --app-version $(TAO_VERSION) ;\
 	cp chart/values.yaml.default chart/values.yaml ;\
 	rm -rf chart/values.yaml.default ;\
-	if ! helm cm-push tao-toolkit-api-$(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM).tgz $(TAO_API_ORG)-$(TAO_API_TEAM) >& $$OUTFILE ;\
+	if ! helm cm-push nvtl-api-$(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM).tgz $(TAO_API_ORG)-$(TAO_API_TEAM) >& $$OUTFILE ;\
 	then \
 		echo "Push with hash success!" ;\
 		cat "$$OUTFILE" ;\
 	else \
 		cat "$$OUTFILE" ;\
-		if ! grep -q "Error: 409: $(TAO_API_ORG)/$(TAO_API_TEAM)/tao-toolkit-api-$(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM).tgz already exists" $$OUTFILE ;\
+		if ! grep -q "Error: 409: $(TAO_API_ORG)/$(TAO_API_TEAM)/nvtl-api-$(TAO_VERSION)-$(USER)-$(UUID_TAO_HELM).tgz already exists" $$OUTFILE ;\
 		then \
 			echo "Seems there is no latest update in helm! Skipping.." ;\
 			exit 0 ;\
@@ -45,15 +47,14 @@ helm_push:
 	fi ;\
 
 helm_uninstall:
-	@if helm status tao-toolkit-api >/dev/null 2>&1; \
+	@if helm status nvtl-api >/dev/null 2>&1; \
 	then \
-		helm delete tao-toolkit-api -n default; \
+		helm delete nvtl-api -n default && sleep 60; \
 	fi
-	@sleep 60
 
 docker_build:
 	@read -p "Enter the docker registry value [nvcr.io]: " TAO_API_REGISTRY && echo "TAO_API_REGISTRY=$$TAO_API_REGISTRY" > .env; \
-	read -p "Enter the docker org value [nvidia]: " TAO_API_ORG && echo "TAO_API_ORG=$$TAO_API_ORG" >> .env; \
+	read -p "Enter the docker org value [nvstaging]: " TAO_API_ORG && echo "TAO_API_ORG=$$TAO_API_ORG" >> .env; \
 	read -p "Enter the docker team value [tao]: " TAO_API_TEAM && echo "TAO_API_TEAM=$$TAO_API_TEAM" >> .env; \
 	echo "TAO_VERSION=5.2.0" >> .env; \
 	stty -echo && read -p "Enter your ngc_api_key [from ~/.ngc/config]: " PASSWORD && echo "PASSWORD=$$PASSWORD" >> .env; \
@@ -78,8 +79,8 @@ cli_clean:
 	rm -rf cli/.**/*/__pycache__
 
 cli_install: cli_clean cli_build
-	pip3 install --force-reinstall cli/dist/nvidia_tao_client-*.whl
+	pip3 install --force-reinstall cli/dist/nvidia_transfer_learning_client-*.whl
 
 cli_uninstall:
-	pip3 uninstall -y nvidia-tao-client
+	pip3 uninstall -y nvidia-transfer-learning-client
 	pip3 uninstall -y -r requirements-pip.txt

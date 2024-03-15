@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,74 +13,102 @@
 # limitations under the License.
 
 """Authentication utils validation modules"""
-import jwt
-import uuid
-import sys
 import os
+import requests
+import sys
+import uuid
 
-from auth_utils import __ngc_jwks_client, __starfleet_jwks_client, sessions
+from auth_utils import session
 
-
-class AuthenticationError(Exception):
-    """Authentication Error"""
-
-    pass
+#
+# class AuthenticationError(Exception):
+#     """Authentication Error"""
+#
+#     pass
+#
 
 
 def validate(token):
     """Validate Authentication"""
+    ngc_api_base_url = os.getenv('NGC_API_BASE_URL', default='https://api.ngc.nvidia.com/v2')
     err = None
-    user = sessions.get(token)
-    if user is not None:
-        print('Found trusted user: ' + str(user), file=sys.stderr)
-    else:
-        user, err = _validate_ngc(token)
-        if not err:
-            print('Adding trusted user: ' + str(user), file=sys.stderr)
-            sessions.set({'user_id': str(user), 'token': token})
-        elif str(err) != "Signature has expired":
-            user, err = _validate_starfleet(token)
-            if not err:
-                print('Adding trusted user: ' + str(user), file=sys.stderr)
-                sessions.set({'user_id': str(user), 'token': token})
-    return user, err
+    user_id = None
+    if not token:
+        err = 'Authentication error: mission token'
+        return user_id, err
+    # Retrieve unexpired session, if any
+    user = session.get(token)
+    if user:
+        user_id = user.get('id')
+    if user_id:
+        print('Found session for user: ' + str(user_id), file=sys.stderr)
+        return str(user_id), err
+    # Fall back on NGC to validate
+    headers = {'Accept': 'application/json'}
+    if token:
+        if token.startswith("SID=") or token.startswith("SSID="):
+            headers['Cookie'] = token
+        else:
+            headers['Authorization'] = 'Bearer ' + token
+    r = requests.get(f'{ngc_api_base_url}/users/me', headers=headers)
+    if r.status_code != 200:
+        err = 'Authentication error: ' + r.json().get("requestStatus", {}).get("statusDescription", "Unknown NGC user")
+        return user_id, err
+    ngc_user_id = r.json().get('user', {}).get('id')
+    if not ngc_user_id:
+        err = 'Authentication error: Unknown NGC user ID'
+        return user_id, err
+    user_id = str(uuid.uuid5(uuid.UUID(int=0), str(ngc_user_id)))
+    print('New session for user: ' + str(user_id), file=sys.stderr)
+    # Create a new or update an expired session
+    member_of = []
+    roles = r.json().get('user', {}).get('roles', [])
+    for role in roles:
+        org = role.get('org', {}).get('name', '')
+        team = role.get('team', {}).get('name', '')
+        member_of.append(f"{org}/{team}")
+    extra_user_metadata = {'member_of': member_of}
+    session.set(user_id, token, extra_user_metadata)
+    return user_id, err
 
 
-def _validate_ngc(token):
-    """Validate Authentication via ngc"""
-    err = None
-    user = None
-    payload = {}
-    try:
-        signing_key = __ngc_jwks_client.get_signing_key_from_jwt(token)
-        payload = jwt.decode(
-            token,
-            signing_key.key,
-            audience="ngc",
-            algorithms=["RS256"]
-        )
-        user = uuid.uuid5(uuid.UUID(int=0), payload.get('sub'))
-    except Exception as e:
-        err = AuthenticationError(e)
-    return user, err
-
-
-def _validate_starfleet(token):
-    """Validate Authentication via starfleet"""
-    client_id = os.getenv('AUTH_CLIENT_ID', default='bnSePYullXlG-504nOZeNAXemGF6DhoCdYR8ysm088w')
-    payload = {}
-    err = None
-    try:
-        signing_key = __starfleet_jwks_client.get_signing_key_from_jwt(token)
-        payload = jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=["ES256"],
-            audience=client_id
-        )
-    except Exception as e:
-        err = AuthenticationError(e)
-    user = payload.get('external_id')
-    if not err and not user:
-        err = AuthenticationError('Unknown user')
-    return user, err
+#
+# def _validate_ngc(token):
+#     """Validate Authentication via ngc"""
+#     err = None
+#     user = None
+#     payload = {}
+#     try:
+#         signing_key = __ngc_jwks_client.get_signing_key_from_jwt(token)
+#         payload = jwt.decode(
+#             token,
+#             signing_key.key,
+#             audience="ngc",
+#             algorithms=["RS256"]
+#         )
+#         user = uuid.uuid5(uuid.UUID(int=0), payload.get('sub'))
+#     except Exception as e:
+#         err = AuthenticationError(e)
+#     return user, err
+#
+#
+# def _validate_starfleet(token):
+#     """Validate Authentication via starfleet"""
+#     client_id = os.getenv('AUTH_CLIENT_ID', default='bnSePYullXlG-504nOZeNAXemGF6DhoCdYR8ysm088w')
+#     payload = {}
+#     err = None
+#     try:
+#         signing_key = __starfleet_jwks_client.get_signing_key_from_jwt(token)
+#         payload = jwt.decode(
+#             token,
+#             signing_key.key,
+#             algorithms=["ES256"],
+#             audience=client_id
+#         )
+#     except Exception as e:
+#         err = AuthenticationError(e)
+#     user = payload.get('external_id')
+#     if not err and not user:
+#         err = AuthenticationError('Unknown user')
+#     return user, err
+#

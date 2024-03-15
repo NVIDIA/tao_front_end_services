@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """Json to kitti file conversion"""
-import json
+from handlers.stateless_handlers import safe_load_file
 
 
 def kitti(data, level=0):
@@ -63,8 +63,6 @@ def kitti(data, level=0):
 
 def convert(path):  # NOTE: Not calling this function. Just using kitti() in current workflow.
     """Reads from json and dumps into kitti file"""
-    data = '{}'
-    with open(path, mode='r', encoding='utf-8-sig') as f:
-        data = json.load(f)
+    data = safe_load_file(path)
     # remove version from schema for now since containers do not yet support it
     return kitti(data)

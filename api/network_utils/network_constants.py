@@ -111,3 +111,15 @@ image_size_mapper = {
     "yolo_v4": "augmentation_config.output_height,augmentation_config.output_width",
     "yolo_v4_tiny": "augmentation_config.output_height,augmentation_config.output_width",
 }
+
+# Include your network if it has spec fields to load full network as PTM and loading backbone portion alone
+ptm_mapper = {
+    "backbone": {
+        "classification_pyt": "model.backbone.pretrained",
+        "dino": "model.pretrained_backbone_path",
+    },
+    "end_to_end": {
+        "classification_pyt": "model.init_cfg.checkpoint",
+        "dino": "train.pretrained_model_path",
+    }
+}

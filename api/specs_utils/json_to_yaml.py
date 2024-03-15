@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,20 +13,17 @@
 # limitations under the License.
 
 """Json to yaml file conversion"""
-import yaml
-import json
+from handlers.stateless_handlers import safe_load_file
 
 
 def yml(data):
     """Writes the dictionary data into yaml file"""
     if type(data) is dict:
         data.pop("version", None)
-    return yaml.safe_dump(data)
+    return data
 
 
 def convert(path):
     """Reads from json and dumps into yaml file"""
-    data = '{}'
-    with open(path, mode='r', encoding='utf-8-sig') as f:
-        data = json.load(f)
+    data = safe_load_file(path)
     return yml(data)

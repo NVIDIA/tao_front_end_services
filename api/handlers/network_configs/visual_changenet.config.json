@@ -6,7 +6,6 @@
         "image":"tlt-pytorch",
         "spec_backend":"yaml",
         "classwise":"False",
-        "chaining_rules":"cvaction",
         "actions_pipe":{
             "dataset_convert":"pyt_odconvert",
             "train":"train",

@@ -6,7 +6,6 @@
         "image":"tao-ds",
         "spec_backend":"yaml",
         "classwise":"False",
-        "chaining_rules":"dsaction",
         "actions_pipe":{
             "analyze":"data_services",
             "validate":"data_services"

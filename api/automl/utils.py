@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ import os
 import math
 import glob
 import datetime
-from kubernetes import client
+from kubernetes import client, config
 import time
 
 
@@ -89,9 +89,20 @@ def report_healthy(path, message, clear=False):
 
 def wait_for_job_completion(job_id):
     """Check if the provided job_id is actively running and wait until completion"""
+    config.load_incluster_config()
     while True:
+        dgx_active_jobs = []
+        if os.getenv("NGC_RUNNER", "") == "True":
+            custom_api = client.CustomObjectsApi()
+            crd_group = 'dgx-job-manager.nvidia.io'
+            crd_version = 'v1alpha1'
+            crd_plural = 'dgxjobs'
+            # List all instances of the Custom Resource across all namespaces
+            custom_resources = custom_api.list_cluster_custom_object(crd_group, crd_version, crd_plural)
+            dgx_active_jobs = [dgx_cr["spec"].get("name") for dgx_cr in custom_resources['items']]
+
         ret = client.BatchV1Api().list_job_for_all_namespaces()
-        active_jobs = [job.metadata.name for job in ret.items]
+        active_jobs = dgx_active_jobs + [job.metadata.name for job in ret.items]
         active_jobs = list(set(active_jobs))
         if job_id not in active_jobs:
             break

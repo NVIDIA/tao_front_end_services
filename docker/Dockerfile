@@ -15,6 +15,7 @@ RUN apt-get update && \
       libpython3.11-dev && \
     apt-get autoremove --yes
 
+RUN apt-get update && apt-get install -y sshfs fuse jq rsync curl python-certifi
 ################ BUILD IMAGE #################
 
 FROM base AS build
@@ -49,14 +50,13 @@ RUN wget https://github.com/kubernetes-client/python/archive/refs/tags/v23.6.0.z
 
 # Add NGC CLI
 RUN mkdir -p /opt/ngccli/
-RUN wget --content-disposition 'https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.23.0/files/ngccli_linux.zip' -P /opt/ngccli/ -O /opt/ngccli/ngccli_linux.zip && \
+RUN wget --content-disposition 'https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.31.0/files/ngccli_linux.zip' -P /opt/ngccli/ -O /opt/ngccli/ngccli_linux.zip && \
     unzip -o /opt/ngccli/ngccli_linux.zip -d /opt/ngccli/ && \
     /opt/ngccli/ngc-cli/ngc --version
 ENV PATH="/opt/ngccli/ngc-cli:${PATH}" NGC_CLI_TRACE_DISABLE=1
 
 # Add API's Python requirements
 RUN /venv/bin/pip install --disable-pip-version-check -r requirements.txt
-RUN git clone https://github.com/aws/aws-cli.git && cd aws-cli && /venv/bin/python3 setup.py develop && cd ..
 
 # Fetch metadata for PTMs
 ARG NGC_KEY
@@ -69,7 +69,7 @@ RUN if [ "$NGC_KEY" != "no_key_val" ]; then \
     mkdir -p /var/www/ && cp -r /root/.ngc /var/www/ && chmod -R 777 /var/www/.ngc && \
     rm -rf ngc_config_file; \
   fi
-RUN /venv/bin/python3 -u pretrained_models.py --teamNames="nvidia/tao,nvaie" --ngcApiKey $NGC_KEY
+RUN /venv/bin/python3 -u pretrained_models.py --org-teams="nvidia/tao,nvaie" --ngc-api-key $NGC_KEY
 
 ################ PRODUCT IMAGE #################
 
