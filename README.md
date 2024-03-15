@@ -77,23 +77,6 @@ Please note that if for some reason you would like to force build the docker wit
 bash $NV_NVTL_API_TOP/docker/build.sh --build --push --force
 ```
 
-## <a name='NVVaultDeployment'></a>NV Vault Deployment
-Install NV Vault to protect sensitive information of users in NVIDIA hosted service.
-```
-helm repo add hashicorp https://helm.releases.hashicorp.com
-helm install vault hashicorp/vault \
-         --namespace <YOUR-K8S-NAMESPACE> \
-         --set='injector.externalVaultAddr=https://<stg|prod>.vault.nvidia.com/' \
-         --set='injector.agentImage.repository=nvcr.io/nvidian/nvault-agent' \
-         --set='injector.agentImage.tag=<latest-tag>'
-```
-
-Apply the config map for NV Vault sidecar.
-```
-kubectl apply -f vault-agent-configmap.yaml
-```
-For details about config NV Vault as a sidecar to the k8s pods please refer to [this link](https://gitlab-master.nvidia.com/kaizen/services/vault/docs/-/blob/main/guides/integrations/kubernetes/4-deploy-vault-agent-sidecar-injector.md?ref_type=heads).
-
 ## <a name='MONAIServiceDeployment'></a>MONAI Service Deployment
 MONAI service deployment with some extra steps to above. Here are some links to MONAI service deployment, which show how to deploy MONAI service on different cloud service providers step-by-step.
 1. [Azure deployment](https://confluence.nvidia.com/pages/viewpage.action?spaceKey=CLARA&title=MONAI+Service+Azure+Deployment)
