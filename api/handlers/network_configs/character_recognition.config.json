@@ -1,0 +1,11 @@
+{
+    "api_params": {
+        "actions": [],
+        "formats":["lprnet","raw"],
+        "image":"PYTORCH",
+        "spec_backend":"protobuf",
+        "classwise":"False",
+        "actions_pipe":{
+        }
+    }
+}

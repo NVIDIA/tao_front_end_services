@@ -1,0 +1,9 @@
+api/handlers/__pycache__
+*.pyc
+*.ipynb_checkpoints
+.env
+tao-toolkit-api-*.tgz
+.vscode
+.idea
+debug_*.ipynb
+api/shared/
