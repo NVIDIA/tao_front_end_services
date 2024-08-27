@@ -6,7 +6,4 @@ if [ -f /usr/local/share/ca-certificates/my-cert.crt ]; then
   echo -e "\n# MY-CERT" >> /opt/ngccli/ngc-cli/certifi/cacert.pem
   cat /usr/local/share/ca-certificates/my-cert.crt >> /opt/ngccli/ngc-cli/certifi/cacert.pem
 fi
-if [[ "$NGC_RUNNER" == "True" ]]; then
-  sudo mkdir -p /users && chmod -R 777 /users
-fi
 /venv/bin/python3 workflow.py

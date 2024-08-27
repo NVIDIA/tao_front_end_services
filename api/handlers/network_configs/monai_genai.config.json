@@ -1,0 +1,26 @@
+{
+    "api_params": {
+        "dataset_type": "semantic_segmentation",
+        "formats": [
+            "monai"
+        ],
+        "actions": [
+            "generate"
+        ],
+        "image": "monai",
+        "version": "0.1.1",
+        "spec_backend": "yaml",
+        "classwise": "False",
+        "chaining_rules": "cvaction",
+        "realtime_infer_support": false,
+        "actions_pipe": {
+            "generate": "generate"
+        }
+    },
+    "cli_params": {},
+    "spec_params":{
+        "generate": {
+            "num_gpu": 1
+        }
+    }
+}

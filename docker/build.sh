@@ -3,8 +3,13 @@
 set -eo pipefail
 cd "$( dirname "${BASH_SOURCE[0]}" )"
 
+TAO_VERSION="5.5.0"
+GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+GIT_COMMIT_SHA="$(git rev-parse HEAD)"
+GIT_COMMIT_TIME="$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%dT%H%M%SZ' --format='%cd')"
+
 TAO_API_REGISTRY="nvcr.io"
-TAO_API_ORG="nvidia"
+TAO_API_ORG="nvstaging"
 TAO_API_TEAM="tao"
 
 NGC_KEY="$(grep apikey ~/.ngc/config 2>/dev/null | cut -d'=' -f2 | xargs; true)"
@@ -13,6 +18,8 @@ NGC_KEY="$(grep apikey ~/.ngc/config 2>/dev/null | cut -d'=' -f2 | xargs; true)"
 UUID_TAO_HELM=$(uuidgen)
 export UUID_TAO_HELM=$UUID_TAO_HELM
 tag="$USER-$UUID_TAO_HELM"
+
+DEPLOYMENT_MODE="PROD"
 
 # Build parameters.
 BUILD_DOCKER="0"
@@ -35,6 +42,10 @@ case $param_key in
     NGC_KEY=$param_value
     shift # past argument
     ;;
+    --tao_version)
+    TAO_VERSION=$param_value
+    shift # past argument
+    ;;
     --tao_api_registry)
     TAO_API_REGISTRY=$param_value
     shift # past argument
@@ -45,6 +56,10 @@ case $param_key in
     ;;
     --tao_api_team)
     TAO_API_TEAM=$param_value
+    shift # past argument
+    ;;
+    --deployment_mode)
+    DEPLOYMENT_MODE=$param_value
     shift # past argument
     ;;
     -p|--push)
@@ -71,12 +86,21 @@ done
 echo "TAO_API_REGISTRY=${TAO_API_REGISTRY}"
 echo "TAO_API_ORG=${TAO_API_ORG}"
 echo "TAO_API_TEAM=${TAO_API_TEAM}"
+echo "DEPLOYMENT_MODE=${DEPLOYMENT_MODE}"
 
-TAO_API_REPOSITORY=$TAO_API_REGISTRY/$TAO_API_ORG/$TAO_API_TEAM/nvtl-api
+TAO_API_REPOSITORY=$TAO_API_REGISTRY/$TAO_API_ORG/$TAO_API_TEAM/tao-api
 export TAO_API_REPOSITORY=$TAO_API_REPOSITORY
 echo $TAO_API_REPOSITORY > TAO_API_REPOSITORY.txt
 echo $UUID_TAO_HELM > UUID_TAO_HELM.txt
 chmod 777 TAO_API_REPOSITORY.txt UUID_TAO_HELM.txt
+
+if [ $DEPLOYMENT_MODE = "PROD" ]; then
+    NGC_CLI_URL="https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.31.0/files/ngccli_linux.zip"
+    PTM_ORG_TEAMS="nvidia/tao,iasixjqzw1hj/no-team,ea-tlt/tao_ea"
+else
+    NGC_CLI_URL="https://api.stg.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.95.12/files/ngccli_linux.zip"
+    PTM_ORG_TEAMS="ygcrk6indslt/tao_ea,ygcrk6indslt/tao_ea_allow"
+fi
 
 # Build docker
 if [ $BUILD_DOCKER = "1" ]; then
@@ -87,8 +111,8 @@ if [ $BUILD_DOCKER = "1" ]; then
     else
         NO_CACHE=""
     fi
-    DOCKER_BUILDKIT=1 docker build --build-arg NGC_KEY=$NGC_KEY --build-arg ORG_NAME=$TAO_API_ORG --build-arg TEAM_NAME=$TAO_API_TEAM --pull -f $NV_NVTL_API_TOP/docker/Dockerfile -t $TAO_API_REPOSITORY:$tag $NO_CACHE \
-        --network=host $NV_NVTL_API_TOP/.
+    DOCKER_BUILDKIT=1 docker build --build-arg TAO_VERSION=$TAO_VERSION --build-arg GIT_BRANCH=$GIT_BRANCH --build-arg GIT_COMMIT_SHA=$GIT_COMMIT_SHA --build-arg GIT_COMMIT_TIME=$GIT_COMMIT_TIME --build-arg NGC_KEY=$NGC_KEY --build-arg DEPLOYMENT_MODE=$DEPLOYMENT_MODE --build-arg NGC_CLI_URL=$NGC_CLI_URL --build-arg PTM_ORG_TEAMS=$PTM_ORG_TEAMS --build-arg ORG_NAME=$TAO_API_ORG --build-arg TEAM_NAME=$TAO_API_TEAM --pull -f $NV_TAO_API_TOP/docker/Dockerfile -t $TAO_API_REPOSITORY:$tag $NO_CACHE \
+        --network=host $NV_TAO_API_TOP/.
     if [ $PUSH_DOCKER = "1" ]; then
         echo "Pushing docker ..."
         docker push $TAO_API_REPOSITORY:$tag

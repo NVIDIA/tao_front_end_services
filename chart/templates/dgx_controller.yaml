@@ -27,10 +27,17 @@ spec:
           value: "{{ .Release.Name }}-pvc"
         - name: IMAGEPULLSECRET
           value: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
-        - name: NGC_RUNNER
-          value: {{ .Values.ngcRunner | default "False" | quote }}
+        - name: BACKEND
+          value: {{ .Values.backend | default "local-k8s" | quote }}
         - name: IMAGE_API
           value: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        - name: CALLBACK_UUID
+          value: {{ .Values.serviceAdminUUID | default "02a55e1e-0091-4711-b29e-12a61c0d29bf" | quote }}
+        - name: MONGOSECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
+              key: .dockerconfigjson
       volumes:
       - name: shared-data
         persistentVolumeClaim:

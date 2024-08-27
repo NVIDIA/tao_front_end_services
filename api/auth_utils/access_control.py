@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# http://<server>:<port>/<namespace>/api/v1/users/<user_id>/experiments?<params>
-# ['', '<namespace', 'api', 'v1', 'users', '<user_id>', 'experiments']
+# http://<server>:<port>/<namespace>/api/v1/orgs/<org_name>/experiments?<params>
+# ['', '<namespace', 'api', 'v1', 'orgs', '<org_name>', 'experiments']
 
 """Authentication utils access control modeules"""
+import os
+from handlers.mongo_handler import MongoHandler
 
 
 class AccessControlError(Exception):
@@ -24,25 +26,21 @@ class AccessControlError(Exception):
     pass
 
 
-def _remove_prefix(text, prefix):
-    """Removes prefix from given text and returns it"""
-    if text.startswith(prefix):
-        return text[len(prefix):]
-    return text
-
-
-def validate(url, user_id):
-    """Validate user_id matches user in URL path and whitelist"""
+def validate(user_id, org_name, url):
+    """Validate org_name requested is accessible to the provided user"""
     user_id = str(user_id)
-    err = AccessControlError("Invalid URI path for user " + user_id)
-    tmp = _remove_prefix(url, 'http://')
-    tmp = _remove_prefix(tmp, 'https://')
-    tmp = _remove_prefix(tmp, tmp.split('/')[0])
-    tmp = tmp.split('?')[0]
-    parts = tmp.split('/')
-    # check for user ID match in URL path, with or without domain name in path
-    if (len(parts) >= 5 and parts[3] == 'users' and parts[4] == user_id):
-        err = None
-    elif (len(parts) >= 6 and parts[4] == 'users' and parts[5] == user_id):
-        err = None
+    if url.endswith(":status_update") or url.endswith(":log_update"):
+        if user_id != os.environ.get("CALLBACK_UUID"):
+            err = AccessControlError("This endpoint is not accessible " + user_id)
+            return err
+    err = None
+    if not org_name:
+        err = AccessControlError("Invalid Org requested")
+    if err is None:
+        # TODO: Implement TAO NGC user role checking here
+        mongo = MongoHandler("tao", "users")
+        user_metadata = mongo.find_one({'id': user_id})
+        member_of = user_metadata.get('member_of', [])
+        if f"{org_name}/" not in member_of:
+            err = AccessControlError("No access granted for user in org " + org_name)
     return err

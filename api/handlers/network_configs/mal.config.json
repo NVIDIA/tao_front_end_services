@@ -3,7 +3,8 @@
         "dataset_type":"instance_segmentation",
         "actions": ["train","evaluate","inference"],
         "formats":["default"],
-        "image":"tlt-pytorch",
+        "accepted_ds_intents": ["training", "evaluation"],
+        "image":"PYTORCH",
         "spec_backend":"yaml",
         "classwise":"False",
         "actions_pipe":{
@@ -13,38 +14,21 @@
         }
     },
     
-    
-    "cli_params": {
-        "train": {
-            "experiment_spec_file":"experiment_spec",
-            "results_dir":"output_dir"
-        },
-        "evaluate": {
-            "experiment_spec_file":"experiment_spec",
-            "results_dir":"output_dir"
-        },
-        "inference":{
-            "experiment_spec_file":"experiment_spec",
-            "results_dir":"output_dir"
-        }    
-    },
-    
-    
     "spec_params":{
         "train":{
-            "gpu_ids":"from_csv",
-            "results_dir":"output_dir"
+            "results_dir":"output_dir",
+            "gpu_ids":"from_csv"
         },
         "evaluate":{
-            "gpu_ids":"from_csv",
             "results_dir":"output_dir",
-            "checkpoint":"parent_model"
+            "gpu_ids":"from_csv",
+            "evaluate.checkpoint":"parent_model"
         },
         "inference":{
+            "results_dir":"output_dir",
             "gpu_ids":"from_csv",
             "inference.label_dump_path":"create_inference_result_file_mal",
-            "results_dir":"output_dir",
-            "checkpoint":"parent_model"
+            "inference.checkpoint":"parent_model"
         }
     }
 }

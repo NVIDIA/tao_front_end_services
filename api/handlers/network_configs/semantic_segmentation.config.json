@@ -2,7 +2,8 @@
     "api_params": {
         "actions": ["convert"],
         "formats":["unet","coco","raw"],
-        "image":"tlt-tf1",
+        "accepted_ds_intents": ["training", "evaluation"],
+        "image":"TAO_TF2",
         "spec_backend":"protobuf",
         "classwise":"False",
         "actions_pipe":{

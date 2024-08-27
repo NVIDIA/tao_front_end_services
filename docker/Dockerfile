@@ -1,7 +1,7 @@
 
 ################# BASE IMAGE #################
 
-FROM ubuntu:20.04 AS base
+FROM nvcr.io/nvidia/base/ubuntu:20.04_x64_2022-09-23 AS base
 ENV DEBIAN_FRONTEND noninteractive
 RUN apt-get update && \
     apt-get upgrade --yes && \
@@ -32,13 +32,6 @@ RUN apt-get install --no-install-suggests --no-install-recommends --yes \
 
 FROM build AS staging
 
-# Copy project files
-WORKDIR /opt/api
-COPY api/ .
-COPY notebooks/ notebooks/
-COPY cli/version.py version.py
-COPY docker/requirements.txt .
-
 # Add python kubernetes client
 # NOTE: Install with different package name because NGC scan gets mixed up with OpenShift kubernetes api server
 RUN wget https://github.com/kubernetes-client/python/archive/refs/tags/v23.6.0.zip && \
@@ -49,34 +42,49 @@ RUN wget https://github.com/kubernetes-client/python/archive/refs/tags/v23.6.0.z
     /venv/bin/python setup.py install
 
 # Add NGC CLI
+ARG NGC_CLI_URL='https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.31.0/files/ngccli_linux.zip'
 RUN mkdir -p /opt/ngccli/
-RUN wget --content-disposition 'https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.31.0/files/ngccli_linux.zip' -P /opt/ngccli/ -O /opt/ngccli/ngccli_linux.zip && \
+RUN wget --content-disposition $NGC_CLI_URL -P /opt/ngccli/ -O /opt/ngccli/ngccli_linux.zip && \
     unzip -o /opt/ngccli/ngccli_linux.zip -d /opt/ngccli/ && \
     /opt/ngccli/ngc-cli/ngc --version
 ENV PATH="/opt/ngccli/ngc-cli:${PATH}" NGC_CLI_TRACE_DISABLE=1
 
+# Set API's base workdir
+WORKDIR /opt/api
+
 # Add API's Python requirements
+COPY docker/requirements.txt .
 RUN /venv/bin/pip install --disable-pip-version-check -r requirements.txt
 
 # Fetch metadata for PTMs
 ARG NGC_KEY
-ARG ORG_NAME
-ARG TEAM_NAME
-COPY docker/ngc_config_file .
-RUN if [ "$NGC_KEY" != "no_key_val" ]; then \
-    sed -i 's/NGC_API_KEY_FIXME/'"$NGC_KEY"'/g' ngc_config_file && \
-    mkdir -p /root/.ngc/ && cp /opt/api/ngc_config_file /root/.ngc/config && chmod -R 777 /root/.ngc && \
-    mkdir -p /var/www/ && cp -r /root/.ngc /var/www/ && chmod -R 777 /var/www/.ngc && \
-    rm -rf ngc_config_file; \
-  fi
-RUN /venv/bin/python3 -u pretrained_models.py --org-teams="nvidia/tao,nvaie" --ngc-api-key $NGC_KEY
+ARG PTM_ORG_TEAMS="nvidia/tao,iasixjqzw1hj/no-team,ea-tlt/tao_ea"
+ARG DEPLOYMENT_MODE=PROD
+ENV DEPLOYMENT_MODE=$DEPLOYMENT_MODE
+COPY api/utils.py .
+COPY api/constants.py .
+COPY api/pretrained_models.py .
+COPY api/pretrained_models.csv .
+COPY cli/version.py version.py
+COPY api/handlers/network_configs/ handlers/network_configs/
+RUN /venv/bin/python3 -u pretrained_models.py --org-teams=$PTM_ORG_TEAMS --ngc-api-key $NGC_KEY
+
+# Copy project files
+COPY api/ .
+COPY cli/tao_cli/enum_constants.py .
+COPY notebooks/ notebooks/
+
+# Add pyarmor runtime for metrics secret
+COPY docker/pyarmor-regfile-1219.zip .
+RUN /venv/bin/pyarmor reg pyarmor-regfile-1219.zip && rm pyarmor-regfile-1219.zip
+RUN cd auth_utils && /venv/bin/pyarmor gen runtime --output .
 
 ################ PRODUCT IMAGE #################
 
 FROM base
 
 # Install basic stuff
-RUN apt-get install --no-install-suggests --no-install-recommends --yes \
+RUN apt-get update && apt-get install --no-install-suggests --no-install-recommends --yes \
       wget \
       curl \
       unzip \
@@ -84,10 +92,9 @@ RUN apt-get install --no-install-suggests --no-install-recommends --yes \
       libsm6 \
       libxext6 \
       sudo \
-      curl \
       gnupg && \
-    echo "deb https://nginx.org/packages/ubuntu/ focal nginx" >> /etc/apt/sources.list && \
-    curl -s http://nginx.org/packages/keys/nginx_signing.key | apt-key add - && \
+    curl -fsSL https://nginx.org/keys/nginx_signing.key | apt-key add - && \
+    echo "deb https://nginx.org/packages/ubuntu/ focal nginx" > /etc/apt/sources.list.d/nginx.list && \
     apt-get update && \
     apt-get install --no-install-suggests --no-install-recommends --yes \
       nginx
@@ -98,16 +105,12 @@ RUN wget -qO - https://releases.jfrog.io/artifactory/api/gpg/key/public | apt-ke
     apt-get update && \
     apt-get install -y jfrog-cli
 
+# Version info
+ARG TAO_VERSION=unknown GIT_BRANCH=unknown GIT_COMMIT_SHA=unknown GIT_COMMIT_TIME=unknown
+ENV TAO_VERSION=$TAO_VERSION GIT_BRANCH=$GIT_BRANCH GIT_COMMIT_SHA=$GIT_COMMIT_SHA GIT_COMMIT_TIME=$GIT_COMMIT_TIME
+
 # Install API
 WORKDIR /opt/api
-ARG NGC_KEY
-COPY docker/ngc_config_file .
-RUN if [ "$NGC_KEY" != "no_key_val" ]; then \
-    sed -i 's/NGC_API_KEY_FIXME/'"$NGC_KEY"'/g' ngc_config_file && \
-    mkdir -p /root/.ngc/ && cp /opt/api/ngc_config_file /root/.ngc/config && chmod -R 777 /root/.ngc && \
-    mkdir -p /var/www/ && cp -r /root/.ngc /var/www/ && chmod -R 777 /var/www/.ngc && \
-    rm -rf ngc_config_file; \
-  fi
 COPY --from=staging /opt/api .
 COPY --from=staging /venv /venv
 COPY --from=staging /opt/ngccli/ngccli_linux.zip /opt/ngccli/ngccli_linux.zip

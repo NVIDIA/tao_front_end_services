@@ -1,43 +1,4 @@
 automl_list_helper = {
-    "yolo_v3": {
-        "list_1_backbone": {
-            "yolov3_config.freeze_blocks": {
-                "resnet": (0, 3),
-                "vgg": (1, 5),
-                "googlenet": (0, 7),
-                "mobilenet_v1": (0, 11),
-                "mobilenet_v2": (0, 13),
-                "darknet": (0, 5),
-            },
-        },
-        "list_1_normal": {},
-    },
-    "yolo_v4": {
-        "list_1_backbone": {
-            "yolov4_config.freeze_blocks": {
-                "resnet": (0, 3),
-                "vgg": (1, 5),
-                "googlenet": (0, 7),
-                "mobilenet_v1": (0, 11),
-                "mobilenet_v2": (0, 13),
-                "darknet": (0, 5),
-            },
-        },
-        "list_1_normal": {},
-    },
-    "yolo_v4_tiny": {
-        "list_1_backbone": {
-            "yolov4_config.freeze_blocks": {
-                "resnet": (0, 3),
-                "vgg": (1, 5),
-                "googlenet": (0, 7),
-                "mobilenet_v1": (0, 11),
-                "mobilenet_v2": (0, 13),
-                "darknet": (0, 5),
-            },
-        },
-        "list_1_normal": {},
-    },
     "deformable_detr": {
         "list_2": {
             "dataset.augmentation.scales": ("img_size", "base_parameter"),
@@ -64,11 +25,6 @@ automl_list_helper = {
             "train.optim.lr_steps": ("lr_steps", "train.num_epochs"),
         }
     },
-    "lprnet": {
-        "list_2": {
-            "augmentation_config.gaussian_kernel_size": ("img_size", "augmentation_config.output_height"),
-        }
-    },
     "pointpillars": {
         "list_2": {
             "train.decay_step_list": ("lr_steps", "train.num_epochs"),
@@ -83,20 +39,6 @@ automl_list_helper = {
         "list_2": {
             "train.optim.lr_steps": ("lr_steps", "train.num_epochs"),
         }
-    },
-    "faster_rcnn": {
-        "list_1_backbone": {
-            "model_config.freeze_blocks": {
-                "resnet": (0, 3),
-                "vgg": (1, 5),
-                "googlenet": (0, 7),
-                "mobilenet_v1": (0, 11),
-                "mobilenet_v2": (0, 13),
-                "darknet": (0, 5),
-                "efficientnet": (0, 7),
-            },
-        },
-        "list_1_normal": {},
     },
     "detectnet_v2": {
         "list_1_backbone": {
@@ -163,50 +105,5 @@ automl_list_helper = {
                 "fan_large_16_p4_hybrid": (-1, 8)
             },
         },
-    },
-    "ssd": {
-        "list_1_backbone": {
-            "ssd_config.freeze_blocks": {
-                "resnet": (0, 3),
-                "vgg": (1, 5),
-                "googlenet": (0, 7),
-                "mobilenet_v1": (0, 11),
-                "mobilenet_v2": (0, 13),
-                "darknet": (0, 5),
-                "efficientnet_b0": (0, 7),
-                "squeezenet": (0, 8)
-            },
-        },
-        "list_1_normal": {},
-    },
-    "dssd": {
-        "list_1_backbone": {
-            "dssd_config.freeze_blocks": {
-                "resnet": (0, 3),
-                "vgg": (1, 5),
-                "googlenet": (0, 7),
-                "mobilenet_v1": (0, 11),
-                "mobilenet_v2": (0, 13),
-                "darknet": (0, 5),
-                "efficientnet_b0": (0, 7),
-                "squeezenet": (0, 8)
-            },
-        },
-        "list_1_normal": {},
-    },
-    "retinanet": {
-        "list_1_backbone": {
-            "retinanet_config.freeze_blocks": {
-                "resnet": (0, 3),
-                "vgg": (1, 5),
-                "googlenet": (0, 7),
-                "mobilenet_v1": (0, 11),
-                "mobilenet_v2": (0, 13),
-                "darknet": (0, 5),
-                "efficientnet_b0": (0, 7),
-                "squeezenet": (0, 8)
-            },
-        },
-        "list_1_normal": {},
     },
 }

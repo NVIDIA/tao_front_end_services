@@ -50,28 +50,43 @@ spec:
           value: "{{ .Release.Name }}-pvc"
         - name: IMAGEPULLSECRET
           value: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
+        - name: MONGOSECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
+              key: .dockerconfigjson
+        - name: HOSTBASEURL
+          value: {{ .Values.hostBaseUrl | default "no_url" | quote }}
+        - name: CALLBACK_UUID
+          value: {{ .Values.serviceAdminUUID | default "02a55e1e-0091-4711-b29e-12a61c0d29bf" | quote }}
         - name: NUM_GPU_PER_NODE
           value: {{ .Values.maxNumGpuPerNode | default "1" | quote }}
         - name: TELEMETRY_OPT_OUT
           value: {{ .Values.telemetryOptOut | default "no" | quote }}
         - name: BACKEND
           value: {{ .Values.backend | default "local-k8s" | quote }}
-        - name: IMAGE_TF1
-          value: {{ .Values.imageTf1 | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5" | quote }}
-        - name: IMAGE_PYT
-          value: {{ .Values.imagePyt | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-pyt2.1.0" | quote }}
-        - name: IMAGE_TF2
+        - name: IMAGE_TAO_PYTORCH
+          value: {{ .Values.imagePyt | default "nvcr.io/nvidia/tao/tao-toolkit:5.5.0-pyt" | quote }}
+        - name: IMAGE_TAO_TF2
           value: {{ .Values.imageTf2 | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0" | quote }}
+        - name: IMAGE_TAO_DEPLOY
+          value: {{ .Values.imageTaoDeploy | default "nvcr.io/nvidia/tao/tao-toolkit:5.5.0-deploy" | quote }}
         - name: IMAGE_DEFAULT
-          value: {{ .Values.imageDefault | default "nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf1.15.5" | quote }}
+          value: {{ .Values.imageDefault | default "nvcr.io/nvidia/tao/tao-toolkit:5.5.0-pyt" | quote }}
         - name: IMAGE_API
           value: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-        - name: IMAGE_DATA_SERVICES
-          value: {{ .Values.imageDataservices | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-data-services" | quote }}
-        - name: IMAGE_TAO_DEPLOY
-          value: {{ .Values.imageTaoDeploy | default "nvcr.io/nvidia/tao/tao-toolkit:5.2.0-deploy" | quote }}
-        - name: ADMIN_UUID
-          value: {{ .Values.adminUUID | default "00000000-0000-0000-0000-000000000001" | quote }}
+        - name: IMAGE_TAO_DS
+          value: {{ .Values.imageDataservices | default "nvcr.io/nvidia/tao/tao-toolkit:5.5.0-data-services" | quote }}
+        - name: FUNCTION_TAO_PYTORCH
+          value: {{ .Values.functionTaoPyt | default "" | quote }}
+        - name: FUNCTION_TAO_TF2
+          value: {{ .Values.functionTaoTf2 | default "" | quote }}
+        - name: FUNCTION_TAO_DEPLOY
+          value: {{ .Values.functionTaoDeploy | default "" | quote }}
+        - name: FUNCTION_DEFAULT
+          value: {{ .Values.functionDefault | default "" | quote }}
+        - name: FUNCTION_TAO_DS
+          value: {{ .Values.functionTaoDataservices | default "" | quote }}
         - name: PYTHONIOENCODING 
           value: utf-8
         - name: LC_ALL 
@@ -94,8 +109,8 @@ spec:
         - name: VAULT_SECRET_PATH
           value: "{{ .Values.vault.secretMountPath }}"
 {{- end }}
-        - name: NGC_API_BASE_URL
-          value: {{ .Values.ngcApiBaseUrl | default "https://api.ngc.nvidia.com/v2" | quote }}
+        - name: DEPLOYMENT_MODE
+          value: {{ .Values.deploymentMode | default "PROD" | quote }}
         command: ["/bin/bash", "workflow_start.sh"]
         volumeMounts:
         - name: shared-data

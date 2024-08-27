@@ -2,7 +2,7 @@
     "api_params": {
         "dataset_type":"semantic_segmentation",
         "actions": ["train","evaluate","prune","retrain","export","gen_trt_engine","inference"],
-        "image":"tlt-tf1",
+        "image":"TAO_TF2",
         "spec_backend":"protobuf",
         "classwise":"False",
         "actions_pipe":{
@@ -18,7 +18,7 @@
 
     "cli_params": {
         "train": {
-            "experiment_spec_file":"experiment_spec",
+            "experiment_spec_file":"experiment_spec_microservices",
             "pretrained_model_file":"ptm",
             "results_dir":"output_dir",
             "verbose":"verbose",
@@ -27,7 +27,7 @@
             "key":"key"
         },
         "evaluate": {
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "results_dir":"output_dir",
             "model_path":"parent_model_evaluate",
             "verbose":"verbose",
@@ -37,7 +37,7 @@
             "batch_size":"from_csv"
         },
         "evaluate_tao_deploy": {
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "results_dir":"output_dir",
             "model_path":"parent_model_evaluate",
             "verbose":"verbose",
@@ -54,7 +54,7 @@
             "model":"parent_model"
         },
         "retrain": {
-            "experiment_spec_file":"experiment_spec",
+            "experiment_spec_file":"experiment_spec_microservices",
             "pretrained_model_file":"parent_model",
             "results_dir":"output_dir",
             "use_amp": "from_csv",
@@ -71,7 +71,7 @@
             "verbose":"verbose"
         },
         "inference": {
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "results_dir":"output_dir",
             "model_path":"parent_model_evaluate",
             "verbose":"verbose",
@@ -80,7 +80,7 @@
             "batch_size":"from_csv"
         },
         "inference_tao_deploy": {
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "results_dir":"output_dir",
             "model_path":"parent_model_evaluate",
             "image_dir":"unet_test_images",
@@ -114,7 +114,7 @@
     "automl_cli_params":{
         "pretrained_model_file":"ptm",
         "experiment_spec_file":"automl_experiment_spec",
-        "results_dir":"automl_output_dir",
+        "results_dir":"output_dir",
         "gpus":"from_csv",
         "use_amp": "from_csv",
         "key":"key"

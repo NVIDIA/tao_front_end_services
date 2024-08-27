@@ -13,30 +13,30 @@
 # limitations under the License.
 
 """API Stateless handlers modules"""
-import datetime
+from datetime import datetime, timezone
 import glob
 import shutil
-import numpy as np
 import os
-import re
 import sys
 import subprocess
-from filelock import FileLock
 from pathlib import Path
+from constants import CV_ACTION_CHAINED_ONLY, CV_ACTION_RULES
 import orjson
-import yaml
 import uuid
 import traceback
+import copy
 
-ngc_runner = os.getenv("NGC_RUNNER", "")
-tao_root = os.environ.get("TAO_ROOT", "/shared/users/")
-admin_uuid = os.environ.get("ADMIN_UUID", "00000000-0000-0000-0000-000000000001")
+from handlers.encrypt import NVVaultEncryption
+from handlers.mongo_handler import MongoHandler
+from utils import safe_load_file, safe_dump_file
+
+BACKEND = os.getenv("BACKEND", "local-k8s")
+tao_root = os.environ.get("TAO_ROOT", "/shared/orgs/")
+base_exp_uuid = "00000000-0000-0000-0000-000000000000"
 
 
-def get_root(ngc_runner_fetch=False):
+def get_root():
     """Return root path"""
-    if ngc_runner_fetch and ngc_runner == "True":
-        return "/users/"
     return tao_root
 
 
@@ -51,15 +51,15 @@ def __pathlib_glob(rootdir, handler_id, job_id):
         return ""
 
 
-def get_handler_root(user_id=None, kind=None, handler_id=None, job_id=None, ngc_runner_fetch=False):
+def get_handler_root(org_name=None, kind=None, handler_id=None, job_id=None):
     """Return handler root path"""
     handler_id = handler_id if handler_id else ""
     job_id = job_id if job_id else ""
-    rootdir = Path(get_root(ngc_runner_fetch))
+    rootdir = Path(get_root())
     if not rootdir.exists():
         return ""
-    if user_id:
-        rootdir = rootdir / user_id
+    if org_name:
+        rootdir = rootdir / org_name
     else:
         return __pathlib_glob(rootdir, handler_id, job_id)
     if kind:
@@ -74,11 +74,14 @@ def get_handler_root(user_id=None, kind=None, handler_id=None, job_id=None, ngc_
     return ""
 
 
+def get_jobs_root(user_id=None, org_name=None):
+    """Return handler root path"""
+    return os.path.join(get_root(), org_name, "users", user_id, "jobs")
+
+
 def get_base_experiment_path(handler_id, create_if_not_exist=True):
     """Return base_experiment root path"""
-    base_experiment_path = f"{tao_root}/{admin_uuid}/experiments/{admin_uuid}/{handler_id}"
-    if ngc_runner == "True":
-        base_experiment_path = f"/users/{admin_uuid}/experiments/{admin_uuid}/{handler_id}"
+    base_experiment_path = f"{tao_root}/{base_exp_uuid}/experiments/{base_exp_uuid}/{handler_id}"
     if not os.path.exists(base_experiment_path) and create_if_not_exist:
         os.makedirs(base_experiment_path, exist_ok=True)
         subprocess.getoutput(f"chmod -R 777 {base_experiment_path}")
@@ -87,64 +90,66 @@ def get_base_experiment_path(handler_id, create_if_not_exist=True):
 
 def get_base_experiments_metadata_path():
     """Return base_experiment root path"""
-    base_experiments_metadata_path = f"{tao_root}/{admin_uuid}/experiments/{admin_uuid}/ptm_metadatas.json"
-    if ngc_runner == "True":
-        base_experiments_metadata_path = f"/users/{admin_uuid}/experiments/{admin_uuid}/ptm_metadatas.json"
+    base_experiments_metadata_path = f"{tao_root}/{base_exp_uuid}/experiments/{base_exp_uuid}/ptm_metadatas.json"
     return base_experiments_metadata_path
 
 
 # Sub for handler.spec_root with handler_root(handler_id)
-def get_handler_spec_root(user_id, handler_id):
+def get_handler_spec_root(user_id, org_name, handler_id):
     """Return path of specs folder under handler_root"""
-    return os.path.join(get_handler_root(user_id, None, handler_id, None, ngc_runner_fetch=True), "specs")
+    return os.path.join(get_root(), org_name, "users", user_id, "specs")
 
 
-def get_handler_log_root(user_id, handler_id, ngc_runner_fetch=True):
+def get_handler_log_root(user_id, org_name, handler_id):
     """Return path of logs folder under handler_root"""
-    return os.path.join(get_handler_root(user_id, None, handler_id, None, ngc_runner_fetch=ngc_runner_fetch), "logs")
+    return os.path.join(get_root(), org_name, "users", user_id, "logs")
 
 
-def get_handler_job_metadata(user_id, handler_id, job_id):
+def get_handler_job_metadata(job_id):
     """Return metadata info present in job_id.json inside jobs_metadata folder"""
     # Only metadata of a particular job
     metadata = {}
     if job_id:
-        handler_root = get_handler_root(user_id, None, handler_id, None)
-        job_metadata_file = handler_root + f"/jobs_metadata/{job_id}.json"
-        metadata = safe_load_file(job_metadata_file)
+        mongo_jobs = MongoHandler("tao", "jobs")
+        job_query = {'id': job_id}
+        metadata = mongo_jobs.find_one(job_query)
     return metadata
 
 
-def get_job_files(user_id, handler_id, job_id, retrieve_logs=False, retrieve_specs=False, ngc_runner_fetch=False):
+def get_job_files(user_id, org_name, handler_id, job_id, retrieve_logs=False, retrieve_specs=False):
     """Return metadata info present in job_id.json inside jobs_metadata folder"""
     # Only metadata of a particular job
     logs_folder = ""
     specs_folder = ""
     if retrieve_logs:
-        logs_folder = get_handler_log_root(user_id, handler_id)
+        logs_folder = get_handler_log_root(user_id, org_name, handler_id)
     if retrieve_specs:
-        specs_folder = get_handler_spec_root(user_id, handler_id)
+        specs_folder = get_handler_spec_root(user_id, org_name, handler_id)
 
-    handler_root = get_handler_root(user_id, None, handler_id, None, ngc_runner_fetch=ngc_runner_fetch)
-    job_folder = os.path.join(handler_root, job_id)
+    job_root = get_jobs_root(user_id, org_name)
+    job_folder = os.path.join(job_root, job_id)
     if not os.path.exists(job_folder) and (retrieve_logs and not os.path.exists(logs_folder)) and (retrieve_specs and not os.path.exists(specs_folder)):
         return []
     files = glob.glob(f"{job_folder}/**", recursive=True)
-    if logs_folder and os.path.exists(logs_folder):
-        files += glob.glob(f"{logs_folder}/**", recursive=True)
+
+    # Get log and specs file for that job
+    log_file = os.path.join(logs_folder, f"{job_id}.txt")
+    if logs_folder and os.path.exists(log_file):
+        files += [log_file]
     if specs_folder and os.path.exists(specs_folder):
-        files += glob.glob(f"{specs_folder}/**", recursive=True)
-    files = [os.path.relpath(file, handler_root) for file in files if not file.endswith('/')]
+        files += glob.glob(f"{specs_folder}/*{job_id}.*", recursive=True)  # Ignore lock files and -{action}-spec.json
+
+    files = [os.path.relpath(file, job_root) for file in files if not file.endswith('/')]
     return files
 
 
-def get_toolkit_status(user_id, handler_id, job_id):
+def get_toolkit_status(job_id):
     """Returns the status of the job reported from the frameworks container"""
-    metadata_info = get_handler_job_metadata(user_id, handler_id, job_id)
+    metadata_info = get_handler_job_metadata(job_id)
     toolkit_status = ""
-    result_dict = metadata_info.get("result", "")
+    result_dict = metadata_info.get("result", {})
     if result_dict:
-        toolkit_detailed_status = result_dict.get("detailed_status", "")
+        toolkit_detailed_status = result_dict.get("detailed_status", {})
         if toolkit_detailed_status:
             toolkit_status = toolkit_detailed_status.get("status", "")
     return toolkit_status
@@ -160,14 +165,14 @@ def json_serializable(response):
 
 
 # Sub for handler.metadata_file with handler_root(handler_id)
-def get_handler_metadata_file(user_id, handler_id, kind=None):
+def get_handler_metadata_file(org_name, handler_id, kind=None):
     """Return path of metadata.json under handler_root"""
-    return get_handler_root(user_id, kind, handler_id, None) + "/metadata.json"
+    return get_handler_root(org_name, kind, handler_id, None) + "/metadata.json"
 
 
-def get_handler_jobs_metadata_root(user_id, handler_id):
+def get_handler_jobs_metadata_root(org_name, handler_id, kind=None):
     """Return path of job_metadata folder folder under handler_root"""
-    return get_handler_root(user_id, None, handler_id, None) + "/jobs_metadata/"
+    return get_handler_root(org_name, kind, handler_id, None) + "/jobs_metadata/"
 
 
 def read_base_experiment_metadata():
@@ -175,7 +180,7 @@ def read_base_experiment_metadata():
     base_experiment_path = get_base_experiments_metadata_path()
     base_experiment_metadatas = safe_load_file(base_experiment_path)
     if not base_experiment_metadatas and os.path.exists(base_experiment_path):  # In-case the file was corrupted
-        ptm_source_path = f"/opt/api/shared/users/{admin_uuid}/experiments/{admin_uuid}"
+        ptm_source_path = f"/opt/api/shared/orgs/{base_exp_uuid}/experiments/{base_exp_uuid}"
         if os.path.exists(ptm_source_path):
             shutil.copy(f"{ptm_source_path}/ptm_metadatas.json", base_experiment_path)
         else:
@@ -199,74 +204,105 @@ def update_base_experiment_metadata(base_experiment_id, base_experiment_metadata
     safe_dump_file(base_experiment_path, base_experiment_metadatas)
 
 
-def get_handler_metadata(user_id, handler_id, kind=None):
-    """Return metadata info present in metadata.json inside handler_root"""
-    metadata_file = get_handler_metadata_file(user_id, handler_id, kind)
-    metadata = safe_load_file(metadata_file)
+def get_handler_metadata(handler_id, kind):
+    """Return metadata info present in DB"""
+    if kind[-1] != 's':
+        kind += 's'
+    mongo = MongoHandler("tao", kind)
+    handler_query = {'id': handler_id}
+    metadata = mongo.find_one(handler_query)
     return metadata
 
 
-def write_handler_metadata(user_id, handler_id, metadata):
-    """Return metadata info present in metadata.json inside handler_root"""
-    metadata_file = get_handler_metadata_file(user_id, handler_id)
-    safe_dump_file(metadata_file, metadata)
-    return metadata
+def write_handler_metadata(handler_id, metadata, kind):
+    """Write metadata info to DB"""
+    if kind[-1] != 's':
+        kind += 's'
+    mongo = MongoHandler("tao", kind)
+    handler_query = {'id': handler_id}
+    mongo.upsert(handler_query, metadata)
 
 
-def get_handler_metadata_with_jobs(user_id, handler_id):
+def get_handler_metadata_with_jobs(handler_id, kind=""):
     """Return a list of job_metadata info of multiple jobs"""
-    metadata = get_handler_metadata(user_id, handler_id)
+    metadata = get_handler_metadata(handler_id, kind=kind)
     metadata["jobs"] = []
-    job_metadatas_root = get_handler_jobs_metadata_root(user_id, handler_id)
-    for json_file in glob.glob(job_metadatas_root + "*.json"):
-        metadata["jobs"].append(safe_load_file(json_file))
+    jobs = get_jobs_for_handler(handler_id, kind)
+    for job in jobs:
+        metadata["jobs"].append(job)
     return metadata
 
 
-def write_job_metadata(user_id, handler_id, job_id, metadata):
+def write_job_metadata(job_id, metadata):
     """Write job metadata info present in jobs_metadata folder"""
-    handler_root = get_handler_root(user_id, None, handler_id, None)
-    job_metadata_file = handler_root + f"/jobs_metadata/{job_id}.json"
-    safe_dump_file(job_metadata_file, metadata, lock_file=None)
+    mongo_jobs = MongoHandler("tao", "jobs")
+    jobs_query = {'id': job_id}
+    mongo_jobs.upsert(jobs_query, metadata)
 
 
-def update_job_status(user_id, handler_id, job_id, status):
+def get_job_id_of_action(handler_id, kind, action):
+    handler_job_id = None
+    jobs = get_jobs_for_handler(handler_id, kind)
+    for job in jobs:
+        job_id = job.get("id")
+        if job.get("action") == action and job.get('status') == "Done":
+            handler_job_id = job_id
+            break
+    if not handler_job_id:
+        raise ValueError(f"No job found or no job with status Done found for action:{action}, handler:{handler_id}, kind:{kind}", file=sys.stderr)
+    return handler_job_id
+
+
+def update_handler_with_jobs_info(jobs_metadata, handler_id, job_id, kind):
+    # Update jobs info in handler metadata
+    handler_metadata = get_handler_metadata(handler_id, kind)
+    if handler_metadata:
+        if "jobs" not in handler_metadata:
+            handler_metadata["jobs"] = {}
+        if job_id not in handler_metadata["jobs"]:
+            handler_metadata["jobs"][job_id] = {}
+        if "result" not in handler_metadata["jobs"][job_id]:
+            handler_metadata["jobs"][job_id]["result"] = {}
+        handler_metadata["jobs"][job_id]["name"] = jobs_metadata.get("name")
+        handler_metadata["jobs"][job_id]["status"] = jobs_metadata.get("status")
+        handler_metadata["jobs"][job_id]["action"] = jobs_metadata.get("action")
+        handler_metadata["jobs"][job_id]["result"]["eta"] = jobs_metadata.get("result", {}).get("eta")
+        handler_metadata["jobs"][job_id]["result"]["epoch"] = jobs_metadata.get("result", {}).get("epoch")
+        handler_metadata["jobs"][job_id]["result"]["max_epoch"] = jobs_metadata.get("result", {}).get("max_epoch")
+        write_handler_metadata(handler_id, handler_metadata, kind)
+
+
+def update_job_status(handler_id, job_id, status, kind=""):
     """Update the job status in jobs_metadata/job_id.json"""
-    metadata = get_handler_job_metadata(user_id, handler_id, job_id)
-    current_status = metadata.get("status", "")
-    if current_status != "Canceled":
-        if status != current_status:
-            metadata["last_modified"] = datetime.datetime.now().isoformat()
-        metadata["status"] = status
+    metadata = get_handler_job_metadata(job_id)
+    if metadata:
+        current_status = metadata.get("status", "")
+        if current_status not in ("Canceled", "Canceling", "Pausing", "Paused") or (current_status == "Canceling" and status == "Canceled") or (current_status == "Pausing" and status == "Paused"):
+            if status != current_status:
+                metadata["last_modified"] = datetime.now(tz=timezone.utc)
+            metadata["status"] = status
+            if kind:
+                update_handler_with_jobs_info(metadata, handler_id, job_id, kind)
+            write_job_metadata(job_id, metadata)
 
-    write_job_metadata(user_id, handler_id, job_id, metadata)
 
-
-def update_job_metadata(user_id, handler_id, job_id, metadata_key="result", data=""):
+def update_job_metadata(handler_id, job_id, metadata_key="result", data="", kind=""):
     """Update the job status in jobs_metadata/job_id.json"""
-    metadata = get_handler_job_metadata(user_id, handler_id, job_id)
-    if data != metadata.get(metadata_key, {}):
-        metadata["last_modified"] = datetime.datetime.now().isoformat()
-    metadata[metadata_key] = data
-
-    write_job_metadata(user_id, handler_id, job_id, metadata)
-
-
-def update_job_tar_stats(user_id, handler_id, job_id, tar_stats):
-    """Update the job results in jobs_metadata/job_id.json"""
-    metadata = get_handler_job_metadata(user_id, handler_id, job_id)
-    if tar_stats != metadata.get("job_tar_stats", {}):
-        metadata["last_modified"] = datetime.datetime.now().isoformat()
-    metadata["job_tar_stats"] = tar_stats
-
-    write_job_metadata(user_id, handler_id, job_id, metadata)
+    metadata = get_handler_job_metadata(job_id)
+    if metadata:
+        if data != metadata.get(metadata_key, {}):
+            metadata["last_modified"] = datetime.now(tz=timezone.utc)
+        metadata[metadata_key] = data
+        if metadata_key == "result" and kind:
+            update_handler_with_jobs_info(metadata, handler_id, job_id, kind)
+        write_job_metadata(job_id, metadata)
 
 
-def infer_action_from_job(user_id, handler_id, job_id):
+def infer_action_from_job(handler_id, job_id):
     """Takes handler, job_id (UUID / str) and returns action corresponding to that jobID"""
     job_id = str(job_id)
     action = ""
-    all_jobs = get_handler_metadata_with_jobs(user_id, handler_id)["jobs"]
+    all_jobs = get_jobs_for_handler(handler_id, "experiment")
     for job in all_jobs:
         if job["id"] == job_id:
             action = job["action"]
@@ -274,26 +310,22 @@ def infer_action_from_job(user_id, handler_id, job_id):
     return action
 
 
-def get_handler_id(user_id, job_id, ngc_runner_fetch=False):
+def get_handler_id(job_id):
     """Return handler_id of the provided job"""
-    job_folder_path = get_handler_root(user_id, None, None, job_id, ngc_runner_fetch=ngc_runner_fetch)
-    if job_folder_path:
-        return os.path.basename(os.path.abspath(os.path.join(job_folder_path, os.pardir)))
+    job_metadata = get_handler_metadata(job_id, "jobs")
+    for kind in ("experiment", "dataset", "workspace"):
+        if f"{kind}_id" in job_metadata:
+            return job_metadata[f"{kind}_id"]
     return None
 
 
-def get_handler_user(handler_id):
-    """Return the user id for the handler id provided"""
-    # Get the handler_root in all the paths
-    hander_root = get_handler_root(None, None, handler_id, None)
-    # Define a regular expression pattern to match UUIDs
-    uuid_pattern = r'([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})'
-    # Search for the UUID pattern in the input string
-    match = re.search(uuid_pattern, hander_root)
-    # Check if a match is found
-    if match:
-        return match.group(1)  # Return the matched UUID
-    return None  # Return None if no UUID is found
+def get_handler_org(handler_id, kind):
+    """Return the org for the handler id provided"""
+    if kind[-1] != 's':
+        kind += 's'
+    metadata = get_handler_metadata(handler_id, kind)
+    org_name = metadata.get("org_name", None)
+    return org_name
 
 
 def get_handler_kind(handler_metadata):
@@ -301,34 +333,34 @@ def get_handler_kind(handler_metadata):
     # Get the handler_root in all the paths
     if "network_arch" in handler_metadata.keys():
         return "experiments"
+    if "cloud_type" in handler_metadata.keys():
+        return "workspaces"
     return "datasets"
 
 
-def get_handler_type(user_id, handler_id):
+def get_handler_type(handler_metadata):
     """Return the handler type"""
-    handler_metadata = get_handler_metadata(user_id, handler_id)
     network = handler_metadata.get("network_arch", None)
     if not network:
         network = handler_metadata.get("type", None)
     return network
 
 
-def make_root_dirs(user_id, kind, handler_id):
+def make_root_dirs(user_id, org_name, kind, handler_id):
     """Create root dir followed by logs, jobs_metadata and specs folder"""
-    root = get_root() + f"{user_id}/{kind}/{handler_id}/"
-    log_root = root + "logs/"
-    jobs_meta_root = root + "jobs_metadata/"
-    spec_root = root + "specs/"
-    for directory in [root, log_root, jobs_meta_root, spec_root]:
+    log_root = os.path.join(get_root(), org_name, "users", user_id, "logs/")
+    spec_root = os.path.join(get_root(), org_name, "users", user_id, "specs/")
+    jobs_meta_root = os.path.join(get_root(), org_name, kind, handler_id, "jobs_metadata/")
+    for directory in [log_root, spec_root, jobs_meta_root]:
         if not os.path.exists(directory):
             os.makedirs(directory)
 
 
-def check_existence(user_id, handler_id, kind):
+def check_existence(handler_id, kind):
     """
     Check if dataset or experiment exists
     """
-    if kind not in ["dataset", "experiment"]:
+    if kind not in ["dataset", "experiment", "workspace"]:
         return False
 
     # first check in the base experiments
@@ -336,25 +368,22 @@ def check_existence(user_id, handler_id, kind):
         model_metadata = get_base_experiment_metadata(handler_id)
         if model_metadata:
             return True
-    # get handlers root
-    handler_root = get_handler_root(user_id, kind + "s", handler_id, None)
-    if handler_root:
-        # check if the metadata file exists
-        if os.path.exists(os.path.join(handler_root, "metadata.json")):
-            return True
-        print(f"Directory {handler_root} exists but metadata file not found for {kind} {handler_id}!", file=sys.stderr)
+    # check in DB
+    model_metadata = get_handler_metadata(handler_id, kind)
+    if model_metadata:
+        return True
     return False
 
 
-def check_read_access(user_id, handler_id, base_experiment=False):
+def check_read_access(org_name, handler_id, base_experiment=False, kind=""):
     """Check if the user has read access to this particular handler"""
-    handler_user = get_handler_user(handler_id)
-    under_user = handler_user == user_id
+    handler_org = get_handler_org(handler_id, kind)
+    under_user = handler_org is not None and handler_org == org_name
 
     if base_experiment:
         handler_metadata = get_base_experiment_metadata(handler_id)
     else:
-        handler_metadata = get_handler_metadata(user_id, handler_id)
+        handler_metadata = get_handler_metadata(handler_id, kind)
     public = handler_metadata.get("public", False)  # Default is False
 
     if under_user:
@@ -364,15 +393,14 @@ def check_read_access(user_id, handler_id, base_experiment=False):
     return False
 
 
-def check_write_access(user_id, handler_id, base_experiment=False):
+def check_write_access(org_name, handler_id, base_experiment=False, kind=""):
     """Check if the user has write access to this particular handler"""
-    handler_user = get_handler_user(handler_id)
-    under_user = handler_user == user_id
-
+    handler_org = get_handler_org(handler_id, kind)
+    under_user = handler_org is not None and handler_org == org_name
     if base_experiment:
         handler_metadata = get_base_experiment_metadata(handler_id)
     else:
-        handler_metadata = get_handler_metadata(user_id, handler_id)
+        handler_metadata = get_handler_metadata(handler_id, kind)
     public = handler_metadata.get("public", False)  # Default is False
     read_only = handler_metadata.get("read_only", False)  # Default is False
     if under_user:  # If under user, you can always write - no point in making it un-writable by owner. Read-only is for non-owners
@@ -433,21 +461,53 @@ def remove_public_dataset(dataset_id):
     return
 
 
-def check_dataset_type_match(user_id, experiment_meta, dataset_id, no_raw=None):
+def decrypt_handler_metadata(workspace_metadata):
+    """Decrypt NvVault encrypted values"""
+    if BACKEND in ("BCP", "NVCF"):
+        cloud_specific_details = workspace_metadata.get("cloud_specific_details")
+        if cloud_specific_details:
+            config_path = os.getenv("VAULT_SECRET_PATH", None)
+            encryption = NVVaultEncryption(config_path)
+            for key, value in cloud_specific_details.items():
+                if encryption.check_config()[0]:
+                    workspace_metadata["cloud_specific_details"][key] = encryption.decrypt(value)
+                else:
+                    print("deencryption not possible", file=sys.stderr)
+
+
+def get_workspace_string_identifier(workspace_id, workspace_cache):
+    """For the given workspace ID, constuct a unique string which can identify this workspace"""
+    if workspace_id in workspace_cache:
+        workspace_metadata = workspace_cache[workspace_id]
+    else:
+        workspace_metadata = get_handler_metadata(workspace_id, kind="workspaces")
+        decrypt_handler_metadata(workspace_metadata)
+        workspace_cache[workspace_id] = workspace_metadata
+    workspace_identifier = ""
+    if workspace_metadata:
+        workspace_identifier = f"{workspace_metadata.get('cloud_type')}://{workspace_metadata.get('cloud_specific_details', {}).get('cloud_bucket_name')}/"
+    return workspace_identifier
+
+
+def check_dataset_type_match(org_name, experiment_meta, dataset_id, no_raw=None):
     """Checks if the dataset created for the experiment is valid dataset_type"""
     # If dataset id is None, then return True
     # Else, if all things match, return True
     # True means replace, False means skip and return a 400 Code
     if dataset_id is None:
         return True
-    if not check_existence(user_id, dataset_id, "dataset"):
+    dataset_meta = get_handler_metadata(dataset_id, "datasets")
+    if not dataset_meta:
         return False
-    if not check_read_access(user_id, dataset_id):
+    if not check_read_access(org_name, dataset_id, kind="datasets"):
         return False
-
-    dataset_meta = get_handler_metadata(user_id, dataset_id, "datasets")
 
     experiment_dataset_type = experiment_meta.get("dataset_type")
+    network_arch = experiment_meta.get("network_arch")
+
+    if network_arch == "image" and experiment_dataset_type == "not_restricted":  # Allow Image action from dataservices to run on any model's dataset
+        return True
+
     dataset_type = dataset_meta.get("type")
     dataset_format = dataset_meta.get("format")
     if experiment_dataset_type not in (dataset_type, "user_custom"):
@@ -460,18 +520,18 @@ def check_dataset_type_match(user_id, experiment_meta, dataset_id, no_raw=None):
     return True
 
 
-def check_experiment_type_match(user_id, experiment_meta, base_experiment_ids):
+def check_experiment_type_match(org_name, experiment_meta, base_experiment_ids):
     """Checks if the experiment created and base_experiment requested belong to the same network"""
     if base_experiment_ids is None:
         return True
     for base_experiment_id in base_experiment_ids:
-        if not check_read_access(user_id, base_experiment_id, True):
+        if not check_read_access(org_name, base_experiment_id, True, kind="experiments"):
             return False
 
         base_experiment_meta = get_base_experiment_metadata(base_experiment_id)
         if not base_experiment_meta:
-            # Search in the admin_uuid fails, search in the user_id
-            base_experiment_meta = get_handler_metadata(user_id, base_experiment_id)
+            # Search in the base_exp_uuid fails, search in the org_name
+            base_experiment_meta = get_handler_metadata(base_experiment_id, "experiments")
 
         experiment_arch = experiment_meta.get("network_arch")
         base_experiment_arch = base_experiment_meta.get("network_arch")
@@ -498,7 +558,7 @@ def check_checkpoint_epoch_number_match(epoch_number_dictionary):
     return True
 
 
-def check_base_experiment_support_realtime_infer(user_id, experiment_meta, realtime_infer):
+def check_base_experiment_support_realtime_infer(org_name, experiment_meta, realtime_infer):
     """Check if the PTM suppport realtime infer"""
     if realtime_infer is None or realtime_infer is False:  # no need to check
         return True
@@ -508,37 +568,39 @@ def check_base_experiment_support_realtime_infer(user_id, experiment_meta, realt
         return False
     base_experiment_id = base_experiment_ids[0]
 
-    if not check_existence(user_id, base_experiment_id, "experiment"):
+    if not check_existence(base_experiment_id, "experiment"):
         return False
 
-    if not check_read_access(user_id, base_experiment_id, True):
+    if not check_read_access(org_name, base_experiment_id, True, kind="experiments"):
         return False
 
     base_experiment_meta = get_base_experiment_metadata(base_experiment_id)
-
+    if not base_experiment_meta:
+        # Search in the base_exp_uuid fails, search in the user_id
+        base_experiment_meta = get_handler_metadata(base_experiment_id, "experiments")
     if not base_experiment_meta.get("realtime_infer_support", False):
         return False
 
     return True
 
 
-def experiment_update_handler_attributes(user_id, experiment_meta, key, value):
+def experiment_update_handler_attributes(org_name, experiment_meta, key, value):
     """Checks if the artifact provided is of the correct type"""
     # Returns value or False
     if key in ["train_datasets"]:
         if type(value) is not list:
             value = [value]
         for dataset_id in value:
-            if not check_dataset_type_match(user_id, experiment_meta, dataset_id, no_raw=True):
+            if not check_dataset_type_match(org_name, experiment_meta, dataset_id, no_raw=True):
                 return False
     elif key in ["eval_dataset"]:
-        if not check_dataset_type_match(user_id, experiment_meta, value, no_raw=True):
+        if not check_dataset_type_match(org_name, experiment_meta, value, no_raw=True):
             return False
     elif key in ["calibration_dataset", "inference_dataset"]:
-        if not check_dataset_type_match(user_id, experiment_meta, value):
+        if not check_dataset_type_match(org_name, experiment_meta, value):
             return False
     elif key in ["base_experiment"]:
-        if not check_experiment_type_match(user_id, experiment_meta, value):
+        if not check_experiment_type_match(org_name, experiment_meta, value):
             return False
     elif key in ["checkpoint_choose_method"]:
         if not check_checkpoint_choose_match(value):
@@ -547,48 +609,35 @@ def experiment_update_handler_attributes(user_id, experiment_meta, key, value):
         if not check_checkpoint_epoch_number_match(value):
             return False
     elif key in ["realtime_infer"]:
-        if not check_base_experiment_support_realtime_infer(user_id, experiment_meta, value):
+        if not check_base_experiment_support_realtime_infer(org_name, experiment_meta, value):
             return False
     else:
         return False
     return True
 
 
-def list_all_job_metadata(user_id, handler_id):
-    """Return a list of job_metadata info of multiple jobs"""
-    job_metadatas = []
-    job_metadatas_root = get_handler_jobs_metadata_root(user_id, handler_id)
-    for json_file in glob.glob(job_metadatas_root + "*.json"):
-        # Skip files with 'tmp' in the filename
-        if "tmp" in json_file:
-            continue
-        # Check if the file exists before loading it
-        if not os.path.exists(json_file):
-            continue
-        job_metadata = safe_load_file(json_file)
-        if job_metadata.get("id", None) is None or job_metadata.get("status", None) is None:
-            continue
-        job_metadatas.append(job_metadata)
-    return job_metadatas
-
-
-def resolve_existence(user_id, kind, handler_id):
+def resolve_existence(kind, handler_id):
     """Check if the handler exists"""
-    if kind not in ["dataset", "experiment"]:
+    if kind not in ["dataset", "experiment", "workspace"]:
         return False
-    metadata_path = os.path.join(get_root(), user_id, kind + "s", handler_id, "metadata.json")
-    return os.path.exists(metadata_path)
+    metadata = resolve_metadata(kind, handler_id)
+    if not metadata:
+        return False
+    return True
 
 
-def resolve_root(user_id, kind, handler_id):
+def resolve_root(org_name, kind, handler_id):
     """Resolve the root path of the handler"""
-    return os.path.join(get_root(), user_id, kind + "s", handler_id)
+    return os.path.join(get_root(), org_name, kind + "s", handler_id)
 
 
-def resolve_metadata(user_id, kind, handler_id):
+def resolve_metadata(kind, handler_id):
     """Resolve the metadata of the handler"""
-    metadata_path = os.path.join(resolve_root(user_id, kind, handler_id), "metadata.json")
-    metadata = safe_load_file(metadata_path)
+    if kind[-1] != 's':
+        kind += 's'
+    mongo = MongoHandler("tao", kind)
+    handler_query = {'id': handler_id}
+    metadata = mongo.find_one(handler_query)
     return metadata
 
 
@@ -606,128 +655,6 @@ def get_latest_ver_folder(tis_model_path):
         return 0
 
     return latest_ver
-
-
-def get_default_lock_file_path(filepath):
-    """Returns the default lock file path"""
-    return os.path.splitext(filepath)[0] + "_lock.lock"
-
-
-def safe_get_file_modified_time(filepath, lock_file=None):
-    """Returns the modified time of the file"""
-    if lock_file is None:
-        lock_file = get_default_lock_file_path(filepath)
-
-    if not os.path.exists(lock_file):
-        with open(lock_file, "w", encoding="utf-8") as _:
-            pass
-
-    with FileLock(lock_file, mode=0o666):
-        return os.path.getmtime(filepath)
-
-
-def __convert_keys_to_str(data):
-    if isinstance(data, dict):
-        return {
-            str(key) if isinstance(key, int) else key: __convert_keys_to_str(value)
-            for key, value in data.items()
-        }
-    if isinstance(data, list):
-        return [__convert_keys_to_str(item) for item in data]
-    if isinstance(data, np.float64):
-        return float(data)
-    return data
-
-
-def safe_load_file(filepath, lock_file=None, attempts=3, file_type="json"):
-    """Loads the json file"""
-    assert file_type in ("json", "yaml")
-    if attempts == 0:
-        return {}
-
-    if not os.path.exists(filepath):
-        print("File trying to read doesn't exists", filepath, file=sys.stderr)
-        return {}
-
-    if lock_file is None:
-        lock_file = get_default_lock_file_path(filepath)
-
-    if not os.path.exists(lock_file):
-        with open(lock_file, "w", encoding="utf-8") as _:
-            pass
-    try:
-        with FileLock(lock_file, mode=0o666):
-            if file_type == "json":
-                with open(filepath, "r", encoding="utf-8") as f:
-                    json_data = f.read()
-                    data = orjson.loads(json_data)
-            elif file_type == "yaml":
-                with open(filepath, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f)
-            return data
-    except:
-        data = {}
-        print(f"Data not in {file_type} loadable format", filepath, file=sys.stderr)
-        with open(filepath, "r", encoding='utf-8') as f:
-            file_lines = f.readlines()
-            print("Data: \n", file_lines, file=sys.stderr)
-        if filepath.endswith("ptm_metadatas.json"):
-            ptm_source_path = f"/opt/api/shared/users/{admin_uuid}/experiments/{admin_uuid}"
-            if os.path.exists(f"{ptm_source_path}/ptm_metadatas.json"):
-                print("Copying corrupt PTM meta file", file=sys.stderr)
-                shutil.copy(f"{ptm_source_path}/ptm_metadatas.json", filepath)
-        return safe_load_file(filepath, lock_file, attempts - 1, file_type=file_type)
-
-
-def safe_dump_file(filepath, data, lock_file=None, file_type="json"):
-    """Dumps the json file"""
-    assert file_type in ("json", "yaml", "protobuf")
-    parent_folder = os.path.dirname(filepath)
-    if not os.path.exists(parent_folder):
-        print(f"Parent folder {parent_folder} doesn't exists yet", file=sys.stderr)
-        return
-    if lock_file is None:
-        lock_file = get_default_lock_file_path(filepath)
-
-    if not os.path.exists(lock_file):
-        with open(lock_file, "w", encoding="utf-8") as _:
-            pass
-
-    with FileLock(lock_file, mode=0o666):
-        tmp_file_path = filepath.replace(f".{file_type}", f"_tmp.{file_type}")
-        if file_type == "json":
-            json_data = orjson.dumps(__convert_keys_to_str(data))
-            with open(tmp_file_path, "w", encoding="utf-8") as f:
-                f.write(json_data.decode('utf-8'))
-        elif file_type == "yaml":
-            with open(tmp_file_path, "w", encoding="utf-8") as f:
-                yaml.dump(data, f, sort_keys=False)
-        elif file_type == "protobuf":
-            with open(tmp_file_path, "w", encoding='utf-8') as f:
-                f.write(data)
-        if os.path.exists(tmp_file_path):
-            os.rename(tmp_file_path, filepath)
-
-
-def safe_update_json(filepath, update_fn, lock_file=None, **kwargs):
-    """Read, update and save the json file."""
-    if lock_file is None:
-        lock_file = get_default_lock_file_path(filepath)
-
-    if not os.path.exists(lock_file):
-        with open(lock_file, "w", encoding="utf-8") as _:
-            pass
-
-    with FileLock(lock_file, mode=0o666):
-        with open(filepath, "r", encoding="utf-8") as f:
-            json_data = f.read()
-            data = orjson.loads(json_data)
-
-        data = update_fn(data, **kwargs)
-        if data is not None:
-            json_data = orjson.dumps(data)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(json_data.decode('utf-8'))
 
 
 def is_valid_uuid4(uuid_string):
@@ -754,3 +681,88 @@ def printc(*args, **kwargs):
         if key in keys:
             context_str += f"[{key}:{value}]"
     print(context_str, *args, **kwargs)
+
+
+def sanitize_handler_metadata(handler_metadata):
+    """Remove sensitive information like cloud storage credentials to return as response"""
+    return_metadata = handler_metadata.copy()
+    if "cloud_specific_details" in return_metadata.get("cloud_details", {}):
+        for key in ("access_key", "secret_key", "token"):
+            return_metadata["cloud_details"]["cloud_specific_details"].pop(key, None)
+    return_metadata.pop("client_secret", None)
+    return return_metadata
+
+
+def validate_chained_actions(actions):
+    """Returns a list of valid chained actions with parent jobs assigned"""
+    completed_tasks_master = []
+    job_mapping = []
+    for action in actions:
+        completed_tasks_itr = copy.deepcopy(completed_tasks_master)
+        found = False
+        for i in range(len(completed_tasks_itr) - 1, -1, -1):
+            parent_job = completed_tasks_itr[i]
+            chainable = action in CV_ACTION_RULES and parent_job in CV_ACTION_RULES[action]
+            if chainable:
+                job_mapping.append({'child': action, 'parent': parent_job})
+                completed_tasks_master.append(action)
+                found = True
+                break
+        if not found:
+            if action in CV_ACTION_CHAINED_ONLY:
+                # Not a valid workflow chaining
+                return []
+            completed_tasks_master.append(action)
+            job_mapping.append({'child': action})
+    return job_mapping
+
+
+def get_all_pending_jobs():
+    """Returns a list of all jobs with status of Pending, Running, or Canceling"""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    job_query = {
+        'status': {
+            '$in': ['Pending', 'Running', 'Canceling']
+        }
+    }
+    jobs = mongo_jobs.find(job_query)
+    return jobs
+
+
+def get_user(user_id, mongo_users=None):
+    """Returns user from DB"""
+    if not mongo_users:
+        mongo_users = MongoHandler("tao", "users")
+    user_query = {'id': user_id}
+    user = mongo_users.find_one(user_query)
+    return user
+
+
+def get_job(job_id):
+    """Returns job metadata from DB"""
+    mongo_jobs = MongoHandler("tao", "jobs")
+    job_query = {'id': job_id}
+    job = mongo_jobs.find_one(job_query)
+    return job
+
+
+def get_jobs_for_handler(handler_id, kind):
+    """Return job metadatas associated with handler_id"""
+    if kind[-1] == 's':
+        kind = kind[:-1]
+    mongo_jobs = MongoHandler("tao", "jobs")
+    jobs = mongo_jobs.find({f"{kind}_id": handler_id})
+    return jobs
+
+
+def get_metrics():
+    """Return metrics from DB"""
+    mongo_metrics = MongoHandler("metrics", "metrics")
+    metrics = mongo_metrics.find_one()
+    return metrics
+
+
+def set_metrics(metrics):
+    """Set metrics to DB"""
+    mongo_metrics = MongoHandler("metrics", "metrics")
+    mongo_metrics.upsert({'name': 'metrics'}, metrics)

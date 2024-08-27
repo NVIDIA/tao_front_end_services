@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """AutoML algorithm's Base Class"""
+import os
 import math
 import numpy as np
 import random
@@ -20,7 +21,6 @@ from automl.utils import fix_input_dimension
 from network_utils import network_constants
 from network_utils import automl_helper
 from handlers.utilities import get_train_spec
-from handlers.stateless_handlers import get_root
 
 
 class AutoMLAlgorithmBase:
@@ -30,12 +30,11 @@ class AutoMLAlgorithmBase:
         """AutoML algorithm Base class"""
         self.job_context = job_context
         self.root = root
-        shared_handler_root = "/".join(self.root.split("/")[0:-2])
-        self.handler_root = shared_handler_root.replace(get_root(), get_root(ngc_runner_fetch=True))
+        self.handler_root = "/".join(self.root.split("/")[0:-2])
         self.network = network
         self.parameters = parameters
         self.parent_params = {}
-        self.default_train_spec = get_train_spec(self.job_context, self.handler_root)
+        self.default_train_spec = get_train_spec(self.job_context, os.path.join(self.handler_root, "specs"))
         self.default_train_spec_flattened = {}
 
     def generate_automl_param_rec_value(self, parameter_config):

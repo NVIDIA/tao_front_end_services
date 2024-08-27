@@ -63,7 +63,7 @@ def main(args=sys.argv[1:]):
     print(f'Building wheel with version number {version_locals["__version__"]}')
 
     PACKAGE_LIST = [
-        "nvtl_cli"
+        "tao_cli"
     ]
 
     setuptools_packages = []
@@ -103,8 +103,8 @@ def main(args=sys.argv[1:]):
         zip_safe=False,
         entry_points={
             'console_scripts': [
-                'tao-client=nvtl_cli.nvtl:cli',
-                'nvtl=nvtl_cli.nvtl:cli',
+                'tao-client=tao_cli.tao:cli',
+                'tao=tao_cli.tao:cli',
             ]
         }
     )

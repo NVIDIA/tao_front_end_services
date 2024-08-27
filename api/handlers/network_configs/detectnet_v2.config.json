@@ -2,7 +2,7 @@
     "api_params": {
         "dataset_type":"object_detection",
         "actions": ["train","evaluate","prune","retrain","export","gen_trt_engine","inference"],
-        "image":"tlt-tf1",
+        "image":"TAO_TF2",
         "spec_backend":"protobuf",
         "classwise":"True",
         "actions_pipe":{
@@ -19,7 +19,7 @@
 
     "cli_params": {
         "train": {
-            "experiment_spec_file":"experiment_spec",
+            "experiment_spec_file":"experiment_spec_microservices",
             "results_dir":"output_dir",
             "verbose":"verbose",
             "key":"key",
@@ -28,7 +28,7 @@
             "enable_determinism":"from_csv"
         },
         "evaluate": {
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "model_path":"parent_model_evaluate",
             "verbose":"verbose",
             "results_dir":"output_dir",
@@ -40,7 +40,7 @@
             "batch_size":"from_csv"
         },
         "evaluate_tao_deploy": {
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "model_path":"parent_model_evaluate",
             "verbose":"verbose",
             "results_dir":"output_dir",
@@ -58,7 +58,7 @@
             "verbose":"verbose"
         },
         "retrain": {
-            "experiment_spec_file":"experiment_spec",
+            "experiment_spec_file":"experiment_spec_microservices",
             "results_dir":"output_dir",
             "verbose":"verbose",
             "gpus":"from_csv",
@@ -75,7 +75,7 @@
             "verbose":"verbose"
         },
         "inference":{
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "image_dir":"od_inference_input",
             "key":"key",
             "results_dir":"output_dir",
@@ -84,7 +84,7 @@
             "batch_size":"from_csv"
         },
         "inference_tao_deploy":{
-            "experiment_spec":"experiment_spec",
+            "experiment_spec":"experiment_spec_microservices",
             "image_dir":"od_inference_input",
             "results_dir":"output_dir",
             "model_path":"parent_model_evaluate",
@@ -131,7 +131,7 @@
 
     "automl_cli_params":{
         "experiment_spec_file":"automl_experiment_spec",
-        "results_dir":"automl_output_dir",
+        "results_dir":"output_dir",
         "key":"key",
         "use_amp": "from_csv",
         "gpus":"from_csv"

@@ -19,35 +19,36 @@ import glob
 import json
 import os
 import shutil
-import subprocess
 import sys
 import threading
 import time
 import traceback
 import uuid
 
-import yaml
+import ruamel.yaml
 from automl.utils import delete_lingering_checkpoints, wait_for_job_completion
-from handlers import ngc_handler
+from constants import (AUTOML_DISABLED_NETWORKS, NO_SPEC_ACTIONS_MODEL, TAO_NETWORKS, _DATA_SERVICES_ACTIONS,
+                       MONAI_NETWORKS, MEDICAL_AUTOML_ARCHITECT, MEDICAL_NETWORK_ARCHITECT, MEDICAL_CUSTOM_ARCHITECT, NETWORK_METRIC_MAPPING, NETWORK_CONTAINER_MAPPING)
+from dgx_controller import overwrite_job_logs_from_bcp
+from handlers.cloud_storage import create_cs_instance
+from handlers.ngc_handler import get_user_api_key, bcp_org_name, bcp_team_name, bcp_ace
 from handlers.docker_images import DOCKER_IMAGE_MAPPER, DOCKER_IMAGE_VERSION
 from handlers.infer_data_sources import DS_CONFIG_TO_FUNCTIONS
 from handlers.infer_params import CLI_CONFIG_TO_FUNCTIONS
-from handlers.ngc_handler import load_user_workspace_metadata
+from handlers.encrypt import NVVaultEncryption
+from handlers.monai.helpers import CUSTOMIZED_BUNDLE_URL_FILE, CUSTOMIZED_BUNDLE_URL_KEY, MEDICAL_SERVICE_SCRIPTS
 # TODO: force max length of characters in a line to be 120
-from handlers.stateless_handlers import (admin_uuid, get_base_experiment_path, get_base_experiment_metadata, get_handler_job_metadata,
-                                         get_handler_log_root, get_handler_metadata, get_handler_root,
-                                         safe_dump_file, safe_load_file, update_job_metadata, update_job_status, write_handler_metadata,
-                                         get_handler_spec_root, get_handler_user, get_root, get_toolkit_status, printc)
-from handlers.utilities import (_OD_NETWORKS, _TF1_NETWORKS, AUTOML_DISABLED_NETWORKS, NO_SPEC_ACTIONS_MODEL,
-                                StatusParser, archive_job_results, build_cli_command, generate_bundle_train_script, generate_cl_script,
-                                generate_dicom_segmentation_convert_script, generate_job_tar_stats, get_total_epochs,
-                                load_json_spec, process_classwise_config, read_nested_dict, read_network_config,
-                                search_for_base_experiment, validate_gpu_param_value, validate_medical_bundle_params,
-                                write_nested_dict)
+from handlers.stateless_handlers import (BACKEND, base_exp_uuid, get_base_experiment_metadata, get_handler_job_metadata,
+                                         get_handler_log_root, get_handler_metadata, get_jobs_root, get_handler_root,
+                                         get_handler_spec_root, get_toolkit_status, printc, resolve_metadata,
+                                         update_job_metadata, update_job_status, write_handler_metadata)
+from handlers.utilities import (StatusParser, build_cli_command, generate_cl_script, get_total_epochs, load_json_spec, process_classwise_config,
+                                read_nested_dict, search_for_base_experiment, get_num_gpus_from_spec, validate_monai_bundle_params,
+                                write_nested_dict, get_cloud_metadata)
+from utils import remove_key_by_flattened_string, read_network_config, find_closest_number, get_admin_api_key, safe_load_file, safe_dump_file
 from job_utils import executor as jobDriver
 from network_utils.network_constants import ptm_mapper
 from specs_utils import json_to_kitti, json_to_yaml
-from utils.utils import remove_key_by_flattened_string
 
 SPEC_BACKEND_TO_FUNCTIONS = {"protobuf": json_to_kitti.kitti, "yaml": json_to_yaml.yml}
 
@@ -94,29 +95,29 @@ class ActionPipeline:
         # Job Context - bridge between Action and Handler
         self.job_context = job_context
         # Get some handler related data
-        self.job_id = self.job_context.id
         self.network = self.job_context.network
+        self.action = self.job_context.action
         self.network_config = read_network_config(self.network)
         self.api_params = self._read_api_params()
-        self.handler_metadata = get_handler_metadata(self.job_context.user_id, self.job_context.handler_id)
-        self.handler_spec_root = get_handler_spec_root(self.job_context.user_id, self.job_context.handler_id)
-        self.handler_root = get_handler_root(self.job_context.user_id, None, self.job_context.handler_id, None, ngc_runner_fetch=True)
-        self.handler_log_root = get_handler_log_root(self.job_context.user_id, self.job_context.handler_id)
+        self.handler_kind = self.job_context.kind
+        self.handler_metadata = get_handler_metadata(self.job_context.handler_id, self.handler_kind)
+        self.workspace_id = self.handler_metadata.get("workspace")
+        self.workspace_metadata = get_handler_metadata(self.workspace_id, "workspaces")
+        self.handler_spec_root = get_handler_spec_root(self.job_context.user_id, self.job_context.org_name, self.job_context.handler_id)
+        self.handler_root = get_handler_root(self.job_context.org_name, None, self.job_context.handler_id, None)
+        self.jobs_root = get_jobs_root(self.job_context.user_id, self.job_context.org_name)
+        self.handler_log_root = get_handler_log_root(self.job_context.user_id, self.job_context.org_name, self.job_context.handler_id)
         self.handler_id = self.job_context.handler_id
         self.tao_deploy_actions = False
-        self.action_suffix = ""
-        self.parent_job_action = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_context.parent_id).get("action")
-        if self.job_context.action in ("gen_trt_engine", "trtexec") or (self.parent_job_action in ("gen_trt_engine", "trtexec") and self.network != "bpnet"):
+        self.parent_job_action = get_handler_job_metadata(self.job_context.parent_id).get("action")
+        if self.job_context.action in ("gen_trt_engine", "trtexec") or self.parent_job_action in ("gen_trt_engine", "trtexec"):
             self.tao_deploy_actions = True
-            if self.job_context.action in ("evaluate", "inference") and self.job_context.network in _TF1_NETWORKS:
-                self.action_suffix = "_tao_deploy"
         self.image = DOCKER_IMAGE_MAPPER[self.api_params.get("image", "")]
+        if self.job_context.action in _DATA_SERVICES_ACTIONS and not self.network.startswith("monai"):
+            self.image = DOCKER_IMAGE_MAPPER["TAO_DS"]
         # If current or parent action is gen_trt_engine or trtexec, then it'a a tao-deploy container action
         if self.tao_deploy_actions:
             self.image = DOCKER_IMAGE_MAPPER["tao-deploy"]
-        # Default image for dataset convert for OD networks is tlt-tf1, so override that
-        elif self.job_context.action == "convert_efficientdet_tf2":
-            self.image = DOCKER_IMAGE_MAPPER["tlt-tf2"]
         # Override version of image specific for networks
         if self.network in DOCKER_IMAGE_VERSION.keys():
             self.tao_framework_version, self.tao_model_override_version = DOCKER_IMAGE_VERSION[self.network]
@@ -130,16 +131,19 @@ class ActionPipeline:
 
         self.spec = {}
         self.config = {}
-        self.platform = None
+        self.platform = self.job_context.platform
 
         self.run_command = ""
         self.status_file = None
         self.logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
+        self.cloud_metadata = {}
+        self.cs_instance = None  # initialized in run()
         self.ngc_runner = False
-        self.workspaces_for_job = []
-        if os.getenv("NGC_RUNNER", "") == "True":
+        if BACKEND in ("BCP", "NVCF"):
             self.ngc_runner = True
-            self.workspaces_for_job = ngc_handler.get_workspaces_for_job(self.job_context.user_id, self.job_context.handler_id, self.job_context.parent_id, self.handler_metadata)
+        self.local_cluster = False
+        self.monai_env_variable = {}
+        self.num_gpu = self.job_context.specs.get("num_gpu", self.job_context.num_gpu) if self.job_context.specs else self.job_context.num_gpu
 
     def _read_api_params(self):
         """Read network config json file and return api_params key"""
@@ -157,76 +161,293 @@ class ActionPipeline:
         """Run & modify internal variables after toolkit job is done; Actions may override"""
         return
 
-    def generate_dgx_job_metadata(self, container_run_command, dgx_job_metadata, docker_env_vars):
-        """Convert run command generated into format that """
-        orgName, teamName, _, aceName = ngc_handler.get_ngc_admin_info()
-        dgx_job_metadata["user_id"] = self.job_context.user_id
-        dgx_job_metadata["orgName"] = orgName
-        dgx_job_metadata["teamName"] = teamName
-        dgx_job_metadata["command"] = container_run_command
-        dgx_job_metadata["dockerImageName"] = self.image
-        dgx_job_metadata["aceName"] = aceName
-        dgx_job_metadata["aceInstance"] = "dgxa100.80g.1.norm"
-        dgx_job_metadata["runPolicy"] = {}
-        dgx_job_metadata["runPolicy"]["preemptClass"] = "RESUMABLE"
-
-        dgx_job_metadata["resultContainerMountPoint"] = "/result"
-        if self.job_context.action in ("train", "retrain"):
-            dgx_job_metadata["aceInstance"] = "dgxa100.80g.2.norm"
-
-        workspace_mount_list = []
-        for workspace in self.workspaces_for_job:
-            workspace_dict = {}
-            workspace_dict["containerMountPoint"] = workspace['mount_path']
-            workspace_dict["id"] = workspace['id']
-            workspace_dict["mountMode"] = "RW"
-            workspace_mount_list.append(workspace_dict)
-        dgx_job_metadata["workspaceMounts"] = workspace_mount_list
-
-        dgx_job_metadata["envs"] = [{"name": "TELEMETRY_OPT_OUT", "value": os.getenv('TELEMETRY_OPT_OUT', default='no')}]
-        if docker_env_vars:
+    def decrypt_docker_env_vars(self, docker_env_vars):
+        """Decrypt NvVault encrypted values"""
+        if self.ngc_runner:
+            config_path = os.getenv("VAULT_SECRET_PATH", None)
+            encryption = NVVaultEncryption(config_path)
             for docker_env_var_key, docker_env_var_value in docker_env_vars.items():
-                dgx_job_metadata["envs"].append({"name": docker_env_var_key, "value": docker_env_var_value})
+                if encryption.check_config()[0]:
+                    docker_env_vars[docker_env_var_key] = encryption.decrypt(docker_env_var_value)
+
+    def generate_env_variables(self, job_env_variables, automl_brain_job_id=None, experiment_number=None, automl_exp_job_id=None):
+        """Generate env variables required for a job"""
+        log_callback_job_id = self.job_context.id
+        if automl_exp_job_id:
+            log_callback_job_id = automl_exp_job_id
+
+        org_name = self.job_context.org_name
+        host_base_url = os.getenv("HOSTBASEURL", "no_url")
+        if BACKEND == "local-k8s":
+            cluster_ip, cluster_port = jobDriver.get_cluster_ip()
+            if cluster_ip and cluster_port:
+                host_base_url = f"http://{cluster_ip}:{cluster_port}"
+
+        handler_kind = "experiments"
+        if (not self.handler_metadata.get("train_datasets", [])) and self.job_context.network not in ["auto_label", "image"] + MEDICAL_AUTOML_ARCHITECT + MEDICAL_NETWORK_ARCHITECT:
+            handler_kind = "datasets"
+
+        status_url = f"{host_base_url}/api/v1/orgs/{org_name}/{handler_kind}/{self.handler_id}/jobs/{self.job_context.id}"
+        if automl_brain_job_id:
+            status_url = f"{host_base_url}/api/v1/orgs/{org_name}/{handler_kind}/{self.handler_id}/jobs/{automl_brain_job_id}"
+            if experiment_number:
+                job_env_variables["AUTOML_EXPERIMENT_NUMBER"] = experiment_number
+
+        job_env_variables["TELEMETRY_OPT_OUT"] = os.getenv('TELEMETRY_OPT_OUT', default='no')
+        job_env_variables["CLOUD_BASED"] = "True"
+        user_api_key, ngc_cookie = get_user_api_key(self.job_context.user_id)
+        job_env_variables["TAO_USER_KEY"] = user_api_key
+        job_env_variables["TAO_COOKIE_SET"] = str(ngc_cookie)
+        job_env_variables["TAO_ADMIN_KEY"] = get_admin_api_key()
+        job_env_variables["TAO_API_SERVER"] = host_base_url
+        job_env_variables["TAO_API_JOB_ID"] = log_callback_job_id
+        job_env_variables["TAO_LOGGING_SERVER_URL"] = status_url
+        job_env_variables["USE_NGC_STAGING"] = "True"
+        job_env_variables["DEPLOYMENT_MODE"] = os.getenv("DEPLOYMENT_MODE", "PROD")
+        if job_env_variables["DEPLOYMENT_MODE"] == "PROD":
+            job_env_variables["USE_NGC_STAGING"] = "False"
+
+    def generate_nv_job_metadata(self, container_run_command, nv_job_metadata, job_env_variables):
+        """Convert run command generated into format that """
+        nv_job_metadata["orgName"] = bcp_org_name
+        nv_job_metadata["dockerImageName"] = self.image
+        if BACKEND == "BCP":
+            nv_job_metadata["user_id"] = self.job_context.user_id
+            nv_job_metadata["teamName"] = bcp_team_name
+            nv_job_metadata["command"] = container_run_command
+            nv_job_metadata["aceName"] = bcp_ace
+            nv_job_metadata["aceInstance"] = "dgxa100.80g.1.norm"
+            nv_job_metadata["runPolicy"] = {}
+            nv_job_metadata["runPolicy"]["preemptClass"] = "RESUMABLE"
+
+            nv_job_metadata["resultContainerMountPoint"] = "/result"
+            if self.job_context.action in ("train", "retrain") or (self.job_context.network == "auto_label" and self.job_context.action == "generate"):
+                # For backward compatibility, make sure it is using "dgxa100.80g.2.norm" if num_gpu is not explicitly set.
+                dgx_type = str(find_closest_number(self.num_gpu, [2, 4, 8])) if self.num_gpu != 1 else "1"
+                nv_job_metadata["aceInstance"] = f"dgxa100.80g.{dgx_type}.norm"
+
+            nv_job_metadata["envs"] = []
+            for key, value in job_env_variables.items():
+                nv_job_metadata["envs"].append({"name": key, "value": value})
+
+        elif BACKEND == "NVCF":
+            nv_job_metadata["action"] = self.action
+            nv_job_metadata["workspace_ids"] = list(self.workspace_ids)
+            nv_job_metadata["deployment_string"] = os.getenv(f'FUNCTION_{NETWORK_CONTAINER_MAPPING[self.network]}')
+            if self.tao_deploy_actions:
+                nv_job_metadata["deployment_string"] = os.getenv('FUNCTION_TAO_DEPLOY')
+            nv_job_metadata["network"] = self.network
+            for key, value in job_env_variables.items():
+                nv_job_metadata[key] = value
+
+    def get_handler_cloud_details(self):
+        """Gather cloud details from various handlers associated for the job"""
+        self.workspace_ids = []
+        workspace_cache = {}
+
+        def process_metadata(data_type, dataset_id=None, metadata=None, workspace_cache={}):
+            """Process metadata for datasets, workspaces, etc."""
+            if not metadata:
+                metadata = resolve_metadata(data_type, dataset_id)
+            else:
+                metadata = copy.deepcopy(metadata)
+            workspace_id = metadata.get("workspace", "")
+            if not workspace_id:
+                return
+            self.workspace_ids.append(workspace_id)
+
+        if self.handler_metadata.get("train_datasets", []):
+            for train_ds in self.handler_metadata.get("train_datasets", []):
+                process_metadata("dataset", dataset_id=train_ds, workspace_cache={})
+        elif self.job_context.network not in ["auto_label", "image"] + MEDICAL_AUTOML_ARCHITECT + MEDICAL_NETWORK_ARCHITECT:
+            process_metadata("dataset", metadata=self.handler_metadata, workspace_cache=workspace_cache)
+
+        eval_ds = self.handler_metadata.get("eval_dataset", None)
+        if eval_ds:
+            process_metadata("dataset", dataset_id=eval_ds, workspace_cache=workspace_cache)
+
+        infer_ds = self.handler_metadata.get("inference_dataset", None)
+        if infer_ds:
+            process_metadata("dataset", dataset_id=infer_ds, workspace_cache=workspace_cache)
+
+        experiment_metadata = copy.deepcopy(self.handler_metadata)
+        exp_workspace_id = experiment_metadata.get("workspace")
+        self.workspace_ids.append(exp_workspace_id)
+        if self.network not in TAO_NETWORKS or (self.network in TAO_NETWORKS and BACKEND == "local-k8s"):
+            get_cloud_metadata(self.workspace_ids, self.cloud_metadata)
 
     def handle_multiple_ptm_fields(self):
         """Remove one of end-end or backbone related PTM field based on the Handler metadata info"""
-        if self.handler_metadata.get("is_ptm_backbone"):
-            parameter_to_remove = ptm_mapper.get("end_to_end", {}).get(self.network)  # if ptm is a backbone remove end_to_end field from config and spec
-        else:
-            parameter_to_remove = ptm_mapper.get("backbone", {}).get(self.network)  # if ptm is not a backbone remove it field from config and spec
-        if parameter_to_remove:
-            remove_key_by_flattened_string(self.spec, parameter_to_remove)
-            remove_key_by_flattened_string(self.config, parameter_to_remove)
+        for base_experiment_id in self.handler_metadata.get("base_experiment", []):
+            base_experiment_metadata = get_base_experiment_metadata(base_experiment_id)
+            if base_experiment_metadata.get("base_experiment_metadata", {}).get("is_backbone"):
+                parameter_to_remove = ptm_mapper.get("end_to_end", {}).get(self.network)  # if ptm is a backbone remove end_to_end field from config and spec
+            else:
+                parameter_to_remove = ptm_mapper.get("backbone", {}).get(self.network)  # if ptm is not a backbone remove it field from config and spec
+            if parameter_to_remove:
+                remove_key_by_flattened_string(self.spec, parameter_to_remove)
+                remove_key_by_flattened_string(self.config, parameter_to_remove)
 
     def detailed_print(self, *args, **kwargs):
         """Prints the details of the job to the console"""
         printc(*args, context=vars(self.job_context), **kwargs)
 
+    def create_microservice_action_job(self, job_env_variables):
+        print("Creating microservices job_action ms pod", file=sys.stderr)
+        ngc_api_key, _ = get_user_api_key(self.job_context.user_id)
+        response = jobDriver.create_microservice_and_send_request(api_endpoint="post_action",
+                                                                  network=self.network,
+                                                                  action=self.action,
+                                                                  ngc_api_key=ngc_api_key,
+                                                                  cloud_metadata=self.cloud_metadata,
+                                                                  specs=self.spec,
+                                                                  microservice_pod_id=self.job_name,
+                                                                  tao_api_admin_key=job_env_variables["TAO_ADMIN_KEY"],
+                                                                  tao_api_base_url=job_env_variables["TAO_API_SERVER"],
+                                                                  tao_api_status_callback_url=job_env_variables["TAO_LOGGING_SERVER_URL"],
+                                                                  tao_api_ui_cookie=job_env_variables["TAO_COOKIE_SET"],
+                                                                  use_ngc_staging=job_env_variables["USE_NGC_STAGING"],
+                                                                  automl_experiment_number=job_env_variables.get("AUTOML_EXPERIMENT_NUMBER", "0"),
+                                                                  num_gpu=self.num_gpu,
+                                                                  microservice_container=self.image,
+                                                                  org_name=self.job_context.org_name,
+                                                                  handler_id=self.handler_id,
+                                                                  handler_kind=self.handler_kind)
+        if not (response and response.ok):
+            jobDriver.delete(self.job_name, use_ngc=self.ngc_runner)
+            raise ValueError(f"Not able to submit a microservice job {response}, {response.text}")
+
+    def monitor_job(self):
+        """Monitors the job status and updates job metadata"""
+        if self.network in MONAI_NETWORKS:
+            _, _, outdir = CLI_CONFIG_TO_FUNCTIONS["monai_output_dir"](self.job_context, self.handler_metadata)
+            outdir = outdir.rstrip(os.path.sep)
+        else:
+            _, _, outdir = self.generate_run_command()
+        if not outdir:
+            outdir = CLI_CONFIG_TO_FUNCTIONS["output_dir"](self.job_context, self.handler_metadata)
+
+        status_parser = StatusParser(str(self.status_file), self.job_context.network, outdir)
+
+        total_epochs = 1
+        if self.job_context.action in ['train', 'retrain']:
+            total_epochs = get_total_epochs(self.job_context, self.handler_spec_root)
+
+        metric = self.handler_metadata.get("metric", "")
+        if not metric:
+            metric = NETWORK_METRIC_MAPPING.get(self.network, "loss")
+
+        k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
+
+        # Delete job if is canceled/paused during pod creation
+        metadata_status = get_handler_job_metadata(self.job_name).get("status", "Error")
+        if metadata_status in ("Canceling", "Canceled", "Pausing", "Paused"):
+            self.detailed_print(f"Terminating job {self.job_name}", file=sys.stderr)
+            jobDriver.delete(self.job_name, use_ngc=self.ngc_runner)
+
+        # Monitor job status
+        while k8s_status in ["Done", "Error", "Running", "Pending"]:
+            # If Done, try running self.post_run()
+            metadata_status = get_handler_job_metadata(self.job_name).get("status", "Error")
+            if metadata_status in ("Canceled", "Paused") and k8s_status == "Running":
+                self.detailed_print(f"Terminating job {self.job_name}", file=sys.stderr)
+                jobDriver.delete(self.job_name, use_ngc=self.ngc_runner)
+            if k8s_status == "Done":
+                update_job_status(self.handler_id, self.job_name, status="Running", kind=self.handler_kind)
+                # Retrieve status one last time!
+                new_results = status_parser.update_results(total_epochs)
+                update_job_metadata(self.handler_id, self.job_name, metadata_key="result", data=new_results, kind=self.handler_kind)
+                try:
+                    self.detailed_print("Post running", file=sys.stderr)
+                    # If post run is done, make it done
+                    self.post_run()
+                    if self.job_context.action in ['train', 'retrain']:
+                        _, best_checkpoint_epoch_number, latest_checkpoint_epoch_number = status_parser.read_metric(results=new_results, metric=metric, brain_epoch_number=total_epochs)
+                        self.handler_metadata["checkpoint_epoch_number"][f"best_model_{self.job_name}"] = best_checkpoint_epoch_number
+                        self.handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.job_name}"] = latest_checkpoint_epoch_number
+                        write_handler_metadata(self.handler_id, self.handler_metadata, self.handler_kind)
+                    if not os.path.exists(f"{self.jobs_root}/{self.job_name}"):
+                        os.makedirs(f"{self.jobs_root}/{self.job_name}")
+                    if BACKEND == "BCP" and self.network in TAO_NETWORKS:
+                        overwrite_job_logs_from_bcp(self.logfile, self.job_name)
+                    update_job_status(self.handler_id, self.job_name, status="Done", kind=self.handler_kind)
+                    break
+                except:
+                    # If post run fails, call it Error
+                    self.detailed_print(traceback.format_exc(), file=sys.stderr)
+                    update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+                    break
+            # If running in K8s, update results to job_context
+            elif k8s_status == "Running":
+                update_job_status(self.handler_id, self.job_name, status="Running", kind=self.handler_kind)
+                # Update results
+                new_results = status_parser.update_results(total_epochs)
+                update_job_metadata(self.handler_id, self.job_name, metadata_key="result", data=new_results, kind=self.handler_kind)
+
+            # Pending is if we have queueing systems down the road
+            elif k8s_status == "Pending":
+                k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
+                continue
+
+            # If the job never submitted or errored out!
+            else:
+                update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+                break
+            # Poll every 30 seconds
+            time.sleep(30)
+
+            k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
+
+        metadata_status = get_handler_job_metadata(self.job_name).get("status", "Error")
+
+        toolkit_status = get_toolkit_status(self.job_name)
+        self.detailed_print(f"Toolkit status for {self.job_name} is {toolkit_status}", file=sys.stderr)
+        if metadata_status not in ("Canceled", "Canceling", "Paused", "Pausing") and toolkit_status != "SUCCESS" and self.job_context.action != "trtexec":
+            update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+            metadata_status = "Error"
+
+        self.detailed_print(f"Job Done: {self.job_name} Final status: {metadata_status}", file=sys.stderr)
+        if BACKEND == "BCP" and self.network in TAO_NETWORKS:
+            overwrite_job_logs_from_bcp(self.logfile, self.job_name)
+        with open(self.logfile, "a", encoding='utf-8') as f:
+            f.write(f"\n{metadata_status} EOF\n")
+        if self.ngc_runner or (self.network in TAO_NETWORKS and BACKEND == "local-k8s"):
+            if metadata_status not in ("Canceled", "Canceling", "Paused", "Pausing"):
+                jobDriver.delete(self.job_name)
+
     def run(self):
-        """Calls necessary setup functions; calls job creation; monitors and update status of the job"""
+        """Calls necessary setup functions and calls job creation"""
         # Set up
         self.thread = threading.current_thread()
         try:
             # Generate config
             self.spec, self.config = self.generate_config()
+            self.cs_instance, _ = create_cs_instance(self.workspace_metadata)
             self.handle_multiple_ptm_fields()
+            # Populate the cloud metadata for the job
+            self.get_handler_cloud_details()
             # Generate run command
             self.run_command, self.status_file, outdir = self.generate_run_command()
-            # Pipe logs into logfile: <output_dir>/logs_from_toolkit.txt
+            if self.network in TAO_NETWORKS and self.spec:
+                self.num_gpu = get_num_gpus_from_spec(self.spec, self.job_context.action, default=self.num_gpu)
             if not outdir:
-                outdir = CLI_CONFIG_TO_FUNCTIONS["output_dir"](self.job_context, self.handler_metadata)
+                outdir = f"/results/{self.job_name}"
             # Pipe stdout and stderr to logfile
-            self.run_command += f" | tee {self.logfile} 2>&1"
+            self.run_command += f" 2>&1 | tee /{self.job_name}.txt"
             # After command runs, make sure subdirs permission allows anyone to enter and delete
             self.run_command += f"; find {outdir} -type d | xargs chmod 777"
             # After command runs, make sure artifact files permission allows anyone to delete
-            self.run_command += f"; find {outdir} -type f | xargs chmod 666"
+            if self.local_cluster:
+                outdir = os.path.normpath(outdir) + os.sep  # remove double trailing slashes for filepath
+                # Do not change permission for status file in local
+                self.run_command += f"; find {outdir} -type f ! -path '{outdir}status.json' | xargs chmod 666"
+            else:
+                self.run_command += f"; find {outdir} -type f | xargs chmod 666"
             # Optionally, pipe self.run_command into a log file
             self.detailed_print(self.run_command, self.status_file, file=sys.stderr)
-            # Set up StatusParser
-            status_parser = StatusParser(str(self.status_file), self.job_context.network, outdir)
             self.detailed_print(self.image, file=sys.stderr)
 
+            nv_job_metadata = {}
             # Convert self.spec to a backend and post it into a <self.handler_spec_root><job_id>.txt file
             if self.spec:
                 file_type = self.api_params["spec_backend"]
@@ -241,104 +462,61 @@ class ActionPipeline:
                 # store as kitti
                 action_spec_path_kitti = CLI_CONFIG_TO_FUNCTIONS["experiment_spec"](self.job_context, self.handler_metadata)
                 safe_dump_file(action_spec_path_kitti, kitti_out, file_type=file_type)
+                nv_job_metadata["spec_file_path"] = action_spec_path_kitti
+
+                # Transfer spec file to cloud
+                self.cs_instance.upload_file(action_spec_path_kitti, f"/temp/{self.job_name}.yaml")
 
             # Submit to K8s
             # Platform is None, but might be updated in self.generate_config() or self.generate_run_command()
             # If platform is indeed None, jobDriver.create would take care of it.
-            spec = self.job_context.specs
-            num_gpu = spec.get("num_gpu", -1) if spec else -1
-            if self.job_context.action not in ['train', 'retrain', 'finetune']:
-                num_gpu = 1
             docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
-            dgx_job_metadata = {}
+            self.decrypt_docker_env_vars(docker_env_vars)
+            job_env_variables = copy.deepcopy(docker_env_vars)
+            # Add environment variables from monai.
+            self.generate_env_variables(job_env_variables)
+            if self.monai_env_variable:
+                job_env_variables.update(self.monai_env_variable)
+
+            # The monai local jobs like training for cl jobs are designed to run on cluster local GPUs.
             if self.ngc_runner:
-                self.generate_dgx_job_metadata(self.run_command, dgx_job_metadata, docker_env_vars)
+                self.generate_nv_job_metadata(self.run_command, nv_job_metadata, job_env_variables)
             else:
-                dgx_job_metadata = None
-            metric = self.handler_metadata.get("metric", "")
-            if not metric:
-                metric = "loss"
-            jobDriver.create(self.job_context.user_id, self.job_name, self.image, self.run_command, num_gpu=num_gpu, accelerator=self.platform, docker_env_vars=docker_env_vars, dgx_job_metadata=dgx_job_metadata)
+                nv_job_metadata = None
+
+            if self.network in TAO_NETWORKS and BACKEND == "local-k8s":
+                self.create_microservice_action_job(job_env_variables)
+            else:
+                jobDriver.create(
+                    self.job_context.user_id,
+                    self.job_context.org_name,
+                    self.job_name,
+                    self.image,
+                    self.run_command,
+                    num_gpu=self.num_gpu,
+                    accelerator=self.platform,
+                    docker_env_vars=job_env_variables,
+                    nv_job_metadata=nv_job_metadata,
+                    local_cluster=self.local_cluster,
+                )
             self.detailed_print("Job created", self.job_name, file=sys.stderr)
-            k8s_status = jobDriver.status(self.job_name, use_ngc=self.ngc_runner)
-            while k8s_status in ["Done", "Error", "Running", "Pending"]:
-                # If Done, try running self.post_run()
-                metadata_status = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_id).get("status", "Error")
-                if metadata_status == "Canceled" and k8s_status == "Running":
-                    self.detailed_print(f"Canceling job {self.job_id}", file=sys.stderr)
-                    jobDriver.delete(self.job_id, use_ngc=self.ngc_runner)
-                if k8s_status == "Done":
-                    update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Running")
-                    # Retrieve status one last time!
-                    new_results = status_parser.update_results()
-                    update_job_metadata(self.job_context.user_id, self.handler_id, self.job_id, metadata_key="result", data=new_results)
-                    try:
-                        self.detailed_print("Post running", file=sys.stderr)
-                        # If post run is done, make it done
-                        self.post_run()
-                        if self.job_context.action in ['train', 'retrain']:
-                            epoch_value = get_total_epochs(self.job_context, self.handler_root)
-                            _, best_checkpoint_epoch_number, latest_checkpoint_epoch_number = status_parser.read_metric(results=new_results, metric=metric, brain_epoch_number=epoch_value)
-                            self.handler_metadata["checkpoint_epoch_number"][f"best_model_{self.job_name}"] = best_checkpoint_epoch_number
-                            self.handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.job_name}"] = latest_checkpoint_epoch_number
-                            write_handler_metadata(self.job_context.user_id, self.handler_id, self.handler_metadata)
-                        shutil.copy(self.logfile, f"{self.handler_root}/{self.job_id}/logs_from_toolkit.txt")
-                        archive_job_results(self.handler_root, self.job_id)
-                        generate_job_tar_stats(self.job_context.user_id, self.handler_id, self.job_id, self.handler_root)
-                        update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Done")
-                        break
-                    except:
-                        # If post run fails, call it Error
-                        self.detailed_print(traceback.format_exc(), file=sys.stderr)
-                        update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
-                        break
-                # If running in K8s, update results to job_context
-                elif k8s_status == "Running":
-                    update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Running")
-                    # Update results
-                    new_results = status_parser.update_results()
-                    update_job_metadata(self.job_context.user_id, self.handler_id, self.job_id, metadata_key="result", data=new_results)
-
-                # Pending is if we have queueing systems down the road
-                elif k8s_status == "Pending":
-                    k8s_status = jobDriver.status(self.job_name, use_ngc=self.ngc_runner)
-                    continue
-
-                # If the job never submitted or errored out!
-                else:
-                    update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
-                    break
-                # Poll every 30 seconds
-                time.sleep(30)
-
-                k8s_status = jobDriver.status(self.job_name, use_ngc=self.ngc_runner)
-            metadata_status = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_id).get("status", "Error")
-
-            toolkit_status = get_toolkit_status(self.job_context.user_id, self.handler_id, self.job_id)
-            self.detailed_print(f"Toolkit status for {self.job_id} is {toolkit_status}", file=sys.stderr)
-            if metadata_status != "Canceled" and toolkit_status != "SUCCESS" and self.job_context.action != "trtexec":
-                update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
-
-            self.detailed_print(f"Job Done: {self.job_name} Final status: {metadata_status}", file=sys.stderr)
-            with open(self.logfile, "a", encoding='utf-8') as f:
-                f.write(f"\n{metadata_status} EOF\n")
-            if self.ngc_runner:
-                jobDriver.delete(self.job_name)
+            self.monitor_job()
             return
 
         except Exception as e:
             # Something went wrong inside...
             self.detailed_print(traceback.format_exc(), file=sys.stderr)
             self.detailed_print(f"Job {self.job_name} did not start", file=sys.stderr)
+            if BACKEND == "BCP" and self.network in TAO_NETWORKS:
+                overwrite_job_logs_from_bcp(self.logfile, self.job_name)
             with open(self.logfile, "a", encoding='utf-8') as f:
                 f.write(f"Error log: \n {e}")
                 f.write("\nError EOF\n")
-            shutil.copy(self.logfile, f"{self.handler_root}/{self.job_id}/logs_from_toolkit.txt")
-            update_job_status(self.job_context.user_id, self.handler_id, self.job_id, status="Error")
+            update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
             result_dict = {"detailed_status": {"message": "Error due to unmet dependencies"}}
             if isinstance(e, TimeoutError):
                 result_dict = {"detailed_status": {"message": "Data downloading from cloud storage failed."}}
-            update_job_metadata(self.job_context.user_id, self.handler_id, self.job_id, metadata_key="result", data=result_dict)
+            update_job_metadata(self.handler_id, self.job_name, metadata_key="result", data=result_dict, kind=self.handler_kind)
             return
 
 
@@ -354,22 +532,24 @@ class CLIPipeline(ActionPipeline):
         # Handle anomalies in network action names
         if self.action == "retrain":
             self.action = "train"
-        if self.action == "kmeans":
-            self.network = "yolo_v3"
-        if self.action == "augment":
-            self.network = ""
-        if self.network == "instance_segmentation" and self.action == "convert":
-            self.network = "mask_rcnn"
-            self.action = "dataset_convert"
         if self.network == "object_detection" and self.action == "convert":
             self.network = "detectnet_v2"
             self.action = "dataset_convert"
         if self.network == "object_detection" and "efficientdet" in self.action:
             self.network = self.action.replace("convert_", "")
             self.action = "dataset_convert"
-        if self.network == "object_detection" and self.action == "convert_and_index":
-            self.network = "ssd"
-            self.action = "dataset_convert"
+        if self.network == "object_detection":
+            if self.action == "annotation_format_convert":
+                self.network = "annotations"
+                self.action = "convert"
+            if self.action == "auto_labeling":
+                self.network = "auto_label"
+                self.action = "generate"
+            if self.action == "augment":
+                self.network = "augmentation"
+                self.action = "generate"
+            if self.action in ("analyze", "validate"):
+                self.network = "analytics"
 
     def generate_config(self):
         """Generate config dictionary"""
@@ -384,8 +564,8 @@ class CLIPipeline(ActionPipeline):
         network = self.job_context.network
         # Get CLI params from config json
         network_config = read_network_config(network)
-        if action in network_config["cli_params"].keys():
-            for field_name, inference_fn in network_config["cli_params"][f"{action}{self.action_suffix}"].items():
+        if action in network_config.get("cli_params", {}).keys():
+            for field_name, inference_fn in network_config["cli_params"][action].items():
                 field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
                 if field_value:
                     config[field_name] = field_value
@@ -393,50 +573,17 @@ class CLIPipeline(ActionPipeline):
 
     def generate_run_command(self):
         """Generate run command"""
-        overriden_output_dir = None
         if self.action == "dataset_convert":
-            if self.network not in ("bpnet", "efficientdet_tf2", "fpenet", "ocrnet"):
+            if self.network not in ("efficientdet_tf2", "ocrnet", "pointpillars"):
                 self.config["results_dir"] = CLI_CONFIG_TO_FUNCTIONS["output_dir"](self.job_context, self.handler_metadata)
-            if self.network in ("efficientdet_tf1", "mask_rcnn"):
-                self.config["output_dir"] = os.path.join(self.handler_root, "tfrecords")
-                self.config["image_dir"] = os.path.join(self.handler_root, self.spec["dataset_convert"]["image_dir"])
-                self.config["annotations_file"] = os.path.join(self.handler_root, self.spec["dataset_convert"]["annotations_file"])
-                self.config["num_shards"] = self.spec["dataset_convert"]["num_shards"]
-                self.config["tag"] = self.spec["dataset_convert"]["tag"]
-                if self.network == "mask_rcnn":
-                    self.config["include_masks"] = True
-            elif self.network == "bpnet":
-                if self.config["mode"] == "train":
-                    self.config["output_filename"] = os.path.join(self.handler_root, "train")
-                elif self.config["mode"] == "test":
-                    self.config["output_filename"] = os.path.join(self.handler_root, "val")
-                self.config["generate_masks"] = True
-            elif self.network == "efficientdet_tf2":
-                self.config["experiment_spec"] = CLI_CONFIG_TO_FUNCTIONS["experiment_spec"](self.job_context, self.handler_metadata)
-            elif self.network in _OD_NETWORKS:
-                self.config["output_filename"] = os.path.join(self.handler_root, "tfrecords/tfrecords")
-                self.config["verbose"] = True
-                self.config["dataset_export_spec"] = CLI_CONFIG_TO_FUNCTIONS["experiment_spec"](self.job_context, self.handler_metadata)
 
-        if self.action == "inference":
-            if self.network == "bpnet":
-                self.config["dump_visualizations"] = True
-
-        params_to_cli = build_cli_command(self.config, self.spec)
+        params_to_cli = build_cli_command(self.config)
         run_command = f"{self.network} {self.action} {params_to_cli}"
         if self.action == "trtexec":
             run_command = f"{self.action} {params_to_cli}"
 
-        status_file = os.path.join(self.handler_root, self.job_name, "status.json")
-        if self.action == "dataset_convert" and self.network == "ocrnet":
-            ds = self.handler_metadata.get("id")
-            root = get_handler_root(self.job_context.user_id, "datasets", ds, None, ngc_runner_fetch=True)
-            sub_folder = "train"
-            if "test" in os.listdir(root):
-                sub_folder = "test"
-            status_file = f"{root}/{sub_folder}/lmdb/status.json"
-            overriden_output_dir = os.path.dirname(status_file)
-        return run_command, status_file, overriden_output_dir
+        status_file = os.path.join(self.jobs_root, self.job_name, "status.json")
+        return run_command, status_file, None
 
 
 # Specs are modified as well => Train, Evaluate, Retrain Actions
@@ -454,8 +601,8 @@ class TrainVal(CLIPipeline):
         # Infer CLI params
         config = {}
         network_config = read_network_config(network)
-        if action in network_config["cli_params"].keys():
-            for field_name, inference_fn in network_config["cli_params"][f"{action}{self.action_suffix}"].items():
+        if action in network_config.get("cli_params", {}).keys():
+            for field_name, inference_fn in network_config["cli_params"][action].items():
                 field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
                 if field_value:
                     config[field_name] = field_value
@@ -468,10 +615,11 @@ class TrainVal(CLIPipeline):
                 if spec_json_path:
                     spec_json_path = spec_json_path[0]
         spec = load_json_spec(spec_json_path)
-        if "experiment_spec_file" in network_config["cli_params"][f"{action}{self.action_suffix}"].keys() and network_config["cli_params"][f"{action}{self.action_suffix}"]["experiment_spec_file"] == "parent_spec_copied":
-            spec_path = config["experiment_spec_file"]
+        if "cli_params" in network_config and action in network_config["cli_params"] and "experiment_spec_file" in network_config["cli_params"][action].keys() and network_config["cli_params"][action]["experiment_spec_file"] == "parent_spec_copied":
+            spec_path = CLI_CONFIG_TO_FUNCTIONS["experiment_spec"](self.job_context, self.handler_metadata)
             with open(spec_path, "r", encoding='utf-8') as spec_file:
-                parent_spec = yaml.safe_load(spec_file)
+                yaml = ruamel.yaml.YAML(typ='safe')
+                parent_spec = yaml.load(spec_file)
             if action in parent_spec.keys() and action in spec.keys():
                 parent_spec[action] = spec[action]
             if "dataset" in parent_spec.keys() and "dataset" in spec.keys():
@@ -484,20 +632,20 @@ class TrainVal(CLIPipeline):
                 field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
                 if field_value:
                     write_nested_dict(spec, field_name, field_value)
-        validate_gpu_param_value(spec)
 
         # Move CLI params from spec to config
         spec_keys_all = copy.deepcopy(list(spec.keys()))  # Since we will be popping the value out, spec would change @ each iteration
-        for field_name in spec_keys_all:
-            cnd1 = field_name in network_config["cli_params"][action].keys()
-            cnd2 = network_config["cli_params"][f"{action}{self.action_suffix}"].get(field_name, None) == "from_csv"
-            cnd3 = type(spec[field_name]) in [str, float, int, bool]
-            if cnd1 and cnd2 and cnd3:
-                config[field_name] = spec.pop(field_name)
+        if "cli_params" in network_config and action in network_config["cli_params"]:
+            for field_name in spec_keys_all:
+                cnd1 = field_name in network_config["cli_params"][action].keys()
+                cnd2 = network_config["cli_params"][action].get(field_name, None) == "from_csv"
+                cnd3 = type(spec[field_name]) in [str, float, int, bool]
+                if cnd1 and cnd2 and cnd3:
+                    config[field_name] = spec.pop(field_name)
         self.detailed_print("Loaded specs", file=sys.stderr)
 
         # Infer dataset config
-        spec = DS_CONFIG_TO_FUNCTIONS[network](spec, self.job_context, self.handler_metadata)
+        spec = DS_CONFIG_TO_FUNCTIONS[self.network](spec, self.job_context, self.handler_metadata)
         self.detailed_print("Loaded dataset", file=sys.stderr)
 
         # Add classwise config
@@ -509,166 +657,22 @@ class TrainVal(CLIPipeline):
 
     def post_run(self):
         """Carry's out functions after the job is executed"""
-        # If efficientdet_tf1 copy pruned model so that evaluate can access via parent relation
+        # copy pruned model so that evaluate can access via parent relation
         action = self.job_context.action
-        if self.network in ("efficientdet_tf1", "efficientdet_tf2", "classification_tf2", "ocdnet") and action == "retrain":
+        if self.network in ("efficientdet_tf2", "classification_tf2", "ocdnet", "ocrnet") and action == "retrain":
             inference_fn = "parent_model"
             pruned_model_path = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
+            bucket_name = pruned_model_path.split("//")[1].split("/")[0]
+            pruned_model_path = pruned_model_path[pruned_model_path.find(bucket_name) + len(bucket_name):]
             _, file_extension = os.path.splitext(pruned_model_path)
-            self.detailed_print(f"Copying pruned model {pruned_model_path} after retrain to {self.handler_root}/{self.job_id}/pruned_model{file_extension}\n", file=sys.stderr)
-            os.system(f"cp {pruned_model_path} {self.handler_root}/{self.job_id}/pruned_model{file_extension}")
-
-
-class ODConvert(CLIPipeline):
-    """Class for Object detection networks which requires tfrecords conversion"""
-
-    # def __init__(self,job_context):
-    #     super().__init__(job_context)
-
-    def generate_config(self):
-        """Modify the spec parameters necessary for object detection convert and return the modified dictionary"""
-        # Read json
-        spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
-        spec = load_json_spec(spec_json_path)
-        config = {}
-
-        if self.network == "efficientdet_tf2":
-            assert self.handler_metadata.get("format") == "coco"
-            if spec.get("dataset_convert") is None:
-                spec["dataset_convert"] = {}
-            spec["dataset_convert"]["image_dir"] = os.path.join(self.handler_root, "images")
-            spec["dataset_convert"]["annotations_file"] = os.path.join(self.handler_root, "annotations.json")
-            spec["dataset_convert"]["results_dir"] = CLI_CONFIG_TO_FUNCTIONS["output_dir"](self.job_context, self.handler_metadata)
-
-        # We don’t pass in the spec file to dataset convert process
-        # to efficientdet_tf1/mask-rcnn, hence we need to set the configs here.
-        # TODO: Have a common theme for all networks
-        elif self.network not in ("efficientdet_tf1", "mask_rcnn"):
-            assert self.handler_metadata.get("format") == "kitti"
-            # Add some parameters to spec
-            if spec.get("kitti_config") is None:
-                spec["kitti_config"] = {}
-            spec["kitti_config"]["image_dir_name"] = "images"
-            spec["kitti_config"]["label_dir_name"] = "labels"
-            spec["kitti_config"]["root_directory_path"] = self.handler_root + "/"
-            spec["image_directory_path"] = self.handler_root + "/"
-            if spec["kitti_config"].get("kitti_sequence_to_frames_file"):
-                lname = spec["kitti_config"].get("kitti_sequence_to_frames_file")
-                fullname = os.path.join(self.handler_root, lname)
-                if os.path.exists(fullname):
-                    spec["kitti_config"]["kitti_sequence_to_frames_file"] = fullname
-        return spec, config
-
-    def post_run(self):
-        """Carry's out functions after the job is executed"""
-        if self.network not in ("efficientdet_tf1", "mask_rcnn"):
-            # Get classes information into a file
-            categorical = get_handler_job_metadata(self.job_context.user_id, self.handler_id, self.job_id).get("result").get("categorical", [])
-            classes = ["car", "person"]
-            if len(categorical) > 0:
-                cwv = categorical[0]["category_wise_values"]
-                classes = [cat_val_dict["category"] for cat_val_dict in cwv]
-            with open(os.path.join(self.handler_root, "classes.json"), "w", encoding='utf-8') as f:
-                f.write(json.dumps(classes))
-            # Remove warning file(s) from tfrecords directory
-            tfwarning_path = os.path.join(self.handler_root, "tfrecords", "tfrecords_warning.json")
-            if os.path.exists(tfwarning_path):
-                os.remove(tfwarning_path)
-            tfwarning_path_idx = os.path.join(self.handler_root, "tfrecords", "idx-tfrecords_warning.json")
-            if os.path.exists(tfwarning_path_idx):
-                os.remove(tfwarning_path_idx)
-
-
-class UNETDatasetConvert(CLIPipeline):
-    """Class for Unet's dataset tfrecords conversion"""
-
-    def generate_config(self):
-        """Modify the spec parameters necessary for object detection convert and return the modified dictionary"""
-        spec_json_path = os.path.join(self.handler_spec_root, "convert.json")
-        if os.path.exists(spec_json_path):
-            spec = load_json_spec(spec_json_path)
-        else:
-            spec = {}
-
-        config = {"coco_file": CLI_CONFIG_TO_FUNCTIONS["od_annotations"](self.job_context, self.handler_metadata),
-                  "results_dir": os.path.join(self.handler_root, "masks")}
-        if spec.get("num_files"):
-            config["num_files"] = spec.get("num_files")
-
-        return spec, config
-
-    def generate_run_command(self):
-        """Generate run command"""
-        network = "unet"
-        action = "dataset_convert"
-        params_to_cli = build_cli_command(self.config)
-        run_command = f"{network} {action} {params_to_cli}"
-        status_file = os.path.join(self.handler_root, self.job_name, "status.json")
-        return run_command, status_file, None
-
-    def post_run(self):
-        """Carry's out functions after the job is executed"""
-        masks_dir = os.path.join(self.handler_root, "masks")
-        images_dir = os.path.join(self.handler_root, "images")
-        # write intersection to masks.txt and images.txt
-        masks_txt = os.path.join(self.handler_root, "masks.txt")
-        images_txt = os.path.join(self.handler_root, "images.txt")
-        with open(images_txt, "w", encoding='utf-8') as im_file, open(masks_txt, "w", encoding='utf-8') as ma_file:
-            available_masks = [m.split(".")[0] for m in os.listdir(masks_dir)]
-            for image in os.listdir(images_dir):
-                im_name = image.split(".")[0]
-                if im_name in available_masks:
-                    im_file.write(os.path.join(images_dir, image + "\n"))
-                    ma_file.write(os.path.join(masks_dir, im_name + ".png\n"))
-
-
-ODAugment = TrainVal
-
-
-class Dnv2Inference(CLIPipeline):
-    """Class for detectnet_v2 specific changes required during inference"""
-
-    def generate_config(self):
-        """Makes necessaary changes to the spec parameters for detectnet v2 inference"""
-        network = "detectnet_v2"
-        action = "inference"
-        # Infer CLI params
-        config = {}
-        network_config = read_network_config(network)
-        if action in network_config["cli_params"].keys():
-            for field_name, inference_fn in network_config["cli_params"][f"{action}{self.action_suffix}"].items():
-                field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
-                if field_value:
-                    config[field_name] = field_value
-
-        # Read spec from <action>.json for train, resume train, evaluate, retrain. If not there, use train.json
-        spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{action}-spec.json")
-        spec = load_json_spec(spec_json_path)  # Dnv2 NEEDS inference spec
-
-        # As per regular TrainVal, do not infer spec params, no need to move spec to cli
-        # No need to add dataset configs / classwise configs
-        # Instead do the following: if parent is tlt, enter tlt config and parent is trt, enter trt config
-
-        parent_job_id = self.job_context.parent_id
-        parent_action = get_handler_job_metadata(self.job_context.user_id, self.handler_id, parent_job_id).get("action")  # This should not fail if dependency passed
-        if parent_action in ["export", "gen_trt_engine", "trtexec"]:
-            key = "inferencer_config.tensorrt_config.trt_engine"
-        else:
-            key = "inferencer_config.tlt_config.model"
-        parent_model = CLI_CONFIG_TO_FUNCTIONS["parent_model_evaluate"](self.job_context, self.handler_metadata)
-        if parent_model:
-            write_nested_dict(spec, key, parent_model)
-
-        # Move CLI params from spec to config
-        spec_keys_all = copy.deepcopy(list(spec.keys()))  # Since we will be popping the value out, spec would change @ each iteration
-        for field_name in spec_keys_all:
-            cnd1 = field_name in network_config["cli_params"][action].keys()
-            cnd2 = network_config["cli_params"][f"{action}{self.action_suffix}"].get(field_name, None) == "from_csv"
-            cnd3 = type(spec[field_name]) in [str, float, int, bool]
-            if cnd1 and cnd2 and cnd3:
-                config[field_name] = spec.pop(field_name)
-
-        return spec, config
+            self.detailed_print(f"Copying pruned model {pruned_model_path} after retrain to /results/{self.job_name}/pruned_model{file_extension}\n", file=sys.stderr)
+            self.cs_instance.copy_file(pruned_model_path, f"/results/{self.job_name}/pruned_model{file_extension}")
+        if self.job_context.action == "annotation_format_convert":
+            if self.spec["data"]["input_format"] == "KITTI":
+                self.handler_metadata["format"] = "coco"
+            elif self.spec["data"]["input_format"] == "COCO":
+                self.handler_metadata["format"] = "kitti"
+            write_handler_metadata(self.handler_id, self.handler_metadata, self.handler_kind)
 
 
 class AutoMLPipeline(ActionPipeline):
@@ -678,12 +682,19 @@ class AutoMLPipeline(ActionPipeline):
         """Initialize the AutoMLPipeline class"""
         super().__init__(job_context)
         self.automl_brain_job_id = self.job_context.id
-        self.job_root = self.handler_root + f"/{self.automl_brain_job_id}"
-        self.job_metadata_root = self.job_root.replace(get_root(ngc_runner_fetch=True), get_root())
+        self.job_root = os.path.join(get_jobs_root(self.job_context.user_id, self.job_context.org_name), self.automl_brain_job_id)
         self.rec_number = self.get_recommendation_number()
         self.expt_root = f"{self.job_root}/experiment_{self.rec_number}"
-        self.recs_dict = safe_load_file(f"{self.job_metadata_root}/controller.json")
-        self.brain_dict = safe_load_file(f"{self.job_metadata_root}/brain.json")
+        self.recs_dict = safe_load_file(f"{self.job_root}/controller.json")
+        self.brain_dict = safe_load_file(f"{self.job_root}/brain.json")
+        self.action_spec_path = os.path.join(self.job_root, f"recommendation_{self.rec_number}.{self.api_params['spec_backend']}")
+        # Assign a new job id if not assigned already
+        self.job_name = self.recs_dict[self.rec_number].get("job_id", None)
+        if not self.job_name:
+            self.job_name = str(uuid.uuid4())
+            self.detailed_print("New job id being assigned to recommendation", self.job_name, file=sys.stderr)
+            self.recs_dict[self.rec_number]["job_id"] = self.job_name
+            safe_dump_file(f"{self.job_root}/controller.json", self.recs_dict)
 
         if not os.path.exists(self.expt_root):
             os.makedirs(self.expt_root)
@@ -699,62 +710,47 @@ class AutoMLPipeline(ActionPipeline):
                     break
         if ptm_id:
             recommended_values["base_experiment"] = search_for_base_experiment(
-                get_handler_root(admin_uuid, "experiments", admin_uuid, ptm_id, ngc_runner_fetch=True)
+                get_handler_root(base_exp_uuid, "experiments", base_exp_uuid, ptm_id)
             )
 
     def generate_config(self, recommended_values):
         """Generate config for AutoML experiment"""
-        spec_json_path = os.path.join(get_handler_spec_root(self.job_context.user_id, self.job_context.handler_id), f"{self.automl_brain_job_id}-train-spec.json")
+        spec_json_path = os.path.join(get_handler_spec_root(self.job_context.user_id, self.job_context.org_name, self.job_context.handler_id), f"{self.automl_brain_job_id}-train-spec.json")
         spec = load_json_spec(spec_json_path)
 
         epoch_multiplier = self.brain_dict.get("epoch_multiplier", None)
         if epoch_multiplier is not None:
             current_ri = int(self.brain_dict.get("ri", {"0": [float('-inf')]})[str(self.brain_dict.get("bracket", 0))][0])
 
-        for param_type in ("automl_spec_params", "automl_cli_params"):
-            for field_name, inference_fn in self.network_config[param_type].items():
-                if "automl_" in inference_fn:
-                    field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata, self.job_root, self.rec_number)
-                elif "assign_const_value" in inference_fn:
-                    if epoch_multiplier:
-                        field_value = int(epoch_multiplier * current_ri)
-                        if self.network == "mask_rcnn":
-                            field_value = int(field_value * (spec["num_examples_per_epoch"] / spec["train_batch_size"]))
-                    else:
-                        field_value = int(read_nested_dict(spec, field_name))
-                        if "assign_const_value," in inference_fn:
-                            dependent_parameter_names = inference_fn.split(",")
-                            dependent_field_value = int(read_nested_dict(spec, dependent_parameter_names[1]))
-                            if len(dependent_parameter_names) == 2:
-                                field_value = min(field_value, dependent_field_value)
-                            elif len(dependent_parameter_names) == 3:
-                                field_value = int(read_nested_dict(spec, dependent_parameter_names[2]))
-
-                    if self.network == "segformer" and "logging_interval" in field_name:
-                        field_value -= 1
+        for field_name, inference_fn in self.network_config["automl_spec_params"].items():
+            if "automl_" in inference_fn:
+                field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata, self.job_root, self.rec_number, self.job_name)
+            elif "assign_const_value" in inference_fn:
+                if epoch_multiplier:
+                    field_value = int(epoch_multiplier * current_ri)
                 else:
-                    field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
-                if field_value:
-                    if param_type == "automl_spec_params":
-                        write_nested_dict(spec, field_name, field_value)
-                    else:
-                        self.config[field_name] = field_value
+                    field_value = int(read_nested_dict(spec, field_name))
+                    if "assign_const_value," in inference_fn:
+                        dependent_parameter_names = inference_fn.split(",")
+                        dependent_field_value = int(read_nested_dict(spec, dependent_parameter_names[1]))
+                        if len(dependent_parameter_names) == 2:
+                            field_value = min(field_value, dependent_field_value)
+                        elif len(dependent_parameter_names) == 3:
+                            field_value = int(read_nested_dict(spec, dependent_parameter_names[2]))
+
+                if self.network == "segformer" and "logging_interval" in field_name:
+                    field_value -= 1
+            else:
+                field_value = CLI_CONFIG_TO_FUNCTIONS[inference_fn](self.job_context, self.handler_metadata)
+            if field_value:
+                write_nested_dict(spec, field_name, field_value)
 
         spec = DS_CONFIG_TO_FUNCTIONS[self.network](spec, self.job_context, self.handler_metadata)
         self.detailed_print("Loaded AutoML specs", file=sys.stderr)
 
         for param_name, param_value in recommended_values.items():
             write_nested_dict(spec, param_name, param_value)
-        validate_gpu_param_value(spec)
-
-        # Move CLI params from spec to config
-        spec_keys_all = copy.deepcopy(list(spec.keys()))  # Since we will be popping the value out, spec would change @ each iteration
-        for field_name in spec_keys_all:
-            cnd1 = field_name in self.network_config["automl_cli_params"].keys()
-            cnd2 = self.network_config["automl_cli_params"].get(field_name, None) == "from_csv"
-            cnd3 = type(spec[field_name]) in [str, float, int, bool]
-            if cnd1 and cnd2 and cnd3:
-                self.config[field_name] = spec.pop(field_name)
+        self.num_gpu = get_num_gpus_from_spec(spec, "train", default=self.num_gpu)
 
         if self.network not in AUTOML_DISABLED_NETWORKS:
             spec = process_classwise_config(spec)
@@ -765,15 +761,14 @@ class AutoMLPipeline(ActionPipeline):
         safe_dump_file(os.path.join(self.job_root, f"recommendation_{self.rec_number}.json"), self.spec)
         updated_spec = SPEC_BACKEND_TO_FUNCTIONS[self.api_params["spec_backend"]](self.spec)
         extension = self.api_params['spec_backend']
-        action_spec_path = os.path.join(self.job_root, f"recommendation_{self.rec_number}.{extension}")
-        safe_dump_file(action_spec_path, updated_spec, file_type=extension)
+        safe_dump_file(self.action_spec_path, updated_spec, file_type=extension)
 
     def generate_run_command(self):
         """Generate the command to be run inside docker for AutoML experiment"""
         params_to_cli = build_cli_command(self.config)
         run_command = f"{self.network} train {params_to_cli}"
-        logfile = os.path.join(self.expt_root, "log.txt")
-        run_command += f" | tee {logfile} 2>&1"
+        logfile = f'/{self.job_name}.txt'
+        run_command += f"  2>&1 | tee {logfile}"
         return run_command
 
     def get_recommendation_number(self):
@@ -785,60 +780,89 @@ class AutoMLPipeline(ActionPipeline):
                 break
         return rec_number
 
+    def monitor_job(self, job_env_variables=None, nv_job_metadata=None):
+        """Monitors the job status and updates job metadata"""
+        if not self.spec:
+            recommended_values = self.recs_dict[self.rec_number].get("specs", {})
+            self.spec = self.generate_config(recommended_values)
+            self.handle_multiple_ptm_fields()
+            self.get_handler_cloud_details()
+            self.save_recommendation_specs()
+
+        if not job_env_variables:
+            docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
+            self.decrypt_docker_env_vars(docker_env_vars)
+            job_env_variables = copy.deepcopy(docker_env_vars)
+            self.generate_env_variables(job_env_variables, automl_brain_job_id=self.automl_brain_job_id, experiment_number=str(self.rec_number))
+
+        run_command = self.generate_run_command()
+        if not nv_job_metadata:
+            nv_job_metadata = {}
+            if self.ngc_runner:
+                self.generate_nv_job_metadata(run_command, nv_job_metadata, job_env_variables)
+                nv_job_metadata["spec_file_path"] = self.action_spec_path
+
+        k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
+        while k8s_status in ["Done", "Error", "Running", "Pending", "Creating"]:
+            time.sleep(5)
+            if os.path.exists(os.path.join(self.expt_root, "status.json")) or (BACKEND in ("BCP", "NVCF") and k8s_status == "Running"):
+                break
+            if k8s_status == "Error":
+                self.detailed_print(f"Relaunching job {self.job_name}", file=sys.stderr)
+                wait_for_job_completion(self.job_name)
+                if self.network in TAO_NETWORKS and BACKEND == "local-k8s":
+                    self.create_microservice_action_job(job_env_variables)
+                else:
+                    jobDriver.create(self.job_context.user_id, self.job_context.org_name, self.job_name, self.image, run_command, num_gpu=self.num_gpu, docker_env_vars=job_env_variables, nv_job_metadata=nv_job_metadata)
+            k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
+
     def run(self):
-        """Calls necessary setup functions; calls job creation; update status of the job"""
+        """Calls necessary setup functions and calls job creation"""
         try:
             recommended_values = self.recs_dict[self.rec_number].get("specs", {})
+            self.cs_instance, _ = create_cs_instance(self.workspace_metadata)
             self.add_ptm_dependency(recommended_values)
 
             self.spec = self.generate_config(recommended_values)
             self.handle_multiple_ptm_fields()
+            self.get_handler_cloud_details()
             self.save_recommendation_specs()
             run_command = self.generate_run_command()
-
-            # Assign a new job id if not assigned already
-            job_id = self.recs_dict[self.rec_number].get("job_id", None)
-            if not job_id:
-                job_id = str(uuid.uuid4())
-                self.detailed_print("New job id being assigned to recommendation", job_id, file=sys.stderr)
-                self.recs_dict[self.rec_number]["job_id"] = job_id
-                safe_dump_file(f"{self.job_metadata_root}/controller.json", self.recs_dict)
 
             self.detailed_print(run_command, file=sys.stderr)
 
             # Wait for existing AutoML jobs to complete
-            wait_for_job_completion(job_id)
+            wait_for_job_completion(self.job_name)
 
             delete_lingering_checkpoints(self.recs_dict[self.rec_number].get("best_epoch_number", ""), self.expt_root)
             docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
-            dgx_job_metadata = {}
+            self.decrypt_docker_env_vars(docker_env_vars)
+            job_env_variables = copy.deepcopy(docker_env_vars)
+            self.generate_env_variables(job_env_variables, automl_brain_job_id=self.automl_brain_job_id, experiment_number=str(self.rec_number), automl_exp_job_id=self.job_name)
+
+            nv_job_metadata = {}
             if self.ngc_runner:
-                self.generate_dgx_job_metadata(run_command, dgx_job_metadata, docker_env_vars)
-            jobDriver.create(self.job_context.user_id, job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars, dgx_job_metadata=dgx_job_metadata)
-            self.detailed_print(f"AutoML recommendation with experiment id {self.rec_number} and job id {job_id} submitted", file=sys.stderr)
-            k8s_status = jobDriver.status(job_id)
-            while k8s_status in ["Done", "Error", "Running", "Pending", "Creating"]:
-                time.sleep(5)
-                if os.path.exists(os.path.join(self.expt_root, "log.txt")):
-                    break
-                if k8s_status == "Error":
-                    self.detailed_print(f"Relaunching job {job_id}", file=sys.stderr)
-                    wait_for_job_completion(job_id)
-                    jobDriver.create(self.job_context.user_id, job_id, self.image, run_command, num_gpu=-1, docker_env_vars=docker_env_vars, dgx_job_metadata=dgx_job_metadata)
-                k8s_status = jobDriver.status(job_id)
+                self.generate_nv_job_metadata(run_command, nv_job_metadata, job_env_variables)
+                nv_job_metadata["spec_file_path"] = self.action_spec_path
+
+            if self.network in TAO_NETWORKS and BACKEND == "local-k8s":
+                self.create_microservice_action_job(job_env_variables)
+            else:
+                jobDriver.create(self.job_context.user_id, self.job_context.org_name, self.job_name, self.image, run_command, num_gpu=self.num_gpu, docker_env_vars=job_env_variables, nv_job_metadata=nv_job_metadata)
+            self.detailed_print(f"AutoML recommendation with experiment id {self.rec_number} and job id {self.job_name} submitted", file=sys.stderr)
+            self.monitor_job(job_env_variables, nv_job_metadata)
 
             return True
 
         except Exception:
             self.detailed_print(f"AutoMLpipeline for network {self.network} failed due to exception {traceback.format_exc()}", file=sys.stderr)
-            job_id = self.recs_dict[self.rec_number].get("job_id", "")
-            self.detailed_print(job_id, file=sys.stderr)
+            self.detailed_print(self.job_name, file=sys.stderr)
 
             self.recs_dict[self.rec_number]["status"] = "failure"
-            safe_dump_file(f"{self.job_metadata_root}/controller.json", self.recs_dict)
+            safe_dump_file(f"{self.job_root}/controller.json", self.recs_dict)
 
-            update_job_status(self.job_context.user_id, self.handler_id, self.job_context.id, status="Error")
-            jobDriver.delete(self.job_context.id)
+            update_job_status(self.handler_id, self.job_context.id, status="Error", kind=self.handler_kind)
+            jobDriver.delete(self.job_context.id, use_ngc=False)
             return False
 
 
@@ -850,21 +874,31 @@ class ContinualLearning(ActionPipeline):
         super().__init__(job_context)
         self.ngc_runner = False
         # override the ActionPipeline's handler_root
-        self.handler_root = get_handler_root(self.job_context.user_id, "experiments", self.job_context.handler_id, None, ngc_runner_fetch=False)
-        self.handler_log_root = os.path.join(self.handler_root, "logs")
-        self.logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
         self.train_ds = self.handler_metadata["train_datasets"]
         self.image = DOCKER_IMAGE_MAPPER["api"]
-        self.job_root = os.path.join(self.handler_root, self.job_context.id)
+        self.job_root = os.path.join(self.jobs_root, self.job_context.id)
+        self.logs_from_toolkit = f"{self.jobs_root}/{self.job_name}/logs_from_toolkit.txt"
 
     def generate_convert_script(self, notify_record):
         """Generate a script to perform continual learning"""
-        cl_script = generate_cl_script(notify_record, self.job_context, self.handler_root, self.logfile)
+        cl_script = generate_cl_script(notify_record, self.job_context, self.handler_root, self.logfile, self.logs_from_toolkit)
         cl_script_path = os.path.join(self.job_root, "continual_learning.py")
         with open(cl_script_path, "w", encoding="utf-8") as f:
             f.write(cl_script)
 
         return cl_script_path
+
+    def monitor_job(self):
+        """Monitors the job status and updates job metadata"""
+        k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=False)
+        while k8s_status in ["Running", "Pending"]:
+            # Poll every 30 seconds
+            time.sleep(30)
+            k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=False)
+        self.detailed_print(f"Job status: {k8s_status}", file=sys.stderr)
+        if k8s_status == "Error":
+            update_job_status(self.handler_id, self.job_context.id, status="Error")
+        self.detailed_print("Continual Learning finished.", file=sys.stderr)
 
     def run(self):
         """Run the continual learning pipeline"""
@@ -875,7 +909,7 @@ class ContinualLearning(ActionPipeline):
             if len(self.train_ds) != 1:
                 raise ValueError("Continual Learning only supports one train dataset.")
             train_dataset = self.train_ds[0]
-            dataset_path = get_handler_root(self.job_context.user_id, "datasets", train_dataset, None, ngc_runner_fetch=False)
+            dataset_path = get_handler_root(self.job_context.org_name, "datasets", train_dataset, None)
 
             # Track the current training manifest file
             notify_record = os.path.join(dataset_path, "notify_record.json")
@@ -890,45 +924,38 @@ class ContinualLearning(ActionPipeline):
             self.run_command += f"; find {outdir} -type f | xargs chmod 666"
             # Optionally, pipe self.run_command into a log file
             self.detailed_print(self.run_command, file=sys.stderr)
-            jobDriver.create(self.job_context.user_id, self.job_name, self.image, self.run_command, num_gpu=0)
+            jobDriver.create(self.job_context.user_id, self.job_context.org_name, self.job_name, self.image, self.run_command, num_gpu=0, cl_medical=True)
             self.detailed_print("Job created", self.job_name, file=sys.stderr)
-            k8s_status = jobDriver.status(self.job_name, use_ngc=False)
-            while k8s_status in ["Running", "Pending"]:
-                # Poll every 30 seconds
-                time.sleep(30)
-                k8s_status = jobDriver.status(self.job_name, use_ngc=False)
-            self.detailed_print(f"Job status: {k8s_status}", file=sys.stderr)
-            if k8s_status == "Error":
-                update_job_status(self.job_context.user_id, self.handler_id, self.job_context.id, status="Error")
-            self.detailed_print("Continual Learning finished.", file=sys.stderr)
+            self.monitor_job()
         except Exception:
             self.detailed_print(f"ContinualLearning for {self.network} failed because {traceback.format_exc()}", file=sys.stderr)
-            shutil.copy(self.logfile, f"{self.handler_root}/{self.job_id}/logs_from_toolkit.txt")
-            update_job_status(self.job_context.user_id, self.handler_id, self.job_context.id, status="Error")
+            shutil.copy(self.logfile, self.logs_from_toolkit)
+            update_job_status(self.handler_id, self.job_context.id, status="Error")
 
 
 class BundleTrain(ActionPipeline):
-    """Class for MEDICAL bundle specific changes required during training"""
+    """Class for MONAI bundle specific changes required during training"""
+
+    CLOUD_STORAGE_LIB = "cloud_storage"
+    UTILS_LIB = "utils"
 
     def __init__(self, job_context):
         """Initialize the BundleTrain class"""
         super().__init__(job_context)
         spec = self.get_spec()
         # override the ActionPipeline's handler_root
-        self.handler_root = get_handler_root(self.job_context.user_id, "experiments", self.job_context.handler_id, None, ngc_runner_fetch=True)
         if "cluster" in spec and spec["cluster"] == "local":
-            self.ngc_runner = False
-            self.handler_root = get_handler_root(self.job_context.user_id, "experiments", self.job_context.handler_id, None, ngc_runner_fetch=False)
-        self.handler_log_root = os.path.join(self.handler_root, "logs")
-        self.logfile = os.path.join(self.handler_log_root, str(self.job_context.id) + ".txt")
+            self.ngc_runner = False  # this will make the executor uses local gpu even if BACKEND = True
+            # Though self.local_cluster is kind of duplicate of self.ngc_runner, a wide scope of property,
+            # the diff is local_cluster only used to determine the mounting strategy in executor create for medical bundles training.
+            self.local_cluster = True
+            self.handler_root = get_handler_root(self.job_context.org_name, "experiments", None)
         self.network = job_context.network
         self.action = job_context.action
-        self.job_root = os.path.join(self.handler_root, self.job_context.id)
-        train_datasets = self.handler_metadata["train_datasets"]
-        eval_dataset_id = self.handler_metadata["eval_dataset"]
-        self.train_datasets_path = [get_handler_root(self.job_context.user_id, "datasets", dataset_id, None, ngc_runner_fetch=self.ngc_runner) for dataset_id in train_datasets] if train_datasets else []
-        self.eval_dataset_path = get_handler_root(self.job_context.user_id, "datasets", eval_dataset_id, None, ngc_runner_fetch=self.ngc_runner) if eval_dataset_id else None
+        self.job_root = os.path.join(self.jobs_root, self.job_context.id)
         self.model_script_path = os.path.join(self.job_root, "train.py")
+        self.config_file = "configs/train.json"
+        self.bundle_dir = ""
 
     def get_spec(self):
         """Get spec from spec file or job context"""
@@ -943,17 +970,18 @@ class BundleTrain(ActionPipeline):
             spec = load_json_spec(spec_json_path)
 
         for k, v in spec.items():
-            if isinstance(v, str) and v == "$default_medical_label_mapping":
+            if isinstance(v, str) and v == "$default_monai_label_mapping":
                 labels = self.handler_metadata.get("model_params", {}).get("labels", None)
                 spec[k] = {"default": [[int(i), int(i)] for i in labels]}
                 self.detailed_print(f"Using default {k}: {spec[k]}", file=sys.stderr)
+        self.detailed_print("Specs are loaded.", file=sys.stderr)
         return spec
 
     def generate_config(self):
         """
-        Generate config for medical bundle train
+        Generate config for monai bundle train
         Returns:
-        spec: contains the params for building medical bundle train command
+        spec: contains the params for building monai bundle train command
         Notes:
         Similar to TrainVal.generate_config, but we have the following differences:
         - Drop using network config files
@@ -961,7 +989,7 @@ class BundleTrain(ActionPipeline):
         But we cannot delete the network config and the csv spec file, because they are used by the app_handler, e.g. save_spec and job_run methods.
         """
         spec = self.get_spec()
-        success, msg = validate_medical_bundle_params(spec)
+        success, msg = validate_monai_bundle_params(spec)
         if not success:
             self.detailed_print(msg, file=sys.stderr)
             raise RuntimeError(msg)
@@ -971,224 +999,306 @@ class BundleTrain(ActionPipeline):
         self.detailed_print("Loaded dataset", file=sys.stderr)
         return spec, {}
 
-    def save_model_script(self, model_script):
-        """save model script"""
-        with open(self.model_script_path, "w", encoding="utf-8") as f:
-            f.write(model_script)
+    @staticmethod
+    def add_prefix(config, prefix):
+        """ Add prefix to config string or config list."""
+        if isinstance(config, list):
+            config_file = [os.path.join(prefix, x) for x in config]  # If it's a list, join the items
+        elif isinstance(config, str):
+            config_file = os.path.join(prefix, config)
+        else:
+            raise RuntimeError(f"Do not support config file with type {type(config)}")
+        return config_file
 
-    def generate_convert_script(self):
-        """
-        Generate a script to convert dicom segmentation
-        The function temporarily fixes the issue: https://github.com/Project-MEDICAL/MEDICAL/issues/7055
-        """
+    def update_dataset_env_variables(self, datasets_info):
+        """Update the environment variables relating to datasets."""
+        for dataset_usage in datasets_info:
+            secret = datasets_info[dataset_usage].pop("client_secret", "")
+            secret_env = datasets_info[dataset_usage]["secret_env"]
+            self.monai_env_variable.update({secret_env: secret})
+
+    def get_dicom_convert(self, datasets_info):
+        """Check if need to convert the dicom datasets."""
+        is_convert_list = []
+        for dataset_usage in datasets_info:
+            dataset_info = datasets_info[dataset_usage]
+            cur_is_dicom = dataset_info["is_dicom"]
+            is_convert_list.append(cur_is_dicom)
+        is_convert_set = set(is_convert_list)
+        if len(is_convert_set) > 1:
+            raise RuntimeError("Job does not accept multi type datasets.")
+
+        return is_convert_set.pop()
+
+    def get_ngc_path(self):
+        """Get the ngc path of the pretrained model."""
+        base_experiment_ids = self.handler_metadata.get("base_experiment", [])
+        if len(base_experiment_ids) > 1:
+            raise RuntimeError("Bundle train only supports 1 base experiment.")
+
+        meta_data = get_base_experiment_metadata(base_experiment_ids[0])
+        ngc_path = meta_data.get("ngc_path", "")
+        return ngc_path
+
+    def _get_bundle_url(self, root):
+        """Get the url of the customized bundle."""
+        bundle_url = ""
+        bundle_file = os.path.join(root, CUSTOMIZED_BUNDLE_URL_FILE)
+        if os.path.exists(bundle_file):
+            bundle_content = safe_load_file(bundle_file)
+            bundle_url = bundle_content.get(CUSTOMIZED_BUNDLE_URL_KEY, "")
+        return bundle_url
+
+    def get_experiment_cloud_meta(self):
+        """Get experiment cloud storage metadata."""
+        cloud_type = self.cloud_metadata["experiment"][0]["workspace"]["cloud_type"]
+        cloud_specific_details = self.cloud_metadata["experiment"][0]["workspace"]["cloud_specific_details"]
+        account_str = "account_name" if cloud_type == "azure" else "access_key"
+        account_id = cloud_specific_details[account_str]
+        secret_str = "access_key" if cloud_type == "azure" else "secret_key"
+        secret = cloud_specific_details[secret_str]
+
+        cloud_meta = {
+            "cloud_type": cloud_type,
+            "bucket_name": cloud_specific_details["cloud_bucket_name"],
+            "region": cloud_specific_details.get("cloud_region", None),
+            "access_key": account_id,
+            "secret_key": secret,
+        }
+        return cloud_meta
+
+    def get_job_bundle_info(self, bundle_name):
+        """Get the bundle information of the job."""
+        bundle_root = os.path.join(self.job_root, bundle_name)
+        path_prefix = bundle_root + "/"
+        override = self.spec if self.spec else {}
+        config_file = self.add_prefix(override.pop("config_file", self.config_file), path_prefix)
+        logging_file = self.add_prefix(override.pop("logging_file", "configs/logging.conf"), path_prefix)
+        meta_file = self.add_prefix(override.pop("meta_file", "configs/metadata.json"), path_prefix)
+
+        bundle_info = {
+            "bundle_root": bundle_root,
+            "config_file": config_file,
+            "logging_file": logging_file,
+            "meta_file": meta_file,
+        }
+        bundle_info.update(override)
+        if self.num_gpu > 1:
+            bundle_info["num_gpu"] = self.num_gpu
+        return bundle_info
+
+    def generate_datasets_meta(self, datasets_info):
+        """Generate the datasets metadata dict."""
         labels = self.handler_metadata.get("model_params", {}).get("labels", None)
-        convert_script = generate_dicom_segmentation_convert_script(self.spec, labels)
-        convert_script_path = os.path.join(self.job_root, "convert_labels.py")
-        with open(convert_script_path, "w", encoding="utf-8") as f:
-            f.write(convert_script)
+        return {"datasets_info": datasets_info, "labels": labels}
 
-        return convert_script_path
+    def generate_experiment_meta(self, bundle_name):
+        """Generate the experiment metadata dict."""
+        bundle_info = self.get_job_bundle_info(bundle_name)
+        experiment_cloud_meta = self.get_experiment_cloud_meta()
+
+        experiment_meta = {
+            "bundle_info": bundle_info,
+            "experiment_cloud_meta": experiment_cloud_meta,
+        }
+        return experiment_meta
+
+    def generate_job_meta(self, ptm_root, is_customized, src_dir, dst_dir):
+        """Generate job metadata dict."""
+        # ptm_meta = {"ptm_root": "ptm_root", "bundle_url": "bundle_url", "ngc_path":"ngc_path", "is_customized":"Bool"}
+        bundle_url = self._get_bundle_url(ptm_root)
+        ngc_path = self.get_ngc_path()
+        ptm_meta = {"ptm_root": ptm_root,
+                    "bundle_url": bundle_url,
+                    "ngc_path": ngc_path,
+                    "is_customized": is_customized,
+                    }
+        copy_meta = {"src_dir": src_dir, "dst_dir": dst_dir}
+        return {"ptm_meta": ptm_meta, "copy_meta": copy_meta}
 
     def generate_run_command(self):
         """Generate run command"""
-        _, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["medical_output_dir"](self.job_context, self.handler_metadata)
-        status_file = os.path.join(self.handler_root, self.job_name, "status.json")
-        dicom_convert = self.spec.pop("dicom_convert", False)
-        copy_in_job = self.spec.pop("copy_in_job", None)
-        model_script = generate_bundle_train_script(self.job_root, bundle_name, status_file, override=self.spec)
-        self.save_model_script(model_script)
-
-        if copy_in_job:
-            run_command = copy_in_job + " && "
-        else:
-            run_command = ""
-
-        if dicom_convert:
-            convert_script_path = self.generate_convert_script()
-            run_command += f"python {convert_script_path} && python {self.model_script_path}"
-        else:
-            run_command += f"python {self.model_script_path}"
-
+        ptm_root, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["monai_output_dir"](self.job_context, self.handler_metadata)
+        copy_needed = bool(ptm_root)
+        overriden_output_dir = overriden_output_dir.rstrip(os.path.sep)
+        status_file = os.path.join(overriden_output_dir, "status.json")
+        datasets_info = self.spec.pop("datasets_info", {})
+        self.update_dataset_env_variables(datasets_info)
+        self.get_dicom_convert(datasets_info)
+        src_dir = os.path.join(ptm_root, bundle_name) if copy_needed else ""
+        dst_dir = os.path.join(overriden_output_dir, bundle_name) if copy_needed else ""
+        self.bundle_dir = dst_dir
+        experiment_json_meta = json.dumps(self.generate_experiment_meta(bundle_name))
+        datasets_json_meta = json.dumps(self.generate_datasets_meta(datasets_info))
+        is_customized = self.network in MEDICAL_CUSTOM_ARCHITECT
+        job_json_meta = json.dumps(self.generate_job_meta(ptm_root, is_customized, src_dir, dst_dir))
+        run_command = f"mkdir -p {overriden_output_dir} && mkdir -p {ptm_root} && cd {overriden_output_dir}" + " && "
+        run_command += f"cp -r {MEDICAL_SERVICE_SCRIPTS}/* {overriden_output_dir} && "
+        run_command += f"python {self.action}.py --experiment_json_meta '{experiment_json_meta}' --datasets_json_meta '{datasets_json_meta}' --job_json_meta '{job_json_meta}'"
+        if self.network in MEDICAL_CUSTOM_ARCHITECT:
+            bundle_url = self._get_bundle_url(ptm_root)
+            if not bundle_url:
+                raise RuntimeError("Cannot find the pretrained model url for the customized bundle.")
+        elif self.network != "monai_automl_generated":  # monai_automl_generated does not need ngc path nor ptm_root
+            ngc_path = self.get_ngc_path()
+            if not ngc_path:
+                raise RuntimeError("Cannot find the ngc path for the pretrained model.")
         run_command = f"({run_command}) 2>&1"
+        return run_command, status_file, overriden_output_dir
 
+
+class BatchInfer(BundleTrain):
+    """Class for MONAI bundle specific changes required during batch inference."""
+
+    def __init__(self, job_context):
+        """Initialize the BatchInfer class"""
+        super().__init__(job_context)
+        self.config_file = "configs/inference.json"
+
+    def get_train_job_meta(self, train_job_id, bundle_name):
+        """Get the train job meta data."""
+        results_root = get_jobs_root(user_id=self.job_context.user_id, org_name=self.job_context.org_name)
+        train_job_path = os.path.join(results_root, train_job_id, bundle_name)
+        train_meta = {"train_meta": {"job_path": train_job_path}}
+        return train_meta, train_job_path
+
+    def generate_run_command(self):
+        """Generate batch inference run command"""
+        ptm_root, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["monai_output_dir"](self.job_context, self.handler_metadata)
+        status_file = os.path.join(overriden_output_dir, "status.json")
+        datasets_info = self.spec.pop("datasets_info", {})
+        train_job_id = self.spec.pop("train_job_id", "")
+        if datasets_info:
+            self.update_dataset_env_variables(datasets_info)
+            self.get_dicom_convert(datasets_info)
+        src_dir = os.path.join(ptm_root, bundle_name)
+        dst_dir = os.path.join(overriden_output_dir, bundle_name)
+        experiment_json_meta = json.dumps(self.generate_experiment_meta(bundle_name))
+        datasets_json_meta = json.dumps(self.generate_datasets_meta(datasets_info))
+        is_customized = self.network in MEDICAL_CUSTOM_ARCHITECT
+        train_meta = {}
+        if train_job_id:
+            train_meta, train_job_path = self.get_train_job_meta(train_job_id, bundle_name)
+            src_dir = train_job_path
+
+        job_meta = self.generate_job_meta(ptm_root, is_customized, src_dir, dst_dir)
+        job_meta.update(train_meta)
+        job_json_meta = json.dumps(job_meta)
+        run_command = f"mkdir -p {overriden_output_dir} && mkdir -p {ptm_root} && cd {overriden_output_dir}" + " && "
+        run_command += f"cp -r {MEDICAL_SERVICE_SCRIPTS}/* {overriden_output_dir} && "
+        run_command += f"python batchinfer.py --experiment_json_meta '{experiment_json_meta}' --datasets_json_meta '{datasets_json_meta}' --job_json_meta '{job_json_meta}'"
+        if self.network in MEDICAL_CUSTOM_ARCHITECT:
+            bundle_url = self._get_bundle_url(ptm_root)
+            if not bundle_url:
+                raise RuntimeError("Cannot find the pretrained model url for the customized bundle.")
+        else:
+            ngc_path = self.get_ngc_path()
+            if not ngc_path:
+                raise RuntimeError("Cannot find the ngc path for the pretrained model.")
+        run_command = f"({run_command}) 2>&1"
         return run_command, status_file, overriden_output_dir
 
 
 class Auto3DSegTrain(BundleTrain):
-    """MEDICAL Auto3DSeg training action pipeline"""
+    """MONAI Auto3DSeg training action pipeline"""
 
-    def generate_config(self):
-        """
-        Generate config for auto3dseg train
-        """
-        # load spec
-        if self.job_context.specs is not None:
-            specs = self.job_context.specs.copy()
-        else:
-            spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
-            if not os.path.exists(spec_json_path):
-                self.detailed_print(f"Spec file {spec_json_path} does not exist", file=sys.stderr)
-                raise RuntimeError(f"Spec file {spec_json_path} does not exist")
-            specs = load_json_spec(spec_json_path)
-        self.detailed_print("Specs are loaded.", file=sys.stderr)
+    def generate_experiment_meta(self, bundle_name):
+        """Generate the experiment metadata dict."""
+        bundle_root = os.path.join(self.job_root, bundle_name)
+        experiment_cloud_meta = self.get_experiment_cloud_meta()
+        experiment_meta = {
+            "input_info": {
+                "work_dir": bundle_root,
+                "templates_path_or_url": os.path.join(bundle_root, "algorithm_templates"),
+                "multi_gpu": self.num_gpu > 1,
+                **self.spec,
+            },
+            "experiment_cloud_meta": experiment_cloud_meta,
+        }
+        return experiment_meta
 
-        # create datalist.json
-        specs = DS_CONFIG_TO_FUNCTIONS[self.network](specs, self.job_context, self.handler_metadata, self.job_root)
-        self.detailed_print("Dataset are loaded.", file=sys.stderr)
-
-        # set work directory for auto3dseg
-        specs["work_dir"] = self.job_root
-
-        # get the path to algorithm templates files
-        base_experiment_id = self.handler_metadata["base_experiment"][0]
-        base_experiment_version = get_base_experiment_metadata(base_experiment_id).get("version")
-        templates_path = os.path.join(
-            get_base_experiment_path(base_experiment_id),
-            f"auto3dseg_v{base_experiment_version}",
-            "algorithm_templates",
-        )
-        # set the path to algorithm templates files
-        specs["templates_path_or_url"] = templates_path
-
-        return specs, {}
-
-    def generate_run_command(self):
-        """Generate run command"""
-        status_file = os.path.join(self.handler_root, self.job_name, "status.json")
-        train_script_src = os.path.join(os.path.abspath(os.path.dirname(__file__)), "medical", f"train_{self.action}.py")
-        shutil.copyfile(train_script_src, self.model_script_path)
-        run_command = f"python {self.model_script_path} '{json.dumps(self.spec)}' {status_file} 2>&1"
-        return run_command, status_file, ""
+    def generate_job_meta(self, ptm_root, is_customized, src_dir, dst_dir):
+        """Generate job metadata dict."""
+        ngc_path = self.get_ngc_path()
+        ptm_meta = {"ptm_root": ptm_root, "ngc_path": ngc_path}
+        copy_meta = {"src_dir": src_dir, "dst_dir": dst_dir}
+        return {"ptm_meta": ptm_meta, "copy_meta": copy_meta}
 
     def post_run(self):
         """Create a new model after the job is executed"""
-        from handlers.app_handler import AppHandler
-
-        best_model_path = os.path.join(self.job_root, "best_model")
-
-        # update the hyper_parameters.yaml file to include relative paths
-        with open(os.path.join(best_model_path, "configs", "hyper_parameters.yaml"), "r", encoding="utf-8") as f:
-            hyper_conf = yaml.safe_load(f)
-        hyper_conf["bundle_root"] = "."
-        hyper_conf["data_file_base_dir"] = os.path.join("..", "datasets")
-        hyper_conf["data_list_file_path"] = os.path.join("..", "datalist.json")
-        hyper_conf["infer"]["log_output_file"] = os.path.join("..", "inference.log")
-        hyper_conf["infer"]["output_path"] = os.path.join("..", "predictions")
-        with open(os.path.join(best_model_path, "configs", "hyper_parameters.yaml"), "w", encoding="utf-8") as f:
-            yaml.safe_dump(hyper_conf, f)
-
+        # set the url of the best model
+        best_model_dir = os.path.join(self.bundle_dir, "best_model")
+        cloud_folder = best_model_dir.lstrip(os.path.sep)
         # create a new experiment
+        from handlers.app_handler import AppHandler
         request_dict = {
             "name": self.spec.get("output_experiment_name", "auto3dseg_automl_experiment"),
-            "description": self.spec.get("output_experiment_description", "AutoML Generated Segmentation Model based on MEDICAL Auto3DSeg"),
+            "description": self.spec.get("output_experiment_description", "AutoML Generated Segmentation Model based on MONAI Auto3DSeg"),
             "type": "medical",
-            "network_arch": "medical_segmentation",
+            "network_arch": "monai_automl_generated",
             "inference_dataset": self.spec.get("inference_dataset"),
-            "realtime_infer": False
+            "realtime_infer": False,
+            "bundle_url": cloud_folder,
+            "workspace": self.handler_metadata.get("workspace")
         }
-        user_id = get_handler_user(self.handler_id)
-        ret_code = AppHandler.create_experiment(user_id, request_dict)
+        ret_code = AppHandler.create_experiment(self.job_context.user_id, self.job_context.org_name, request_dict)
         new_model_id = ret_code.data["id"]
         self.detailed_print(f"New model is generated with id: {new_model_id}", file=sys.stderr)
-
-        # copy/upload the best model to the new model
-        if self.ngc_runner:
-            _, workspaces = load_user_workspace_metadata(user_id)
-            new_workspace_id = workspaces[new_model_id]['id']
-            copy_command = f"ngc workspace upload --source {best_model_path} --destination bundle {new_workspace_id}"
-        else:
-            new_model_path = os.path.join(get_handler_root(self.job_context.user_id, kind="experiments", handler_id=new_model_id, ngc_runner_fetch=True), "bundle")
-            copy_command = f"cp -rp {best_model_path} {new_model_path}"
-        try:
-            subprocess.run(copy_command, shell=True, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError('Failed to copy the best model to the new model.') from e
-        self.detailed_print("The best model is copied/uploaded to the new experiment.", file=sys.stderr)
 
         # update the status file to include newly generated model id
         status_dict = {
             "date": datetime.date.today().isoformat(),
             "time": datetime.datetime.now().isoformat(),
             "status": "SUCCESS",
-            "message": f"A segmentation experiment (id={new_model_id}) is successfully created by MEDICAL AuoML.",
+            "message": f"A segmentation experiment (id={new_model_id}) is successfully created by MONAI AuoML.",
             "model_id": new_model_id,
         }
         with open(self.status_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(status_dict) + "\n")
 
+        self.cs_instance.download_folder(cloud_folder, best_model_dir, maintain_src_folder_structure=True)
 
-class MedicalInference(BundleTrain):
-    """MEDICAL inference action pipeline"""
+
+class Auto3DSegInfer(BundleTrain):
+    """MONAI inference action pipeline"""
 
     def generate_config(self):
         """
-        Generate spec for medical inference and creates "datalist.json"
+        Generate spec for monai inference and creates "datalist.json"
 
         Returns:
-            spec: contains the params for building medical bundle train command
+            spec: contains the params for building monai bundle train command
         """
         # load spec
-        if self.job_context.specs is not None:
-            specs = self.job_context.specs.copy()
-        else:
-            spec_json_path = os.path.join(self.handler_spec_root, f"{self.job_context.id}-{self.job_context.action}-spec.json")
-            if not os.path.exists(spec_json_path):
-                self.detailed_print(f"Spec file {spec_json_path} does not exist", file=sys.stderr)
-                raise RuntimeError(f"Spec file {spec_json_path} does not exist")
-            specs = load_json_spec(spec_json_path)
-        self.detailed_print("Specs are loaded.", file=sys.stderr)
+        spec = self.get_spec()
 
         # create datalist.json
-        specs = DS_CONFIG_TO_FUNCTIONS[self.network](specs, self.job_context, self.handler_metadata, self.job_root)
-        self.detailed_print("Dataset are loaded.", file=sys.stderr)
+        inference_dataset_id = spec.pop("inference_dataset", None)
+        if inference_dataset_id:
+            self.handler_metadata["inference_dataset"] = inference_dataset_id
+        spec = DS_CONFIG_TO_FUNCTIONS[self.network](spec, self.job_context, self.handler_metadata)
+        self.detailed_print("Datasets are loaded.", file=sys.stderr)
 
-        # set work directory for auto3dseg
-        specs["work_dir"] = self.job_root
+        return spec, {}
 
-        return specs, {}
+    def generate_experiment_meta(self, bundle_name):
+        """Generate the experiment metadata dict."""
+        experiment_cloud_meta = self.get_experiment_cloud_meta()
 
-    def generate_run_command(self):
-        """Generate run command for medical inference"""
-        # Check if "infer.py" exists for this models
-        src_model_root = os.path.join(
-            get_handler_root(self.job_context.user_id, kind="experiments", handler_id=self.handler_metadata["id"], ngc_runner_fetch=True),
-            "bundle"
-        )
-        infer_script_path = os.path.join(src_model_root, "scripts", "infer.py")
-        if not os.path.exists(infer_script_path):
-            raise RuntimeError(
-                f"Currenlty, inference script file (infer.py) is required for MEDICAL inference! "
-                f"'{infer_script_path}' does not exist."
-            )
-
-        # copy the model into the job root
-        model_root = os.path.join(self.job_root, "bundle")
-        shutil.copytree(src_model_root, model_root)
-        self.detailed_print("Model copied to the job root.", file=sys.stderr)
-
-        # generate the run command
-        config_dir = os.path.join(model_root, "configs")
-        config_files = ','.join([os.path.join(config_dir, f) for f in os.listdir(config_dir)])
-        num_gpu = self.spec.get("num_gpu", 1)
-        run_command = f"cd {model_root};"
-        if num_gpu <= 1:
-            run_command += "python"
-        else:
-            run_command += f"torchrun --nnodes=1 --nproc_per_node={num_gpu}"
-        run_command += f' -m scripts.infer run --config_file {config_files}'
-
-        # create the file to report the job status
-        status_file = os.path.join(self.job_root, "status.json")
-        status_dict = {
-            "date": datetime.date.today().isoformat(),
-            "time": datetime.datetime.now().isoformat(),
-            "status": "SUCCESS",
-            "message": "The data and model are prepared and ready for inference.",
+        experiment_meta = {
+            "input_info": {"work_dir": self.job_root, **self.spec},
+            "experiment_cloud_meta": experiment_cloud_meta,
         }
-        with open(status_file, "w", encoding="utf-8") as f:
-            json.dump(status_dict, f)
+        return experiment_meta
 
-        return run_command, status_file, self.job_root
+    def generate_job_meta(self, *args):
+        """Generate job metadata dict."""
+        handler_root = get_handler_root(self.job_context.org_name, "experiments", self.job_context.handler_id, None)
+        auto3dseg_url = self._get_bundle_url(handler_root)
+        if not auto3dseg_url:
+            raise RuntimeError("Cannot find the pretrained Auto3DSeg model.")
+        ptm_meta = {"bundle_url": auto3dseg_url, "is_auto3dseg_inference": True}
+        return {"ptm_meta": ptm_meta}
 
 
 # Each Element can be called with a job_context and returns an ActionPipeline (or its derivative) object
@@ -1202,20 +1312,16 @@ ACTIONS_TO_FUNCTIONS = {"train": TrainVal,
                         "export_with_spec": TrainVal,
                         "export_tf2": TrainVal,
                         "inference": TrainVal,
-                        "dnv2inference": Dnv2Inference,
                         "gen_trt_engine": TrainVal,
                         "trtexec": TrainVal,
                         "purpose_built_models_ds_convert": TrainVal,
-                        "odconvert": ODConvert,
+                        "odconvert": TrainVal,
                         "pyt_odconvert": TrainVal,
-                        "unetdatasetconvert": UNETDatasetConvert,
-                        "odconvertindex": ODConvert,
-                        "odconvertefficientdet_tf1": ODConvert,
-                        "odconvertefficientdet_tf2": ODConvert,
-                        "odaugment": ODAugment,
                         "data_services": TrainVal,
-                        "medical_annotation": ContinualLearning,
-                        "medical_auto3dseg": Auto3DSegTrain,
-                        "medical_train": BundleTrain,
-                        "medical_inference": MedicalInference,
+                        "monai_annotation": ContinualLearning,
+                        "medical_automl_auto3dseg": Auto3DSegTrain,
+                        "monai_train": BundleTrain,
+                        "medical_automl_batchinfer": Auto3DSegInfer,
+                        "monai_batchinfer": BatchInfer,
+                        "monai_generate": BatchInfer,
                         }
