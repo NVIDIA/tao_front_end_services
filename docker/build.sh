@@ -9,7 +9,7 @@ GIT_COMMIT_SHA="$(git rev-parse HEAD)"
 GIT_COMMIT_TIME="$(TZ=UTC0 git show --quiet --date='format-local:%Y%m%dT%H%M%SZ' --format='%cd')"
 
 TAO_API_REGISTRY="nvcr.io"
-TAO_API_ORG="nvstaging"
+TAO_API_ORG="nvidia"
 TAO_API_TEAM="tao"
 
 NGC_KEY="$(grep apikey ~/.ngc/config 2>/dev/null | cut -d'=' -f2 | xargs; true)"

@@ -19,7 +19,7 @@ helm_push:
 	helm plugin install https://github.com/chartmuseum/helm-push ;\
 	OUTFILE="/tmp/helm-push-$$(date "+%Y.%m.%d-%H.%M.%S").out" ;\
 	cp chart/values.yaml chart/values.yaml.default ; \
-	sed -i "s#repository: nvcr.io/nvstaging/tao/tao-api#repository: $(TAO_API_REGISTRY)/$(TAO_API_ORG)/$(TAO_API_TEAM)/tao-api#" "chart/values.yaml"; \
+	sed -i "s#repository: nvcr.io/nvidia/tao/tao-api#repository: $(TAO_API_REGISTRY)/$(TAO_API_ORG)/$(TAO_API_TEAM)/tao-api#" "chart/values.yaml"; \
 	sed -i "s#tag: v$(TAO_VERSION)-nightly-latest#tag: $(USER)-$(UUID_TAO_HELM)#" "chart/values.yaml"; \
 	echo -e "\norgName: $(TAO_API_ORG)" >> "chart/values.yaml"; \
 	echo "teamName: $(TAO_API_TEAM)" >> "chart/values.yaml"; \
@@ -57,7 +57,7 @@ docker_build:
 	@read -p "Enter the TAO version value [Enter] will use the default value (5.5.0): " TAO_VERSION; TAO_VERSION=$${TAO_VERSION:-"5.5.0"}; echo "TAO_VERSION=$$TAO_VERSION" > .env; \
 	read -p "Enter the docker deployment mode value [Enter] will use the default value (PROD): " DEPLOYMENT_MODE; DEPLOYMENT_MODE=$${DEPLOYMENT_MODE:-"PROD"}; echo "DEPLOYMENT_MODE=$$DEPLOYMENT_MODE" >> .env; \
 	read -p "Enter the docker registry value [Enter] will use the default value (nvcr.io): " TAO_API_REGISTRY; TAO_API_REGISTRY=$${TAO_API_REGISTRY:-"nvcr.io"}; echo "TAO_API_REGISTRY=$$TAO_API_REGISTRY" >> .env; \
-	read -p "Enter the docker org value [Enter] will use the default value (nvstaging): " TAO_API_ORG; TAO_API_ORG=$${TAO_API_ORG:-"nvstaging"}; echo "TAO_API_ORG=$$TAO_API_ORG" >> .env; \
+	read -p "Enter the docker org value [Enter] will use the default value (nvidia): " TAO_API_ORG; TAO_API_ORG=$${TAO_API_ORG:-"nvidia"}; echo "TAO_API_ORG=$$TAO_API_ORG" >> .env; \
 	read -p "Enter the docker team value [Enter] will use the default value (tao): " TAO_API_TEAM; TAO_API_TEAM=$${TAO_API_TEAM:-"tao"}; echo "TAO_API_TEAM=$$TAO_API_TEAM" >> .env; \
 	HOME_DIR=$$(getent passwd $$SUDO_USER | cut -d: -f6); \
 	APIKEY=$$(grep 'apikey' $$HOME_DIR/.ngc/config | sed 's/apikey = //'); \

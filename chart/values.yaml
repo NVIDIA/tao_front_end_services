@@ -1,6 +1,6 @@
 # TAO Toolkit API container info
 image:
-  repository: nvcr.io/nvstaging/tao/tao-api
+  repository: nvcr.io/nvidia/tao/tao-api
   tag: v5.5.0-nightly-latest
 
 hostBaseUrl: "http://10.123.4.56:32080"
@@ -26,7 +26,7 @@ profiler: "False"
 # enableTelemetry: False
 # telemetry:
 #   image:
-#     repository: nvcr.io/nvstaging/tao/tao-telemetry-gateway
+#     repository: nvcr.io/nvidia/tao/tao-telemetry-gateway
 #     tag: latest
 #   pollingIntervalSeconds: 10
 #   exporterPort: 9877
@@ -58,7 +58,7 @@ maxNumGpuPerNode: 1
 imagePyt: nvcr.io/ea-tlt/tao_ea/tao-toolkit-pyt_v5.2.0-pyt2.1.0-py3-01_microservices:latest
 imageTf2: nvcr.io/ea-tlt/tao_ea/tao-toolkit_5.0.0-tf2.11.0_microservices:latest
 imageTaoDeploy: nvcr.io/ea-tlt/tao_ea/tao-toolkit_5.2.0-deploy_microservices:latest
-imageDataservices: nvcr.io/nvstaging/tao/tao-toolkit-ds_v5.2.0_microservices:latest
+imageDataservices: nvcr.io/ea-tlt/tao_ea/tao-toolkit-ds_v5.2.0_microservices:latest
 imageDefault: nvcr.io/ea-tlt/tao_ea/tao-toolkit-pyt_v5.2.0-pyt2.1.0-py3-01_microservices:latest
 imageMedical: nvcr.io/iasixjqzw1hj/monai-service:infer-1.0.3
 
