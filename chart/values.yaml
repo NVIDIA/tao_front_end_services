@@ -14,9 +14,8 @@ serviceAdminUUID: 02a55e1e-0091-4711-b29e-12a61c0d29bf # str(uuid.uuid5(uuid.UUI
 #myCertConfig: my-cert
 
 # Optional JupyterLab service
-ngcCollaterals: nvidia/tao/tao-getting-started:5.0.0
-notebooksDir: notebooks
-# notebooksDir: tao-getting-started_v5.0.0/notebooks/tao_api_starter_kit
+ngcCollaterals: nvidia/tao/tao-getting-started:5.5.0
+notebooksDir: tao-getting-started_v5.5.0/notebooks/tao_api_starter_kit
 
 profiler: "False"
 
@@ -41,51 +40,17 @@ storageClassName: nfs-client
 storageAccessMode: ReadWriteMany
 storageSize: 900Gi
 
-# MongoDB info
-mongoStorageClassName: nfs-client
-mongoStorageSize: 100Gi
-mongoDesiredReplicas: 3
-
-# Authentication
-visionEarlyAccess: ea-tlt/tao_ea
-medicalEarlyAccess: iasixjqzw1hj/users-external
 #authClientId: bnSePYullXlG-504nOZeNAXemGF6DhoCdYR8ysm088w
 
 deploymentMode: "PROD" # STAGING/PROD
 backend: local-k8s
 maxNumGpuPerNode: 1
 
-imagePyt: nvcr.io/ea-tlt/tao_ea/tao-toolkit-pyt_v5.2.0-pyt2.1.0-py3-01_microservices:latest
-imageTf2: nvcr.io/ea-tlt/tao_ea/tao-toolkit_5.0.0-tf2.11.0_microservices:latest
-imageTaoDeploy: nvcr.io/ea-tlt/tao_ea/tao-toolkit_5.2.0-deploy_microservices:latest
-imageDataservices: nvcr.io/ea-tlt/tao_ea/tao-toolkit-ds_v5.2.0_microservices:latest
-imageDefault: nvcr.io/ea-tlt/tao_ea/tao-toolkit-pyt_v5.2.0-pyt2.1.0-py3-01_microservices:latest
-imageMedical: nvcr.io/iasixjqzw1hj/monai-service:infer-1.0.3
-
-# Vault info
-# Uncomment this when a vault is needed. For details about vault, please refer to:
-# https://developer.hashicorp.com/vault/docs?product_intent=vault
-# enableVault: enable
-
-# vault:
-#   secretMountPath: /home/tomcat/vault-agent/secrets/vault-secrets.json
-#   namespace: <your vault namespace>
-#   appRole: k8s_jwt_role
-#   authPath: auth/jwt/k8s-service
-#   secretEnginePath: /k8s-service/kv/key/k8s
-#   volumeMounts:
-#     tokenPath: /var/run/secrets/kubernetes.io/serviceaccount-vault
-#   volumes:
-#     projected:
-#       serviceAccountToken:
-#         audience: <your vault address> # http://myproject.vault.com
-#   pod:
-#     annotations:
-#           vault.hashicorp.com/agent-configmap: vault-agent-configmap
-#           vault.hashicorp.com/agent-init-first: 'true'
-#           vault.hashicorp.com/agent-inject: 'true'
-#           vault.hashicorp.com/agent-inject-status: update
-#           vault.hashicorp.com/secret-volume-path: /home/tomcat/vault-agent/secrets
+imagePyt: nvcr.io/nvidia/tao/tao-toolkit:5.5.0-pyt
+imageTf2: nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0
+imageTaoDeploy: nvcr.io/nvidia/tao/tao-toolkit:5.5.0-deploy
+imageDataservices: nvcr.io/nvidia/tao/tao-toolkit:5.5.0-data-services
+imageDefault: nvcr.io/nvidia/tao/tao-toolkit:5.5.0-pyt
 
 # To opt out of providing anonymous telemetry data to NVIDIA
 #telemetryOptOut: no

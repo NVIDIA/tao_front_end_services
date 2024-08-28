@@ -131,9 +131,3 @@ Retail Object Detection,nvidia/tao/retail_object_detection:trainable_binary_v1.0
 Retail Object Detection,nvidia/tao/retail_object_detection:trainable_binary_v1.1,efficientdet_tf2
 Retail Object Detection,nvidia/tao/retail_object_detection:trainable_binary_v2.0,dino
 Retail Object Detection,nvidia/tao/retail_object_detection:trainable_meta_v2.0,dino
-MONAI Spleen DeepEdit Annotation,iasixjqzw1hj/no-team/spleen_deepedit_annotation:0.5.3,monai_annotation
-MONAI VISTA3d,iasixjqzw1hj/no-team/vista3d_segmentation:0.3.5,monai_vista3d
-MONAI VISTA2d,iasixjqzw1hj/no-team/cell_vista_segmentation:0.1.7,monai_vista2d
-MONAI Auto3dSeg,iasixjqzw1hj/no-team/auto3dseg:0.0.8,monai_automl
-MONAI GenerativeAI,iasixjqzw1hj/no-team/generative_ai:0.1.5,monai_genai
-MONAI MAISI,iasixjqzw1hj/no-team/maisi:0.1.7,monai_maisi

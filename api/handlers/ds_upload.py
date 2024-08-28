@@ -18,31 +18,17 @@ import os
 import glob
 import sys
 
-from handlers.cloud_storage import create_cs_instance
-
 
 # Simple helper class for ease of code migration
 class SimpleHandler:
     """Helper class holding dataset information"""
 
-    def __init__(self, org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+    def __init__(self, org_name, handler_metadata, temp_dir=""):
         """Initialize the Handler helper class"""
         self.root = temp_dir
         self.type = handler_metadata.get("type")
         self.format = handler_metadata.get("format")
         self.intent = handler_metadata.get("use_for", [])
-        assert type(self.intent) is list
-        self.cloud_instance = None
-        if workspace_metadata:
-            self.cloud_instance, _ = create_cs_instance(workspace_metadata)
-
-    def check_for_file_existence(self, path, file_type="file"):
-        if self.cloud_instance:
-            if file_type == "file":
-                return self.cloud_instance.is_file(path)
-            path = path[1:] if path.startswith("/") else path
-            return self.cloud_instance.is_folder(path)
-        return os.path.exists(path)
 
 
 def _untar_file(tar_path, dest, strip_components=0):
@@ -89,7 +75,7 @@ def write_dir_contents(directory, file):
             f.write(dir_files + "\n")
 
 
-def object_detection(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def object_detection(org_name, handler_metadata, temp_dir=""):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -102,17 +88,17 @@ def object_detection(org_name, handler_metadata, temp_dir="", workspace_metadata
     - Creates temp output folders and moves them to /images and /labels
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
-        assert handler.check_for_file_existence(os.path.join(handler.root, "images.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "images.tar.gz"))
         if handler.format == "kitti":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "labels.tar.gz"))
+            assert os.path.exists(os.path.join(handler.root, "labels.tar.gz"))
         elif handler.format == "coco":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "annotations.json"))
+            assert os.path.exists(os.path.join(handler.root, "annotations.json"))
         elif handler.format == "coco_raw":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "label_map.txt"))
+            assert os.path.exists(os.path.join(handler.root, "label_map.txt"))
         if handler.format in ("raw", "coco_raw"):
             if handler.intent:
                 assert handler.intent == ["testing"]
@@ -125,7 +111,7 @@ def object_detection(org_name, handler_metadata, temp_dir="", workspace_metadata
 instance_segmentation = object_detection
 
 
-def semantic_segmentation(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def semantic_segmentation(org_name, handler_metadata, temp_dir=""):
     """
     Upload - uploads and creates .txt files
     - /images/
@@ -133,15 +119,15 @@ def semantic_segmentation(org_name, handler_metadata, temp_dir="", workspace_met
 
     No Actions
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and masks paths exist
-        assert handler.check_for_file_existence(os.path.join(handler.root, "images/train.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "images/test.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "images/val.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "images/train.tar.gz")) and os.path.exists(os.path.join(handler.root, "images/test.tar.gz")) and os.path.exists(os.path.join(handler.root, "images/val.tar.gz"))
         if handler.format == "unet":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "masks/train.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "masks/val.tar.gz"))
+            assert os.path.exists(os.path.join(handler.root, "masks/train.tar.gz")) and os.path.exists(os.path.join(handler.root, "masks/val.tar.gz"))
         elif handler.format == "coco":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "annotations.json"))
+            assert os.path.exists(os.path.join(handler.root, "annotations.json"))
         if handler.format == "raw":
             if handler.intent:
                 assert handler.intent == ["testing"]
@@ -151,7 +137,7 @@ def semantic_segmentation(org_name, handler_metadata, temp_dir="", workspace_met
         return False
 
 
-def character_recognition(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def character_recognition(org_name, handler_metadata, temp_dir=""):
     """
     LPRNET Dataset structure
     Upload - uploads and untars
@@ -160,14 +146,14 @@ def character_recognition(org_name, handler_metadata, temp_dir="", workspace_met
     - /characters.txt
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
-        assert handler.check_for_file_existence(os.path.join(handler.root, "image.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "image.tar.gz"))
         if handler.format != "raw":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "label.tar.gz"))
-            assert handler.check_for_file_existence(os.path.join(handler.root, "characters.txt"))
+            assert os.path.exists(os.path.join(handler.root, "label.tar.gz"))
+            assert os.path.exists(os.path.join(handler.root, "characters.txt"))
         else:
             if handler.intent:
                 assert handler.intent == ["testing"]
@@ -177,7 +163,7 @@ def character_recognition(org_name, handler_metadata, temp_dir="", workspace_met
         return False
 
 
-def ocrnet(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def ocrnet(org_name, handler_metadata, temp_dir=""):
     """
     OCRNET Dataset structure
     Upload - uploads and untars
@@ -185,34 +171,34 @@ def ocrnet(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
     - /test/gt_new.txt: val dataset
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
 
-        assert handler.check_for_file_existence(os.path.join(handler.root, "character_list"))
+        assert os.path.exists(os.path.join(handler.root, "character_list"))
         format = ""
         if handler.intent == ["training"]:
             format = "train"
         elif handler.intent == ["evaluation"]:
             format = "test"
-        assert handler.check_for_file_existence(os.path.join(handler.root, format + ".tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, format + ".tar.gz"))
         return True
 
     except:
         return False
 
 
-def ocrnet_permission_change(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def ocrnet_permission_change(org_name, handler_metadata, temp_dir=""):
     """
     Change permission of necessary files and folders for OCRNET
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
-        if handler.check_for_file_existence(os.path.join(handler.root, "train")):
+        if os.path.exists(os.path.join(handler.root, "train")):
             os.system(f"chmod -R 777 {os.path.join(handler.root, 'train')}")
-        if handler.check_for_file_existence(os.path.join(handler.root, "test")):
+        if os.path.exists(os.path.join(handler.root, "test")):
             os.system(f"chmod -R 777 {os.path.join(handler.root, 'test')}")
         return True
 
@@ -220,7 +206,7 @@ def ocrnet_permission_change(org_name, handler_metadata, temp_dir="", workspace_
         return False
 
 
-def ocdnet(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def ocdnet(org_name, handler_metadata, temp_dir=""):
     """
     OCDNET Dataset structure
     Upload - uploads and untars
@@ -230,19 +216,19 @@ def ocdnet(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
     - /test/gt: val ground_truth
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
 
-        assert handler.check_for_file_existence(os.path.join(handler.root, "train.tar.gz")) or (handler.check_for_file_existence(os.path.join(handler.root, "test.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "test/img.tar.gz")))
+        assert os.path.exists(os.path.join(handler.root, "train.tar.gz")) or (os.path.exists(os.path.join(handler.root, "test.tar.gz")) and os.path.exists(os.path.join(handler.root, "test/img.tar.gz")))
         return True
 
     except:
         return False
 
 
-def centerpose(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def centerpose(org_name, handler_metadata, temp_dir=""):
     """
     CenterPose Dataset structure
     Upload - uploads and preprocessed
@@ -251,20 +237,20 @@ def centerpose(org_name, handler_metadata, temp_dir="", workspace_metadata=None)
     - /test: test images and ground_truth
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
 
-        assert handler.check_for_file_existence(os.path.join(handler.root, "train.tar.gz")) or handler.check_for_file_existence(os.path.join(handler.root, "val.tar.gz"))
-        assert handler.check_for_file_existence(os.path.join(handler.root, "test.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "train.tar.gz")) or os.path.exists(os.path.join(handler.root, "val.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "test.tar.gz"))
         return True
 
     except:
         return False
 
 
-def optical_inspection(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def optical_inspection(org_name, handler_metadata, temp_dir=""):
     """
     Optical Inspection Dataset structure
     Upload - uploads and untars
@@ -272,19 +258,19 @@ def optical_inspection(org_name, handler_metadata, temp_dir="", workspace_metada
     - dataset.csv: ground_truth
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
 
-        assert handler.check_for_file_existence(os.path.join(handler.root, "images.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "dataset.csv"))
+        assert os.path.exists(os.path.join(handler.root, "images.tar.gz")) and os.path.exists(os.path.join(handler.root, "dataset.csv"))
         return True
 
     except:
         return False
 
 
-def visual_changenet(org_name, handler_metadata, temp_dir="", workspace_metadata=None):  # pylint: disable=R1710
+def visual_changenet(org_name, handler_metadata, temp_dir=""):  # pylint: disable=R1710
     """
     Visual Changenet Dataset structure
     Upload - uploads and untars
@@ -295,21 +281,21 @@ def visual_changenet(org_name, handler_metadata, temp_dir="", workspace_metadata
     For Classification use the optical inspection dataset structure
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
     try:
         # Validate each directory exists
         if handler.format == "visual_changenet_classify":
-            return optical_inspection(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+            return optical_inspection(org_name, handler_metadata, temp_dir=temp_dir)
         if handler.format == "visual_changenet_segment":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "A.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "B.tar.gz"))
-            assert handler.check_for_file_existence(os.path.join(handler.root, "list.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "label.tar.gz"))
+            assert os.path.exists(os.path.join(handler.root, "A.tar.gz")) and os.path.exists(os.path.join(handler.root, "B.tar.gz"))
+            assert os.path.exists(os.path.join(handler.root, "list.tar.gz")) and os.path.exists(os.path.join(handler.root, "label.tar.gz"))
             return True
 
     except:
         return False
 
 
-def ml_recog(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def ml_recog(org_name, handler_metadata, temp_dir=""):
     """
     Metric Learning Recognition Dataset structure
     Upload - uploads and untars
@@ -320,25 +306,25 @@ def ml_recog(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
         - unknown_classes
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
 
-        assert handler.check_for_file_existence(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/train.tar.gz"))
-        assert handler.check_for_file_existence(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/reference.tar.gz"))
-        assert handler.check_for_file_existence(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/val.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/train.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/reference.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/known_classes/val.tar.gz"))
 
-        assert handler.check_for_file_existence(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/unknown_classes/train.tar.gz"))
-        assert handler.check_for_file_existence(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/unknown_classes/reference.tar.gz"))
-        assert handler.check_for_file_existence(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/unknown_classes/test.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/unknown_classes/train.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/unknown_classes/reference.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "metric_learning_recognition/retail-product-checkout-dataset_classification_demo/unknown_classes/test.tar.gz"))
         return True
 
     except:
         return False
 
 
-def image_classification(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def image_classification(org_name, handler_metadata, temp_dir=""):
     """
     Raw:
     images/
@@ -354,16 +340,16 @@ def image_classification(org_name, handler_metadata, temp_dir="", workspace_meta
     val.csv
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
     try:
         # Validate images and labels paths exist
-        assert (handler.check_for_file_existence(os.path.join(handler.root, "images_train.tar.gz")) or handler.check_for_file_existence(os.path.join(handler.root, "images_val.tar.gz")) or handler.check_for_file_existence(os.path.join(handler.root, "images_test.tar.gz")))
+        assert len(glob.glob(os.path.join(handler.root, "images*.tar.gz"))) == 1
         if handler.format == "custom":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "val.csv"))
+            assert os.path.exists(os.path.join(handler.root, "val.csv"))
         if handler.format == "classification_pyt":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "classes.txt"))
+            assert os.path.exists(os.path.join(handler.root, "classes.txt"))
         if handler.format == "classification_tf2":
-            assert handler.check_for_file_existence(os.path.join(handler.root, "classmap.json"))
+            assert os.path.exists(os.path.join(handler.root, "classmap.json"))
         if handler.format == "raw":
             if handler.intent:
                 assert handler.intent == ["testing"]
@@ -372,7 +358,7 @@ def image_classification(org_name, handler_metadata, temp_dir="", workspace_meta
         return False
 
 
-def action_recognition(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def action_recognition(org_name, handler_metadata, temp_dir=""):
     """
     Default:
     train
@@ -380,17 +366,17 @@ def action_recognition(org_name, handler_metadata, temp_dir="", workspace_metada
     ...
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
     try:
         # Validate images and labels paths exist
-        assert handler.check_for_file_existence(os.path.join(handler.root, "train.tar.gz"))
-        assert handler.check_for_file_existence(os.path.join(handler.root, "test.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "train.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "test.tar.gz"))
         return True
     except:
         return False
 
 
-def pointpillars(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def pointpillars(org_name, handler_metadata, temp_dir=""):
     """
     OD Dataset structure
     Upload - uploads and untars
@@ -400,19 +386,19 @@ def pointpillars(org_name, handler_metadata, temp_dir="", workspace_metadata=Non
     - /calib
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
 
     try:
         # Validate images and labels paths exist
-        assert handler.check_for_file_existence(os.path.join(handler.root, "train.tar.gz"))
-        assert handler.check_for_file_existence(os.path.join(handler.root, "val.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "train.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "val.tar.gz"))
         return True
 
     except:
         return False
 
 
-def pose_classification(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def pose_classification(org_name, handler_metadata, temp_dir=""):
     """
     Default:
     kinetics/nvidia : root_folder_path
@@ -424,25 +410,25 @@ def pose_classification(org_name, handler_metadata, temp_dir="", workspace_metad
     ...
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
     try:
         # Validate images and labels paths exist
-        assert handler.check_for_file_existence(os.path.join(handler.root, "kinetics"), file_type="folder") or handler.check_for_file_existence(os.path.join(handler.root, "nvidia"), file_type="folder")
+        assert os.path.exists(os.path.join(handler.root, "kinetics")) or os.path.exists(os.path.join(handler.root, "nvidia"))
 
         model_type = ""
-        if handler.check_for_file_existence(os.path.join(handler.root, "kinetics"), file_type="folder"):
+        if os.path.exists(os.path.join(handler.root, "kinetics")):
             model_type = "kinetics"
-        elif handler.check_for_file_existence(os.path.join(handler.root, "nvidia"), file_type="folder"):
+        elif os.path.exists(os.path.join(handler.root, "nvidia")):
             model_type = "nvidia"
 
-        assert handler.check_for_file_existence(os.path.join(handler.root, model_type, "train_data.npy")) and handler.check_for_file_existence(os.path.join(handler.root, model_type, "train_label.pkl")) and handler.check_for_file_existence(os.path.join(handler.root, model_type, "val_data.npy")) and handler.check_for_file_existence(os.path.join(handler.root, model_type, "val_label.pkl"))
+        assert os.path.exists(os.path.join(handler.root, model_type, "train_data.npy")) and os.path.exists(os.path.join(handler.root, model_type, "train_label.pkl")) and os.path.exists(os.path.join(handler.root, model_type, "val_data.npy")) and os.path.exists(os.path.join(handler.root, model_type, "val_label.pkl"))
         return True
 
     except:
         return False
 
 
-def re_identification(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def re_identification(org_name, handler_metadata, temp_dir=""):
     """
     Default:
     sample_train
@@ -451,24 +437,24 @@ def re_identification(org_name, handler_metadata, temp_dir="", workspace_metadat
     ...
 
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
     try:
         # Validate images and labels paths exist
-        assert handler.check_for_file_existence(os.path.join(handler.root, "sample_train.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "sample_test.tar.gz")) and handler.check_for_file_existence(os.path.join(handler.root, "sample_query.tar.gz"))
+        assert os.path.exists(os.path.join(handler.root, "sample_train.tar.gz")) and os.path.exists(os.path.join(handler.root, "sample_test.tar.gz")) and os.path.exists(os.path.join(handler.root, "sample_query.tar.gz"))
         return True
 
     except:
         return False
 
 
-def data_services_image(org_name, handler_metadata, temp_dir="", workspace_metadata=None):
+def data_services_image(org_name, handler_metadata, temp_dir=""):
     """
     Folder with any subfolder structure of images
     """
-    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir, workspace_metadata=workspace_metadata)
+    handler = SimpleHandler(org_name, handler_metadata, temp_dir=temp_dir)
     try:
         # Validate images exist
-        assert handler.check_for_file_existence(handler.root)
+        assert os.path.exists(handler.root)
         valid_extensions = ['.jpg', '.jpeg', '.png']
         pattern = os.path.join(handler.root, '**', f'*.[{"|".join(valid_extensions)}]')
         image_files = glob.glob(pattern, recursive=True)

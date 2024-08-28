@@ -13,7 +13,6 @@
 # limitations under the License.
 
 """API response filtering modules"""
-from datetime import datetime
 
 
 def apply(args, data):
@@ -67,8 +66,8 @@ def apply(args, data):
     elif filter_sort == 'name-descending':
         data = sorted(data, key=lambda d: '' + d.get('name') + ':' + d.get('version'), reverse=True)
     elif filter_sort == 'date-ascending':
-        data = sorted(data, key=lambda d: d.get('last_modified') if isinstance(d.get('last_modified'), datetime) else datetime.fromisoformat(d.get('last_modified')), reverse=False)
+        data = sorted(data, key=lambda d: d.get('last_modified'), reverse=False)
     else:  # filter_sort == 'date-descending'
-        data = sorted(data, key=lambda d: d.get('last_modified') if isinstance(d.get('last_modified'), datetime) else datetime.fromisoformat(d.get('last_modified')), reverse=True)
+        data = sorted(data, key=lambda d: d.get('last_modified'), reverse=True)
 
     return data

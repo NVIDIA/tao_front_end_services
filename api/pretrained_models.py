@@ -410,12 +410,11 @@ class BaseExperimentMetadata:
                 "domain": attr.get("domain", None),
                 "backbone_type": attr.get("backbone_type", None),
                 "backbone_class": attr.get("backbone_class", None),
-                "num_parameters": attr.get("num_parameters", None),
                 "license": attr.get("license", None),
                 "model_card_link": f"https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tao/models/{model_name}",
             },
             "base_experiment_pull_complete": base_experiment_pull_complete,
-            "type": "medical" if network_arch.startswith("monai_") else "vision",
+            "type": "medical" if network_arch.startswith("medical_") else "vision",
         }
         # some additional specific metadata
         if additional_metadata:
@@ -453,16 +452,16 @@ class BaseExperimentMetadata:
                         model_info[ngc_path] = self.get_model_info_from_ngc(
                             ngc_token, org, team, model_name, model_version
                         )
-                        if base_experiment["network_arch"].startswith("monai_"):
-                            monai_metadata = self.get_model_info_from_ngc(
+                        if base_experiment["network_arch"].startswith("medical_"):
+                            medical_metadata = self.get_model_info_from_ngc(
                                 ngc_token, org, team, model_name, model_version, "configs/metadata.json"
                             )
                         else:
-                            monai_metadata = {}
+                            medical_metadata = {}
 
                     # Update metadata for each experiment
                     valid_base_experiments[exp_id] = self.extract_metadata(
-                        model_info[ngc_path], base_experiment, monai_metadata, model_name
+                        model_info[ngc_path], base_experiment, medical_metadata, model_name
                     )
                     print(f"Successfully created a base experiment for {ngc_path},{base_experiment['network_arch']}")
                 except ValueError as e:

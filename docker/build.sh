@@ -96,10 +96,10 @@ chmod 777 TAO_API_REPOSITORY.txt UUID_TAO_HELM.txt
 
 if [ $DEPLOYMENT_MODE = "PROD" ]; then
     NGC_CLI_URL="https://api.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.31.0/files/ngccli_linux.zip"
-    PTM_ORG_TEAMS="nvidia/tao,iasixjqzw1hj/no-team,ea-tlt/tao_ea"
+    PTM_ORG_TEAMS="nvidia/tao"
 else
     NGC_CLI_URL="https://api.stg.ngc.nvidia.com/v2/resources/nvidia/ngc-apps/ngc_cli/versions/3.95.12/files/ngccli_linux.zip"
-    PTM_ORG_TEAMS="ygcrk6indslt/tao_ea,ygcrk6indslt/tao_ea_allow"
+    PTM_ORG_TEAMS="nvidia/tao"
 fi
 
 # Build docker

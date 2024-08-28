@@ -20,8 +20,8 @@ kind: ClusterRole
 metadata:
   name: {{ $myName }}-rbac-cr
 rules:
-- apiGroups: ["", "batch", "dgx-job-manager.nvidia.io", "apps", "mongodbcommunity.mongodb.com", "nvcf-job-manager.nvidia.io", "networking.k8s.io"]
-  resources: ["jobs", "dgxjobs", "nvcfjobs", "jobs/status", "nodes", "pods", "services", "secrets", "deployments", "endpoints", "deployments/status", "persistentvolumeclaims", "mongodbcommunity", "ingresses"]
+- apiGroups: ["", "batch", "dgx-job-manager.nvidia.io", "nvcf-job-manager.nvidia.io", "apps"]
+  resources: ["jobs", "dgxjobs", "nvcfjobs", "jobs/status", "nodes", "pods", "services", "secrets", "deployments", "endpoints", "deployments/status", "persistentvolumeclaims"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

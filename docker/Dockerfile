@@ -58,7 +58,7 @@ RUN /venv/bin/pip install --disable-pip-version-check -r requirements.txt
 
 # Fetch metadata for PTMs
 ARG NGC_KEY
-ARG PTM_ORG_TEAMS="nvidia/tao,iasixjqzw1hj/no-team,ea-tlt/tao_ea"
+ARG PTM_ORG_TEAMS="nvidia/tao"
 ARG DEPLOYMENT_MODE=PROD
 ENV DEPLOYMENT_MODE=$DEPLOYMENT_MODE
 COPY api/utils.py .

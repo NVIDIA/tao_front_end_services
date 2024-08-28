@@ -39,11 +39,11 @@ def dependency_check_parent(job_context, dependency):
     # If no parent job, this is always True
     if parent_job_id is None:
         return True, ""
-    parent_handler_id = get_handler_id(parent_job_id)
+    parent_handler_id = get_handler_id(org_name, parent_job_id)
     # Monai jobs can run without parent_status.
-    if parent_handler_id is None and "monai" in job_context.network:
+    if parent_handler_id is None and "medical" in job_context.network:
         return True, ""
-    parent_job_metadata = get_handler_job_metadata(parent_job_id)
+    parent_job_metadata = get_handler_job_metadata(org_name, parent_handler_id, parent_job_id)
     parent_action = parent_job_metadata.get("action", "")
     if parent_action == "annotation":
         return True, ""
@@ -58,7 +58,7 @@ def dependency_check_parent(job_context, dependency):
         handler_kind = "experiments"
         if job_context.handler_id in os.listdir(os.path.join(get_root(), org_name, "datasets")):
             handler_kind = "datasets"
-        update_job_status(job_context.handler_id, job_context.id, parent_status, kind=handler_kind)
+        update_job_status(org_name, job_context.handler_id, job_context.id, parent_status, kind=handler_kind)
         return False, f"Parent job {parent_job_id} errored out"
 
     if parent_status not in ("Done", "Canceled"):
@@ -91,10 +91,9 @@ def dependency_check_specs(job_context, dependency):
 def dependency_check_dataset(job_context, dependency):
     """Returns always true for dataset dependency check"""
     handler_id = job_context.handler_id
+    org_name = job_context.org_name
 
-    handler_metadata = get_handler_metadata(handler_id, "experiments")
-    if not handler_metadata:  # dataset job
-        handler_metadata = get_handler_metadata(handler_id, "datasets")
+    handler_metadata = get_handler_metadata(org_name, handler_id)
     valid_datset_structure = True
     train_datasets = handler_metadata.get("train_datasets", None)
     eval_dataset = handler_metadata.get("eval_dataset", None)
@@ -107,7 +106,7 @@ def dependency_check_dataset(job_context, dependency):
 
     invalid_datasets = ""
     if handler_metadata.get("type", "vision").lower() == "medical":
-        # bypass the checks as the datasets are not downloaded for monai jobs at the time of job creation.
+        # bypass the checks as the datasets are not downloaded for medical jobs at the time of job creation.
         valid_datset_structure = True
 
     if not handler_metadata.get("network_arch", ""):  # For dataset convert jobs, we have dataset info directly in metadata
@@ -115,15 +114,15 @@ def dependency_check_dataset(job_context, dependency):
         invalid_datasets += append_dataset_id_to_message(handler_metadata, valid_datset_structure)
     elif train_datasets:
         for train_ds in train_datasets:
-            dataset_metadata = get_handler_metadata(train_ds, "datasets")
+            dataset_metadata = get_handler_metadata(org_name, train_ds)
             valid_datset_structure = dataset_metadata.get("status") == "pull_complete"
             invalid_datasets += append_dataset_id_to_message(dataset_metadata, valid_datset_structure)
     if eval_dataset:
-        dataset_metadata = get_handler_metadata(eval_dataset, "datasets")
+        dataset_metadata = get_handler_metadata(org_name, eval_dataset)
         valid_datset_structure = dataset_metadata.get("status") == "pull_complete"
         invalid_datasets += append_dataset_id_to_message(dataset_metadata, valid_datset_structure)
     if inference_dataset:
-        dataset_metadata = get_handler_metadata(inference_dataset, "datasets")
+        dataset_metadata = get_handler_metadata(org_name, inference_dataset)
         valid_datset_structure = dataset_metadata.get("status") == "pull_complete"
         invalid_datasets += append_dataset_id_to_message(dataset_metadata, valid_datset_structure)
 
@@ -138,7 +137,7 @@ def dependency_check_model(job_context, dependency):
     network = job_context.network
     handler_id = job_context.handler_id
 
-    handler_metadata = get_handler_metadata(handler_id, "experiments")
+    handler_metadata = get_handler_metadata(job_context.org_name, handler_id)
     # If it is a dataset, no model dependency
     if "train_datasets" not in handler_metadata.keys():
         return True, ""
@@ -151,7 +150,7 @@ def dependency_check_model(job_context, dependency):
         base_experiment_metadata = get_base_experiment_metadata(base_experiment_id)
         if not base_experiment_metadata:
             # Search in the base_exp_uuid fails, search in the org_name
-            base_experiment_metadata = get_handler_metadata(base_experiment_id, "experiments")
+            base_experiment_metadata = get_handler_metadata(job_context.org_name, base_experiment_id)
 
         if network in TAO_NETWORKS and not base_experiment_metadata.get("base_experiment_metadata", {}).get("spec_file_present"):  # For TAO models, if the B.E doesn't have a spec file attached in NGC, then we don't need to check anything
             return True, ""

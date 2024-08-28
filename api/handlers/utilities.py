@@ -44,19 +44,20 @@ import json
 import math
 import uuid
 import shutil
+import datetime
 import requests
 import tempfile
 import traceback
 import subprocess
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 
-from constants import _ITER_MODELS, CONTINUOUS_STATUS_KEYS, _PYT_TAO_NETWORKS, STATUS_JSON_MISMATCH_WITH_CHECKPOINT_EPOCH, STATUS_JSON_MISMATCH_WITH_CHECKPOINT_EPOCH_TMP, NETWORK_METRIC_MAPPING, TAO_NETWORKS, _TF2_NETWORKS, MISSING_EPOCH_FORMAT_NETWORKS
+from constants import _ITER_MODELS, CONTINUOUS_STATUS_KEYS, _PYT_TAO_NETWORKS, STATUS_JSON_MISMATCH_WITH_CHECKPOINT_EPOCH, NETWORK_METRIC_MAPPING, TAO_NETWORKS, _TF2_NETWORKS, MISSING_EPOCH_FORMAT_NETWORKS
 from handlers.cloud_storage import create_cs_instance
 from handlers.encrypt import NVVaultEncryption
 from handlers.stateless_handlers import get_handler_metadata, get_handler_job_metadata, get_handler_root, get_jobs_root, get_base_experiment_path, get_root, get_latest_ver_folder, get_base_experiment_metadata, write_job_metadata, update_base_experiment_metadata, resolve_metadata, write_handler_metadata, experiment_update_handler_attributes, update_handler_with_jobs_info, get_workspace_string_identifier, BACKEND
-from handlers.monai.template_python import TEMPLATE_TIS_MODEL, TEMPLATE_TIS_CONFIG, TEMPLATE_CONTINUAL_LEARNING
+from handlers.medical.template_python import TEMPLATE_TIS_MODEL, TEMPLATE_TIS_CONFIG, TEMPLATE_CONTINUAL_LEARNING
 from handlers.ngc_handler import validate_ptm_download, download_ngc_model
-from handlers.monai.helpers import find_matching_bundle_dir
+from handlers.medical.helpers import find_matching_bundle_dir
 from utils import create_folder_with_permissions, safe_load_file
 
 
@@ -103,10 +104,10 @@ class JobContext:
         self.kind = kind
         self.created_on = created_on
         if not self.created_on:
-            self.created_on = datetime.now(tz=timezone.utc)
+            self.created_on = datetime.datetime.now().isoformat()
 
         # State variables
-        self.last_modified = datetime.now(tz=timezone.utc)
+        self.last_modified = datetime.datetime.now().isoformat()
         self.status = "Pending"  # Starts off like this
         self.result = {}
         self.specs = specs
@@ -123,8 +124,8 @@ class JobContext:
     def write(self):
         """Write the schema dict to jobs_metadata/job_id.json file"""
         # Create a job metadata
-        write_job_metadata(self.id, self.schema())
-        update_handler_with_jobs_info(self.schema(), self.handler_id, self.id, self.kind + "s")
+        write_job_metadata(self.org_name, self.handler_id, self.id, self.schema(), self.kind + "s")
+        update_handler_with_jobs_info(self.schema(), self.org_name, self.handler_id, self.id, self.kind + "s")
 
     def __repr__(self):
         """Returns the schema dict"""
@@ -137,7 +138,6 @@ class JobContext:
             "name": self.name,
             "description": self.description,
             "id": self.id,
-            "org_name": self.org_name,
             "parent_id": self.parent_id,
             "action": self.action,
             "created_on": self.created_on,
@@ -203,32 +203,6 @@ class StatusParser:
                     return
             self.results["categorical"].update(cat_dict)
 
-    def _process_object_count_kpi(self, kpi_dict):
-        "Process object count KPI from DS Analyze action"
-        index_to_object = kpi_dict.get('index', {})
-        count_num = kpi_dict.get('count_num', {})
-        percent = kpi_dict.get('percent', {})
-        self.results['kpi']['object_count_index'] = {"values": {}}
-        self.results['kpi']['object_count_num'] = {"values": {}}
-        self.results['kpi']['object_count_percent'] = {"values": {}}
-        for key, value in index_to_object.items():
-            self.results['kpi']['object_count_index']['values'][str(key)] = value
-        for key, value in count_num.items():
-            self.results['kpi']['object_count_num']['values'][str(key)] = value
-        for key, value in percent.items():
-            self.results['kpi']['object_count_percent']['values'][str(key)] = value
-
-    def _process_bbox_area_kpi(self, kpi_dict):
-        """Process Bounding Box Area KPI from DS Analyze action"""
-        type_to_object = kpi_dict.get('type', {})
-        mean = kpi_dict.get('mean', {})
-        self.results['kpi']['bbox_area_type'] = {"values": {}}
-        self.results['kpi']['bbox_area_mean'] = {"values": {}}
-        for key, value in type_to_object.items():
-            self.results['kpi']['bbox_area_type']['values'][str(key)] = value
-        for key, value in mean.items():
-            self.results['kpi']['bbox_area_mean']['values'][str(key)] = value
-
     def _update_kpi(self, status_dict):
         """Update kpi key of status line"""
         if "epoch" in status_dict:
@@ -246,26 +220,21 @@ class StatusParser:
             kpi_dict = status_dict["kpi"]
             if type(kpi_dict) is not dict:
                 return
-            analyze_type = kpi_dict.get('analyze_type', '')
-            if analyze_type == 'object_count':  # DS Analyze KPI
-                self._process_object_count_kpi(kpi_dict)
-            elif analyze_type == 'bbox_area':
-                self._process_bbox_area_kpi(kpi_dict)
-            else:
-                for key, value in kpi_dict.items():
-                    if type(value) is dict:
-                        # Process it differently
-                        float_value = StatusParser.force_float(value.get("value", None))
-                    else:
-                        float_value = StatusParser.force_float(value)
-                    # Simple append to "values" if the list exists
-                    if key in self.results["kpi"]:
-                        if float_value is not None:
-                            if self.last_seen_epoch not in self.results["kpi"][key]["values"].keys():
-                                self.results["kpi"][key]["values"][str(self.last_seen_epoch)] = float_value
-                    else:
-                        if float_value is not None:
-                            self.results["kpi"][key] = {"values": {str(self.last_seen_epoch): float_value}}
+
+            for key, value in kpi_dict.items():
+                if type(value) is dict:
+                    # Process it differently
+                    float_value = StatusParser.force_float(value.get("value", None))
+                else:
+                    float_value = StatusParser.force_float(value)
+                # Simple append to "values" if the list exists
+                if key in self.results["kpi"]:
+                    if float_value is not None:
+                        if self.last_seen_epoch not in self.results["kpi"][key]["values"].keys():
+                            self.results["kpi"][key]["values"][self.last_seen_epoch] = float_value
+                else:
+                    if float_value is not None:
+                        self.results["kpi"][key] = {"values": {self.last_seen_epoch: float_value}}
 
     def _update_graphical(self, status_dict):
         """Update graphical key of status line"""
@@ -297,10 +266,10 @@ class StatusParser:
                 if key in self.results["graphical"]:
                     if float_value is not None:
                         if self.last_seen_epoch not in self.results["graphical"][key]["values"].keys():
-                            self.results["graphical"][key]["values"][str(self.last_seen_epoch)] = float_value
+                            self.results["graphical"][key]["values"][self.last_seen_epoch] = float_value
                 else:
                     if float_value is not None:
-                        self.results["graphical"][key] = {"values": {str(self.last_seen_epoch): float_value}}
+                        self.results["graphical"][key] = {"values": {self.last_seen_epoch: float_value}}
 
                 if key in self.results["graphical"]:
                     # Put together x_min, x_max, y_min, y_max
@@ -426,18 +395,17 @@ class StatusParser:
         """Retains only the tuples whose epoch numbers are <= required epochs"""
         trimmed_list = []
         for tuple_var in metric_list:
-            epoch, value = (int(tuple_var[0]), tuple_var[1])
-            if epoch >= 0:
+            if tuple_var[0] >= 0:
                 if automl_algorithm in ("bayesian", "b", ""):
-                    if self.network in (_PYT_TAO_NETWORKS - set(["pointpillars", "segformer", "ml_recog"])):
-                        if epoch < brain_epoch_number:  # epoch number in checkpoint starts from 0 or models whose validation logs are generated before the training logs
-                            trimmed_list.append((epoch, value))
+                    if self.network in (_PYT_TAO_NETWORKS - set(["pointpillars", "segformer"])):
+                        if tuple_var[0] < brain_epoch_number:  # epoch number in checkpoint starts from 0 or models whose validation logs are generated before the training logs
+                            trimmed_list.append(tuple_var)
                     else:
-                        trimmed_list.append((epoch, value))
-                elif (self.network in _TF2_NETWORKS or self.network in ("segformer", "classification_pyt", "ml_recog")) and epoch <= brain_epoch_number:
-                    trimmed_list.append((epoch, value))
-                elif epoch < brain_epoch_number:
-                    trimmed_list.append((epoch, value))
+                        trimmed_list.append(tuple_var)
+                elif (self.network in _TF2_NETWORKS or self.network in ("segformer", "classification_pyt")) and tuple_var[0] <= brain_epoch_number:
+                    trimmed_list.append(tuple_var)
+                elif tuple_var[0] < brain_epoch_number:
+                    trimmed_list.append(tuple_var)
         return trimmed_list
 
     def read_metric(self, results, metric="loss", automl_algorithm="", automl_root="", brain_epoch_number=0):
@@ -484,9 +452,6 @@ class StatusParser:
         if self.network in STATUS_JSON_MISMATCH_WITH_CHECKPOINT_EPOCH:
             self.best_epoch_number += 1
             self.latest_epoch_number += 1
-        if self.network in STATUS_JSON_MISMATCH_WITH_CHECKPOINT_EPOCH_TMP:
-            self.best_epoch_number -= 1
-            self.latest_epoch_number -= 1
         print(f"Metric returned is {metric_value} at best epoch/iter {self.best_epoch_number} while latest epoch/iter is {self.latest_epoch_number}", file=sys.stderr)
         return metric_value + 1e-07, self.best_epoch_number, self.latest_epoch_number
 
@@ -524,10 +489,10 @@ def search_for_base_experiment(root, network="", spec=False):
     return None
 
 
-def get_dataset_download_command(dataset_metadata):
+def get_dataset_download_command(org_name, dataset_metadata):
     """Frames a wget and untar commands to download the dataset"""
     workspace_id = dataset_metadata.get("workspace")
-    workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+    workspace_metadata = get_handler_metadata(org_name, workspace_id, "workspaces")
     meta_data = copy.deepcopy(workspace_metadata)
 
     cloud_type = meta_data.get("cloud_type")
@@ -572,19 +537,19 @@ def get_dataset_download_command(dataset_metadata):
     return cmnd, temp_dir
 
 
-def download_dataset(handler_dataset):
+def download_dataset(org_name, handler_dataset):
     """Calls wget and untar"""
     if handler_dataset is None:
         return None, None
     tar_file_path = None
-    metadata = resolve_metadata("dataset", handler_dataset)
+    metadata = resolve_metadata(org_name, "dataset", handler_dataset)
     status = metadata.get("status")
     temp_dir = ""
     if status == "starting":
         metadata["status"] = "in_progress"
-        write_handler_metadata(handler_dataset, metadata, "datasets")
+        write_handler_metadata(org_name, handler_dataset, metadata, "datasets")
 
-        dataset_download_command, temp_dir = get_dataset_download_command(metadata)  # this will not be None since we check this earlier
+        dataset_download_command, temp_dir = get_dataset_download_command(org_name, metadata)  # this will not be None since we check this earlier
         if dataset_download_command:
             if os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
                 # In dev setting, we don't need to set HOME
@@ -600,7 +565,7 @@ def download_dataset(handler_dataset):
         if not tar_file_path:  # If dataset downloaded is of folder type
             tar_file_path = temp_dir
         metadata["status"] = "pull_complete"
-        write_handler_metadata(handler_dataset, metadata, "datasets")
+        write_handler_metadata(org_name, handler_dataset, metadata, "datasets")
     return temp_dir, tar_file_path
 
 
@@ -673,7 +638,7 @@ def download_base_experiment(user_id, base_experiment_id, spec=False):
         update_base_experiment_metadata(base_experiment_id, meta_data)
     print("Base Experiment is totally/partially downloaded to", base_experiment_file, file=sys.stderr)
     if base_experiment_file and os.path.exists(base_experiment_file):
-        print(f"Current_time : {datetime.now(tz=timezone.utc)}, File modified time: {os.path.getmtime(base_experiment_file)}", file=sys.stderr)
+        print(f"Current_time : {datetime.datetime.utcnow()}, File modified time: {os.path.getmtime(base_experiment_file)}", file=sys.stderr)
 
 
 def write_nested_dict(dictionary, key_dotted, value):
@@ -963,11 +928,11 @@ def add_workspace_to_cloud_metadata(workspace_metadata, cloud_metadata):
     }
 
 
-def get_cloud_metadata(workspace_ids, cloud_metadata):
+def get_cloud_metadata(org_name, workspace_ids, cloud_metadata):
     """For each workspace_id provided, fetch the necessary cloud info"""
     workspace_ids = list(set(workspace_ids))
     for workspace_id in workspace_ids:
-        workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+        workspace_metadata = get_handler_metadata(org_name, workspace_id, "workspaces")
         decrypt_handler_metadata(workspace_metadata)
         add_workspace_to_cloud_metadata(workspace_metadata, cloud_metadata)
 
@@ -1003,22 +968,6 @@ def send_microservice_request(api_endpoint, network, action, ngc_api_key="", clo
     endpoint = f"{base_url}/api/v1/nvcf"
     response = requests.post(endpoint, data=data)
     return response
-
-
-def sanitize_metadata(metadata):
-    """Convert metadata datetime objects to strings. MongoDB natively supports datetime objects. However, we pass a dict string as env variable to DNN container.
-    DNN Container uses ast.literal_eval to safely reconstruct this string into a dict. However, ast.literal_eval doesn't support datetime objects, so we convert
-    datetime objects to string here before passing the dict as a string in the job env variables.
-    """
-    if 'last_modified' in metadata and isinstance(metadata['last_modified'], datetime):
-        date_string = metadata['last_modified'].isoformat()
-        metadata['last_modified'] = date_string
-
-    if 'created_on' in metadata and isinstance(metadata['created_on'], datetime):
-        date_string = metadata['created_on'].isoformat()
-        metadata['created_on'] = date_string
-
-    metadata.pop('_id', None)
 
 
 def latest_model(files, delimiters="_", epoch_number="000", extensions=[".tlt", ".hdf5", ".pth"]):
@@ -1059,13 +1008,6 @@ def filter_files(files, regex_pattern=""):
         regex_pattern = r'^(?!.*lightning_logs).*\.(pth|tlt|hdf5)$'
     checkpoints = [path for path in files if re.match(regex_pattern, path)]
     return checkpoints
-
-
-def filter_file_objects(file_objects, regex_pattern=""):
-    if not regex_pattern:
-        regex_pattern = r'.*\.(pth|tlt|hdf5)$'
-    filtered_objects = [file_object for file_object in file_objects if re.match(regex_pattern, file_object.name)]
-    return filtered_objects
 
 
 def format_checkpoints_path(checkpoints):
@@ -1128,24 +1070,25 @@ def search_for_checkpoint(handler_metadata, job_id, res_root, files, checkpoint_
     return result_file
 
 
-def get_files_from_cloud(handler_metadata, job_id):
+def get_files_from_cloud(user_id, org_name, handler_metadata, job_id):
     if job_id is None:
         return None
 
-    action = get_handler_job_metadata(job_id).get("action")
+    handler_id = handler_metadata.get("id")
+    action = get_handler_job_metadata(org_name, handler_id, job_id).get("action")
     res_root = os.path.join("/results", str(job_id))
     workspace_id = handler_metadata.get("workspace")
-    workspace_metadata = resolve_metadata("workspace", workspace_id)
+    workspace_metadata = resolve_metadata(org_name, "workspace", workspace_id)
     files = get_file_list_from_cloud_storage(workspace_metadata, res_root)
     return files, action, res_root, workspace_id
 
 
-def resolve_checkpoint_root_and_search(handler_metadata, job_id):
+def resolve_checkpoint_root_and_search(user_id, org_name, handler_metadata, job_id):
     """Returns path of the model based on the action of the job"""
     if job_id is None:
         return None
 
-    files, action, res_root, workspace_id = get_files_from_cloud(handler_metadata, job_id)
+    files, action, res_root, workspace_id = get_files_from_cloud(user_id, org_name, handler_metadata, job_id)
 
     if action == "retrain":
         action = "train"
@@ -1171,16 +1114,16 @@ def resolve_checkpoint_root_and_search(handler_metadata, job_id):
         result_file = None
 
     if result_file:
-        workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
+        workspace_identifier = get_workspace_string_identifier(org_name, workspace_id, workspace_cache={})
         result_file = f"{workspace_identifier}{result_file}"
 
     return result_file
 
 
-def get_model_results_path(handler_metadata, job_id):
+def get_model_results_path(job_context, handler_metadata, job_id):
     """Return the model file for the job context and handler metadata passes"""
     print("\nget_model_results_path\n", file=sys.stderr)
-    return resolve_checkpoint_root_and_search(handler_metadata, job_id)
+    return resolve_checkpoint_root_and_search(job_context.user_id, job_context.org_name, handler_metadata, job_id)
 
 
 def get_model_bundle_root(org_name, experiment_id):
@@ -1315,33 +1258,33 @@ def _check_tis_model_params(model_params):
     if "override" in model_params:
         override = model_params["override"]
         if isinstance(override, dict):
-            return validate_monai_bundle_params(override)
+            return validate_medical_bundle_params(override)
         return False, f"Value of key `override` in model_params should be a dict, got {type(override)}."
 
     return True, ""
 
 
-def get_monai_bundle_path(src_root):
+def get_medical_bundle_path(src_root):
     """
-    Get the first folder path that has a monai bundle.
+    Get the first folder path that has a medical bundle.
     """
     src_root_contents = os.listdir(src_root)
     for content in src_root_contents:
         content_path = os.path.join(src_root, content)
         if os.path.isdir(content_path):
-            monai_bundle_content = ["configs", "models", "docs", "LICENSE"]
-            monai_bundle_paths = [os.path.join(content_path, x) for x in monai_bundle_content]
-            paths_exist = [os.path.exists(x) for x in monai_bundle_paths]
+            medical_bundle_content = ["configs", "models", "docs", "LICENSE"]
+            medical_bundle_paths = [os.path.join(content_path, x) for x in medical_bundle_content]
+            paths_exist = [os.path.exists(x) for x in medical_bundle_paths]
             if not all(paths_exist):
                 continue
             return Code(201, content, "Got path!")
-    return Code(404, {}, "Cannot export monai bundle.")
+    return Code(404, {}, "Cannot export medical bundle.")
 
 
 def generate_bundle_requirements_file(generate_dir, bundle_metadata):
     """Generate the requirements.txt file for the bundle."""
     libs = []
-    restrict_libs = ["monai", "torch", "torchvision", "numpy", "pytorch-ignite"]
+    restrict_libs = ["medical", "torch", "torchvision", "numpy", "pytorch-ignite"]
 
     if "optional_packages_version" in bundle_metadata.keys():
         optional_dict = bundle_metadata["optional_packages_version"]
@@ -1401,7 +1344,7 @@ def prep_tis_model_repository(model_params, base_experiment_id, org_name, user_i
     return True, tis_model, "Triton Inference Server model repository prepared successfully", model_bundle_metadata
 
 
-def validate_monai_bundle_params(model_params):
+def validate_medical_bundle_params(model_params):
     """Validate the the param are internal model params withheld from user"""
     if not isinstance(model_params, dict):
         return False, f"model_param override should be a dict, got {type(model_params)}."

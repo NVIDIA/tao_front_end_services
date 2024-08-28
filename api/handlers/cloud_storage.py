@@ -284,7 +284,6 @@ class CloudStorage:
                 print(f"Object copied successfully: {source_object_name} -> {destination_object_name}", file=sys.stderr)
             except Exception as e:
                 print(f"Error copying object {source_object_name}: {e}", file=sys.stderr)
-                raise ValueError(f"Error copying object {source_object_name}") from e
 
     @retry_method
     def copy_folder(self, source_path, destination_path):

@@ -17,7 +17,7 @@
 
 """Authentication utils access control modeules"""
 import os
-from handlers.mongo_handler import MongoHandler
+from handlers.stateless_handlers import safe_load_file
 
 
 class AccessControlError(Exception):
@@ -37,9 +37,9 @@ def validate(user_id, org_name, url):
     if not org_name:
         err = AccessControlError("Invalid Org requested")
     if err is None:
-        # TODO: Implement TAO NGC user role checking here
-        mongo = MongoHandler("tao", "users")
-        user_metadata = mongo.find_one({'id': user_id})
+        # Check org/team membership temporarily for EA programs
+        filepath = os.path.join(os.path.sep, 'shared', 'orgs', org_name, 'users', str(user_id), "metadata_token.json")
+        user_metadata = safe_load_file(filepath)
         member_of = user_metadata.get('member_of', [])
         if f"{org_name}/" not in member_of:
             err = AccessControlError("No access granted for user in org " + org_name)

@@ -19,12 +19,9 @@ DOCKER_IMAGE_MAPPER = {
     "PYTORCH": os.getenv('IMAGE_TAO_PYTORCH', default='nvcr.io/nvidia/tao/tao-toolkit:5.5.0-pyt'),
     "TAO_TF2": os.getenv('IMAGE_TAO_TF2', default='nvcr.io/nvidia/tao/tao-toolkit:5.0.0-tf2.11.0'),
     "tao-deploy": os.getenv('IMAGE_TAO_DEPLOY', default='nvcr.io/nvidia/tao/tao-toolkit:5.5.0-deploy'),
-    "monai": os.getenv('IMAGE_MONAI', default='nvcr.io/iasixjqzw1hj/monai-service:script-1.1.0.dev.d5d27af'),
-    "monai-tis": os.getenv('IMAGE_MONAI_TIS', default='nvcr.io/iasixjqzw1hj/monai-service:infer-1.0.3'),
     "": os.getenv('IMAGE_DEFAULT', default='nvcr.io/nvidia/tao/tao-toolkit:5.5.0-pyt'),  # Default
     "api": os.getenv('IMAGE_API', default='nvcr.io/nvidia/tao/tao-toolkit:5.5.0-api'),
-    "TAO_DS": os.getenv('IMAGE_TAO_DS', default='nvcr.io/nvidia/tao/tao-toolkit:5.5.0-data-services'),
-    "tensorboard": os.getenv('IMAGE_TF2', default='nvcr.io/nvidia/tensorflow:24.07-tf2-py3')
+    "TAO_DS": os.getenv('IMAGE_TAO_DS', default='nvcr.io/nvidia/tao/tao-toolkit:5.5.0-data-services')
 }
 
 

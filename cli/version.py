@@ -16,8 +16,8 @@
 """TAO-Client SDK version"""
 
 MAJOR = "5"
-MINOR = "5.0"
-PATCH = "0"
+MINOR = "5"
+PATCH = "1"
 PRE_RELEASE = ''
 
 

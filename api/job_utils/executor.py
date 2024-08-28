@@ -26,7 +26,6 @@ from kubernetes.client.rest import ApiException
 from constants import TAO_NETWORKS, NETWORK_CONTAINER_MAPPING
 from handlers.stateless_handlers import BACKEND, get_handler_job_metadata, get_toolkit_status
 from handlers.utilities import send_microservice_request
-from handlers.mongo_handler import mongo_secret
 from nvcf_controller import get_nvcf_job_status
 
 
@@ -204,10 +203,6 @@ def create(user_id, org_name, job_name, image, command, num_gpu=-1, accelerator=
     num_gpu_env = client.V1EnvVar(
         name="NUM_GPU_PER_NODE",
         value=str(num_gpu) if not cl_medical else os.getenv('NUM_GPU_PER_NODE', default='1'))
-    mongo_secret_env = client.V1EnvVar(
-        name="MONGOSECRET",
-        value=mongo_secret
-    )
     dynamic_docker_envs = []
     if docker_env_vars:
         for docker_env_var_key, docker_env_var_value in docker_env_vars.items():
@@ -224,7 +219,7 @@ def create(user_id, org_name, job_name, image, command, num_gpu=-1, accelerator=
     container = client.V1Container(
         name="container",
         image=image,
-        env=[backend_env, num_gpu_env, mongo_secret_env] + dynamic_docker_envs,
+        env=[backend_env, num_gpu_env] + dynamic_docker_envs,
         command=["/bin/bash", "-c"],
         args=[command],
         resources=resources,
@@ -466,7 +461,7 @@ def wait_for_service(org_name, handler_id, job_id, handler_kind):
     namespace = _get_name_space()
     start_time = time.time()
     while time.time() - start_time < 300:
-        metadata_status = get_handler_job_metadata(job_id).get("status")
+        metadata_status = get_handler_job_metadata(org_name, handler_id, job_id, handler_kind).get("status")
         if metadata_status in ("Canceled", "Canceling", "Paused", "Pausing"):
             return metadata_status
         if check_service_ready(service_name, namespace) and check_endpoints_ready(service_name, namespace):
@@ -713,9 +708,9 @@ def status_tis_service(tis_service_name, ports=(8000, 8001, 8002)):
         return {"status": "Error"}
 
 
-def override_k8_status(job_name, k8_status):
+def override_k8_status(org_name, handler_id, job_name, handler_kind, k8_status):
     """Override kubernetes job status with toolkit status"""
-    toolkit_status = get_toolkit_status(job_name)
+    toolkit_status = get_toolkit_status(org_name, handler_id, job_name, handler_kind)
     override_status = ""
     if k8_status == "Pending":  # We don't want to reverse done/error status to running
         if toolkit_status in ("STARTED", "RUNNING"):
@@ -753,15 +748,11 @@ def status(org_name, handler_id, job_name, handler_kind, use_ngc=True, network="
             k8_status = dgxjob_api_response.get("status", {}).get("phase", "")
             if not k8_status:
                 k8_status = "Pending"
-            override_status = override_k8_status(job_name, k8_status)
+            override_status = override_k8_status(org_name, handler_id, job_name, handler_kind, k8_status)
             if override_status and override_status != k8_status:
                 print(f"K8 status is {k8_status}, Toolkit Status is {override_status}, so overwriting", file=sys.stderr)
                 k8_status = override_status
-                deployment_string = dgxjob_api_response["spec"].get("deployment_string")
-                function_id, version_id = "", ""
-                if deployment_string.find(":") != -1:
-                    function_id, version_id = deployment_string.split(":")
-                get_nvcf_job_status(dgxjob_api_response, status=k8_status, function_id=function_id, version_id=version_id)
+                get_nvcf_job_status(dgxjob_api_response, status=k8_status)
             return k8_status
         except Exception as e:
             print("Exception caught", e, file=sys.stderr)
@@ -940,317 +931,6 @@ def dependency_check(num_gpu=-1, accelerator=None):
         if v >= num_gpu:
             return True
     return False
-
-
-def create_tensorboard_deployment(deployment_name, image, command, logs_image, logs_command, replicas):
-    """Creates Tensorboard Deployment"""
-    name_space = _get_name_space()
-    api_instance = client.AppsV1Api()
-    logs_volume_mount = client.V1VolumeMount(
-        name="tb-data",
-        mount_path="/tfevents")
-    capabilities = client.V1Capabilities(
-        add=['SYS_PTRACE']
-    )
-    security_context = client.V1SecurityContext(
-        capabilities=capabilities
-    )
-
-    tb_port = [
-        client.V1ContainerPort(container_port=6006)
-    ]
-    resources = client.V1ResourceRequirements(
-        limits={
-            'memory': "600Mi",
-            'cpu': "10m",
-        },
-        requests={
-            'memory': '300Mi',
-            'cpu': "5m"
-        }
-    )
-    no_gpu = client.V1EnvVar(
-        name="NVIDIA_VISIBLE_DEVICES",
-        value="none")
-    mongo_secret_env = client.V1EnvVar(
-        name="MONGOSECRET",
-        value=mongo_secret
-    )
-    backend_env = client.V1EnvVar(
-        name="BACKEND",
-        value=BACKEND
-    )
-    vault_path = client.V1EnvVar(
-        name="VAULT_SECRET_PATH",
-        value=os.getenv("VAULT_SECRET_PATH", None)
-    )
-    tb_container = client.V1Container(
-        name="tb-container",
-        image=image,
-        env=[no_gpu],
-        command=["/bin/sh", "-c"],
-        args=[command],
-        resources=resources,
-        volume_mounts=[logs_volume_mount],
-        ports=tb_port,
-        security_context=security_context)
-
-    tb_logs_container = client.V1Container(
-        name="tb-logs-container",
-        image=logs_image,
-        env=[no_gpu, mongo_secret_env, backend_env, vault_path],
-        command=["/bin/sh", "-c"],
-        resources=resources,
-        args=[logs_command],
-        volume_mounts=[logs_volume_mount],
-        security_context=security_context,
-    )
-
-    logs_volume = client.V1Volume(
-        name="tb-data",
-        empty_dir=client.V1EmptyDirVolumeSource())
-
-    template = client.V1PodTemplateSpec(
-        metadata=client.V1ObjectMeta(
-            labels={
-                "purpose": "tao-toolkit-tensorboard-job",
-                "resource-type": "tensorboard",
-                "app": deployment_name,  # use deployment_name as the selector name
-            }
-        ),
-        spec=client.V1PodSpec(
-            containers=[tb_container, tb_logs_container],
-            volumes=[logs_volume],
-        ))
-
-    spec = client.V1DeploymentSpec(
-        replicas=replicas,
-        template=template,
-        selector={"matchLabels": {"app": deployment_name}})
-
-    deployment = client.V1Deployment(
-        api_version="apps/v1",
-        kind="Deployment",
-        metadata=client.V1ObjectMeta(name=deployment_name, labels={
-            "resource-type": "tensorboard"
-        }),
-        spec=spec)
-
-    print("Prepared deployment configs", file=sys.stderr)
-    try:
-        api_instance.create_namespaced_deployment(
-            body=deployment,
-            namespace=name_space)
-        print("Start create deployment", file=sys.stderr)
-        return
-    except Exception as e:
-        print(f"Create deployment got error: {e}", file=sys.stderr)
-        return
-
-
-def create_tensorboard_service(tb_service_name, deploy_label):
-    """Creates Tensorboard Service"""
-    name_space = _get_name_space()
-    tb_port = [
-        client.V1ServicePort(name='tb-default-port', port=6006, target_port=6006, protocol="TCP")
-    ]
-    spec = client.V1ServiceSpec(ports=tb_port, selector={"app": deploy_label})
-    # add annotation, it will only works in Azure, but will not affect other cloud
-    annotation = {
-        "service.beta.kubernetes.io/azure-load-balancer-internal": "true"
-    }
-    service = client.V1Service(
-        api_version="v1",
-        kind="Service",
-        metadata=client.V1ObjectMeta(name=tb_service_name, labels={"app": tb_service_name, "resource-type": "tensorboard"}, annotations=annotation),
-        spec=spec,
-    )
-    api_instance = client.CoreV1Api()
-
-    print("Prepared Tensorboard Service configs", file=sys.stderr)
-    try:
-        api_instance.create_namespaced_service(
-            body=service,
-            namespace=name_space)
-        print("Start create Tensorboard Service", file=sys.stderr)
-        return
-    except Exception as e:
-        print(f"Create Tensorboard Service got error: {e}", file=sys.stderr)
-        return
-
-
-def create_tensorboard_ingress(tb_service_name, tb_ingress_name, tb_ingress_path):
-    """Creates Tensorboard Ingress"""
-    name_space = _get_name_space()
-    networking_v1_api = client.NetworkingV1Api()
-    release_name = os.getenv("RELEASE_NAME", 'tao-api')
-    auth_url = f'http://{release_name}-service.{name_space}.svc.cluster.local:8000/api/v1/auth'
-    ingress = client.V1Ingress(
-        api_version="networking.k8s.io/v1",
-        kind="Ingress",
-        metadata=client.V1ObjectMeta(name=tb_ingress_name, namespace=name_space, labels={
-            "resource-type": "tensorboard"
-        }, annotations={
-            "kubernetes.io/ingress.class": "nginx",
-            "nginx.ingress.kubernetes.io/auth-url": auth_url,
-            "nginx.ingress.kubernetes.io/client-max-body-size": "0m",
-            "nginx.ingress.kubernetes.io/proxy-body-size": "0m",
-            "nginx.ingress.kubernetes.io/body-size": "0m",
-            "nginx.ingress.kubernetes.io/client-body-buffer-size": "50m",
-            "nginx.ingress.kubernetes.io/proxy-buffer-size": "128k",
-            "nginx.ingress.kubernetes.io/proxy-buffers-number": "4",
-            "nginx.ingress.kubernetes.io/proxy-connect-timeout": "3600",
-            "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
-            "nginx.ingress.kubernetes.io/proxy-send-timeout": "3600",
-        }),
-        spec=client.V1IngressSpec(
-            rules=[client.V1IngressRule(
-                http=client.V1HTTPIngressRuleValue(
-                    paths=[client.V1HTTPIngressPath(
-                        path=tb_ingress_path,
-                        path_type="Prefix",
-                        backend=client.V1IngressBackend(
-                            service=client.V1IngressServiceBackend(
-                                port=client.V1ServiceBackendPort(
-                                    name='tb-default-port'
-                                ),
-                                name=tb_service_name
-                            )
-                        )
-                    )]
-                )
-            )]
-        )
-    )
-
-    try:
-        networking_v1_api.create_namespaced_ingress(
-            body=ingress,
-            namespace=name_space
-        )
-        print("Created Tensorboard Ingress", file=sys.stderr)
-        return
-    except Exception as e:
-        print(f"Create Tensorboard Ingress got error: {e}", file=sys.stderr)
-        return
-
-
-def status_tensorboard_deployment(deployment_name, replicas=1):
-    """
-    Returns status of Tensorboard deployment
-    Status definition:
-
-    Running: The Tensorboard deployment is ready and running
-    ReplicaNotReady: at least one replica of the deployment is not ready.
-    NotFound: cannot find the deployment.  This status is useful to check if the deployment is stopped.
-    Error: meet exceptions except not found error when check the status.
-
-    """
-    name_space = _get_name_space()
-    api_instance = client.AppsV1Api()
-    try:
-        api_response = api_instance.read_namespaced_deployment_status(
-            name=deployment_name,
-            namespace=name_space)
-        available_replicas = api_response.status.available_replicas
-        if not isinstance(available_replicas, int) or available_replicas < replicas:
-            return {"status": "ReplicaNotReady"}
-        return {"status": "Running"}
-    except ApiException as e:
-        if e.status == 404:
-            print("Tensorboard Deployment not found.", file=sys.stderr)
-            # TODO: here defined a new status to find the situation that the deployment does not exists
-            # This status is useful to check if the deployment is deleted or not created
-            return {"status": "NotFound"}
-        print(f"Got other ApiException error: {e}", file=sys.stderr)
-        return {"status": "Error"}
-    except Exception as e:
-        print(f"Got {type(e)} error: {e}", file=sys.stderr)
-        return {"status": "Error"}
-
-
-def status_tb_service(tb_service_name, port=6006):
-    """
-    Returns status of TB Service
-    Status definition:
-
-    Running: The TB Service is ready and running
-    NotReady: the TB Service is not ready.
-    NotFound: cannot find the TB Service. This status is useful to check if the service is stopped.
-    Error: meet exceptions except not found error when check the status.
-    """
-    name_space = _get_name_space()
-    api_instance = client.CoreV1Api()
-
-    try:
-        api_response = api_instance.read_namespaced_service(
-            name=tb_service_name,
-            namespace=name_space,
-        )
-        print(f'TB Service API Response: {api_response}')
-        tb_service_ip = api_response.spec.cluster_ip
-        return {"status": "Running", "tb_service_ip": tb_service_ip}
-    except ApiException as e:
-        if e.status == 404:
-            print("TIS Service not found.", file=sys.stderr)
-            # TODO: here defined a new status, in order to find the situation that the TIS Service not exists
-            # This status is useful to check if the TIS Service is deleted or not created
-            return {"status": "NotFound"}
-        print(f"Got other ApiException error: {e}", file=sys.stderr)
-        return {"status": "Error"}
-    except Exception as e:
-        print(f"Got {type(e)} error: {e}", file=sys.stderr)
-        return {"status": "Error"}
-
-
-def delete_tensorboard_deployment(deployment_name):
-    """Deletes Tensorboard Deployment"""
-    name_space = _get_name_space()
-    api_instance = client.AppsV1Api()
-    try:
-        api_response = api_instance.delete_namespaced_deployment(
-            name=deployment_name,
-            namespace=name_space,
-            body=client.V1DeleteOptions(
-                propagation_policy='Foreground',
-                grace_period_seconds=5))
-        print(f"Tensorboard Deployment deleted. status='{str(api_response.status)}'", file=sys.stderr)
-        return
-    except Exception as e:
-        print(f"Tensorboard Deployment failed to delete, got error: {e}", file=sys.stderr)
-        return
-
-
-def delete_tensorboard_service(tb_service_name):
-    """Deletes Tensorboard service"""
-    name_space = _get_name_space()
-    api_instance = client.CoreV1Api()
-    try:
-        api_response = api_instance.delete_namespaced_service(
-            name=tb_service_name,
-            namespace=name_space,
-        )
-        print(f"Tensorboard Service deleted. status='{str(api_response.status)}'", file=sys.stderr)
-        return
-    except Exception as e:
-        print(f"Tensorboard Service failed to delete, got error: {e}", file=sys.stderr)
-        return
-
-
-def delete_tensorboard_ingress(tb_ingress_name):
-    """Delete Tensorboard Ingress"""
-    name_space = _get_name_space()
-    networking_v1_api = client.NetworkingV1Api()
-    try:
-        api_response = networking_v1_api.delete_namespaced_ingress(
-            name=tb_ingress_name,
-            namespace=name_space
-        )
-        print(f"Tensorboard Ingress deleted. status='{str(api_response.status)}'", file=sys.stderr)
-        return
-    except Exception as e:
-        print(f"Tensorboard Ingress failed to delete, got error: {e}", file=sys.stderr)
-        return
 
 
 def get_cluster_ip(namespace='default'):

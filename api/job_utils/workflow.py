@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import functools
+import datetime
 import time
 import uuid
 import glob
@@ -25,13 +26,11 @@ from pathlib import Path
 from queue import PriorityQueue
 
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
 
 from constants import MEDICAL_AUTOML_ARCHITECT, MEDICAL_NETWORK_ARCHITECT
 from handlers.utilities import JobContext
 from handlers.actions import ACTIONS_TO_FUNCTIONS, AutoMLPipeline
-from handlers.stateless_handlers import get_all_pending_jobs, get_handler_root, get_handler_job_metadata, get_jobs_root, update_job_metadata, safe_dump_file, safe_load_file, get_handler_type, get_handler_metadata
-from handlers.automl_handler import AutoMLHandler
+from handlers.stateless_handlers import get_all_pending_jobs, get_handler_root, get_handler_job_metadata, get_jobs_root, update_job_metadata, safe_dump_file, safe_load_file
 from utils import read_network_config
 from job_utils.dependencies import dependency_type_map, dependency_check_default
 
@@ -59,7 +58,7 @@ class PrioritizedItem:
     """Base class for prioritizing items"""
 
     priority: int = field(default=1)
-    created_on: str = field(default=datetime.now(tz=timezone.utc))
+    created_on: str = field(default=datetime.datetime.now().isoformat())
 
 
 @dataclass
@@ -75,7 +74,7 @@ class Dependency:
 class Job(PrioritizedItem, IdedItem):
     """Class for representing jobs"""
 
-    last_modified: str = field(compare=False, default=datetime.now(tz=timezone.utc))
+    last_modified: str = field(compare=False, default=datetime.datetime.now().isoformat())
     action: str = field(compare=False, default=None)
     dependencies: list = field(compare=False, default=None)
     # More parameters for Job from JobContext
@@ -113,7 +112,7 @@ def execute_job(job_context):
         network_config = read_network_config(network)
         action_pipeline_name = network_config["api_params"]["actions_pipe"].get(action, "")
         if network in MEDICAL_NETWORK_ARCHITECT:
-            action_pipeline_name = "monai_" + action_pipeline_name
+            action_pipeline_name = "medical_" + action_pipeline_name
         elif network in MEDICAL_AUTOML_ARCHITECT:
             action_pipeline_name = "medical_automl_" + action_pipeline_name
         action_pipeline = ACTIONS_TO_FUNCTIONS[action_pipeline_name]
@@ -149,7 +148,7 @@ def report_healthy(message, clear=False):
     Path(path).touch()
     mode = "w" if clear else "a"
     with open(path, mode, encoding='utf-8') as f:
-        f.write(f"Healthy at {datetime.now().isoformat()}\n")
+        f.write(f"Healthy at {datetime.datetime.now().isoformat()}\n")
         if message:
             f.write(str(message) + "\n")
 
@@ -217,7 +216,7 @@ def scan_for_jobs():
 
             # Update detailed status message in response when appropriate message is available
             pending_reason_message = ''.join(pending_reason_message.rsplit(" and, ", 1))
-            metadata = get_handler_job_metadata(job.id)
+            metadata = get_handler_job_metadata(job.org_name, job.handler_id, job.id, job.kind)
             results = metadata.get("result", {})
             if results:
                 detailed_status = results.get("detailed_status", {})
@@ -227,7 +226,7 @@ def scan_for_jobs():
                 metadata["results"] = {}
                 results["detailed_status"] = {}
             results["detailed_status"]["message"] = pending_reason_message
-            update_job_metadata(job.handler_id, job.id, metadata_key="result", data=results, kind=job.kind + "s")
+            update_job_metadata(job.org_name, job.handler_id, job.id, metadata_key="result", data=results, kind=job.kind + "s")
 
             # if all dependencies are met
             if all_met and still_exists(job):
@@ -258,42 +257,20 @@ class Workflow:
     def restart_threads():
         """Method used to restart unfinished job monitoring threads"""
         jobs = get_all_pending_jobs()
-        automl_brain_restarted = False
         for job_dict in jobs:
-            parent_job_id = job_dict.get("parent_id")
-            action = job_dict.get("action")
-            job_id = job_dict.get("id")
-            name = job_dict.get("name")
-            org_name = job_dict.get("org_name")
-            specs = job_dict.get("specs")
-            if 'experiment_id' in job_dict:
-                kind = 'experiment'
-                handler_id = job_dict['experiment_id']
-            elif 'dataset_id' in job_dict:
-                kind = 'dataset'
-                handler_id = job_dict['dataset_id']
-            elif 'workspace_id' in job_dict:
-                kind = 'workspace'
-                handler_id = job_dict['workspace_id']
-            else:
-                print(f"Warning: Job {job_id} monitoring unable to be restarted, cannot determine handler kind", file=sys.stderr)
-                continue
+            isautoml = job_dict.get("is_automl", False)
+            parent_job_id = job_dict.get("parent_id", None)
+            action = job_dict.get("action", None)
+            network = job_dict.get("network", None)
+            job_id = job_dict.get("id", None)
+            kind = job_dict.get("kind", None)
+            handler_id = job_dict.get("handler_id", None)
+            user_id = job_dict.get("user_id", None)
+            org_name = job_dict.get("org_name", None)
+            name = job_dict.get("name", None)
+            num_gpu = job_dict.get("num_gpu", -1)
 
-            handler_metadata = get_handler_metadata(handler_id, kind)
-            if not handler_metadata:
-                print(f"Warning: Job {job_id} monitoring unable to be restarted, cannot find {kind} {handler_id}", file=sys.stderr)
-                continue
-            network = get_handler_type(handler_metadata)
-            user_id = handler_metadata.get("user_id")
-            if not org_name:
-                if "org_name" not in handler_metadata:
-                    print(f"Warning: Job {job_id} monitoring unable to be restarted, cannot determine org name", file=sys.stderr)
-                    continue
-                org_name = handler_metadata.get("org_name")
-            num_gpu = handler_metadata.get("num_gpu", -1)
-            isautoml = handler_metadata.get("automl_settings", {}).get("automl_enabled", False)
-
-            job_context = JobContext(job_id, parent_job_id, network, action, handler_id, user_id, org_name, kind, name=name, num_gpu=num_gpu, specs=specs)
+            job_context = JobContext(job_id, parent_job_id, network, action, handler_id, user_id, org_name, kind, name=name, num_gpu=num_gpu)
             # If job has yet to be executed, skip monitoring
             if still_exists(job_context):
                 continue
@@ -304,7 +281,7 @@ class Workflow:
                 network_config = read_network_config(network)
                 action_pipeline_name = network_config["api_params"]["actions_pipe"].get(action, "")
                 if network in MEDICAL_NETWORK_ARCHITECT:
-                    action_pipeline_name = "monai_" + action_pipeline_name
+                    action_pipeline_name = "medical_" + action_pipeline_name
                 elif network in MEDICAL_AUTOML_ARCHITECT:
                     action_pipeline_name = "medical_automl_" + action_pipeline_name
                 action_pipeline = ACTIONS_TO_FUNCTIONS[action_pipeline_name]
@@ -318,21 +295,16 @@ class Workflow:
                 # Restart AutoML job monitoring threads
                 controller_path = os.path.join(get_jobs_root(user_id, org_name), job_id, "controller.json")
                 recommendations = safe_load_file(controller_path)
-                handler_metadata = get_handler_metadata(handler_id, kind + "s")
-                if handler_metadata:
-                    if not automl_brain_restarted:
-                        AutoMLHandler.resume(user_id, org_name, handler_id, job_id, handler_metadata, name=name)
-                        automl_brain_restarted = True
-                    for recommendation in recommendations:
-                        if recommendation.get("status", None) in ("pending", "running", "started") and recommendation.get("id", None):
-                            rec_id = recommendation["id"]
-                            deps = [Dependency(type="automl", name=str(rec_id))]
-                            automl_context = JobContext(job_id, parent_job_id, network, action, handler_id, user_id, org_name, kind, name=name, num_gpu=num_gpu)
-                            automl_context.dependencies = deps
-                            _AutoMLPipeline = AutoMLPipeline(automl_context)
-                            job_run_thread = threading.Thread(target=_AutoMLPipeline.monitor_job, args=(), name=f'tao-monitor-job-thread-{automl_context.id}')
-                            job_run_thread.start()
-                            print(f"Restarted AutoML monitoring thread for job {job_id} and recommendation {rec_id}", file=sys.stderr)
+                for recommendation in recommendations:
+                    if recommendation.get("status", None) in ("pending", "running", "started") and recommendation.get("id", None):
+                        rec_id = recommendation["id"]
+                        deps = [Dependency(type="automl", name=str(rec_id))]
+                        automl_context = JobContext(job_id, parent_job_id, network, action, handler_id, user_id, org_name, kind, name=name, num_gpu=num_gpu)
+                        automl_context.dependencies = deps
+                        _AutoMLPipeline = AutoMLPipeline(automl_context)
+                        job_run_thread = threading.Thread(target=_AutoMLPipeline.monitor_job, args=(), name=f'tao-monitor-job-thread-{automl_context.id}')
+                        job_run_thread.start()
+                        print(f"Restarted AutoML monitoring thread for job {job_id} and recommendation {rec_id}", file=sys.stderr)
 
     @staticmethod
     def start():

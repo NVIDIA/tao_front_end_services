@@ -33,9 +33,9 @@ VALID_DSTYPES = ("object_detection", "semantic_segmentation", "image_classificat
 TAO_NETWORKS = set(["classification_tf2", "efficientdet_tf2",
                     "action_recognition", "classification_pyt", "mal", "ml_recog", "ocdnet", "ocrnet", "optical_inspection", "pointpillars", "pose_classification", "re_identification", "centerpose", "visual_changenet", "deformable_detr", "dino", "segformer",  # PYT CV MODELS
                     "annotations", "analytics", "augmentation", "auto_label", "image"])  # Data_Service tasks.
-MEDICAL_CUSTOM_ARCHITECT = ["monai_custom", "monai_classification", "monai_detection", "monai_segmentation"]
-MEDICAL_NETWORK_ARCHITECT = ["monai_vista3d", "monai_vista2d", "monai_annotation", "monai_genai", "monai_maisi"] + MEDICAL_CUSTOM_ARCHITECT
-MEDICAL_AUTOML_ARCHITECT = ["monai_automl", "monai_automl_generated"]
+MEDICAL_CUSTOM_ARCHITECT = ["medical_custom", "medical_classification", "medical_detection", "medical_segmentation"]
+MEDICAL_NETWORK_ARCHITECT = ["medical_vista3d", "medical_vista2d", "medical_annotation", "medical_genai", "medical_maisi"] + MEDICAL_CUSTOM_ARCHITECT
+MEDICAL_AUTOML_ARCHITECT = ["medical_automl", "medical_automl_generated"]
 MONAI_NETWORKS = set(MEDICAL_NETWORK_ARCHITECT + MEDICAL_AUTOML_ARCHITECT)  # Data_Service tasks.
 VALID_NETWORKS = TAO_NETWORKS | MONAI_NETWORKS
 NO_SPEC_ACTIONS_MODEL = ("evaluate", "retrain", "inference", "inference_seq", "inference_trt")  # Actions with **optional** specs
@@ -45,12 +45,9 @@ _ITER_MODELS = set(["segformer"])  # These networks operate on iterations instea
 BACKBONE_AND_FULL_MODEL_PTM_SUPPORTING_NETWORKS = set(["dino", "classification_pyt"])  # These networks have fields in their config file which has both backbone only loading weights as well as full architecture loading; ex: model.pretrained_backbone_path and train.pretrained_model_path in dino
 
 AUTOML_DISABLED_NETWORKS = ["mal"]  # These networks can't support AutoML
-TENSORBOARD_DISABLED_NETWORKS = ['classification_pyt', 'segformer']  # These networks currently don't produce tfevents logs as they are third party models
-TENSORBOARD_EXPERIMENT_LIMIT = 10  # Maximum number of Tensorboard enabled experiments per user
 NO_VAL_METRICS_DURING_TRAINING_NETWORKS = set(["unet"])  # These networks can't support writing validation metrics at regular intervals during training, only at end of training they run evaluation
 MISSING_EPOCH_FORMAT_NETWORKS = set(["classification_pyt", "detectnet_v2", "pointpillars", "segformer", "unet"])  # These networks have the epoch/iter number not following a format; ex: 1.pth instead of 001.pth
 STATUS_JSON_MISMATCH_WITH_CHECKPOINT_EPOCH = set(["pointpillars", "detectnet_v2"])  # status json epoch number is 1 less than epoch number generated in checkppoint file
-STATUS_JSON_MISMATCH_WITH_CHECKPOINT_EPOCH_TMP = set(["ml_recog"])
 
 MONAI_DATASET_DEFAULT_SPECS = {
     "next_image_strategy": "sequential",
@@ -61,7 +58,7 @@ MONAI_DATASET_DEFAULT_SPECS = {
     "notify_label_urls": [],
 }
 
-VALID_MODEL_DOWNLOAD_TYPE = ("monai_bundle", "tao")
+VALID_MODEL_DOWNLOAD_TYPE = ("medical_bundle", "tao")
 CACHE_TIME_OUT = 60 * 60  # cache timeout period in second
 LAST_ACCESS_TIME_OUT = 60  # last access timeout period in second
 
@@ -111,16 +108,3 @@ NETWORK_CONTAINER_MAPPING = {"action_recognition": "TAO_PYTORCH",
                              "segformer": "TAO_PYTORCH",
                              "unet": "TAO_TF2",
                              "visual_changenet": "TAO_PYTORCH"}
-
-CV_ACTION_RULES = {
-    'train': [],
-    'evaluate': ["train", "prune", "retrain", "export", "gen_trt_engine", "trtexec"],
-    'prune': ["train", "retrain"],
-    'inference': ["train", "prune", "retrain", "export", "gen_trt_engine", "trtexec"],
-    'retrain': ["train", "prune"],
-    'export': ["train", "prune", "retrain"],
-    'gen_trt_engine': ['export'],
-    'trtexec': ['export'],
-}
-
-CV_ACTION_CHAINED_ONLY = {"prune", "retrain", "export", "gen_trt_engine", "trtexec"}

@@ -13,13 +13,15 @@
 # limitations under the License.
 
 """Authentication utils session modules"""
+import os
+import glob
 import functools
 import threading
-from datetime import datetime, timezone
-from handlers.mongo_handler import MongoHandler
-import sys
+from datetime import datetime
 
-__SESSION_EXPIRY_SECONDS__ = 86400  # Equal to 24 hours
+from utils import load_file, safe_dump_file
+
+__SESSION_EXPIRY_HOURS__ = 24
 
 
 def synchronized(wrapped):
@@ -35,50 +37,59 @@ def synchronized(wrapped):
 
 @synchronized
 def set(user_id, org_name, token, extra_user_metadata):
-    """Save session in DB"""
-    mongo = MongoHandler("tao", "users")
-    mongo.create_text_index("org_name")
+    """Save session in file"""
     session = {'id': user_id}
     if extra_user_metadata:
         session.update(extra_user_metadata)
-
-    tmp_session = mongo.find_one(session)
-    if tmp_session:
-        tmp_session.update(session)
-        session = tmp_session
+    user_folder = os.path.join(os.path.sep, 'shared', 'orgs', org_name, 'users', user_id)
+    if not os.path.exists(user_folder):
+        os.makedirs(user_folder)
+    filename = os.path.join(user_folder, "metadata_token.json")
+    if os.path.exists(filename):
+        tmp_session = load_file(filename)
+        if tmp_session:
+            tmp_session.update(session)
+            session = tmp_session
 
     token_present = False
     for idx, token_info in enumerate(session.get("token_info", [])):
         if token_info.get("token") == token:
             token_present = True
-            session["token_info"][idx]["last_modified"] = datetime.now(tz=timezone.utc)
+            session["token_info"][idx]["last_modified"] = datetime.now().isoformat()
+            session["token_info"][idx]["timestamp"] = datetime.now().isoformat()
     if not token_present:
         if not session.get("token_info"):
             session["token_info"] = []
         session["token_info"].append({"token": token,
-                                      "created_on": datetime.now(tz=timezone.utc),
-                                      "last_modified": datetime.now(tz=timezone.utc)})
+                                      "created_on": datetime.now().isoformat(),
+                                      "last_modified": datetime.now().isoformat(),
+                                      "timestamp": datetime.timestamp(datetime.now())})
     session['org_name'] = org_name
-    session['last_modified'] = datetime.now(tz=timezone.utc)
-    mongo.upsert({'id': user_id}, session)
+    session['last_modified'] = datetime.now().isoformat()
+    session['timestamp'] = datetime.timestamp(datetime.now())
+    safe_dump_file(filename, session)
     return session
 
 
 @synchronized
 def get(token, org_name):
-    """Load session from DB"""
+    """Load session from file"""
     session = {}
-    mongo = MongoHandler("tao", "users")
-    users = mongo.find({"org_name": org_name})
-    for user in users:
+    users_root = os.path.join(os.path.sep, 'shared', 'orgs', org_name)
+    # Only metadata_token.json under users/<user_id>/, instead of sub-directories
+    user_roots = glob.glob(os.path.join(users_root, "users", "**"), recursive=False)
+    for user_root in user_roots:
         try:
-            for token_info in user.get('token_info', []):
-                if token_info.get('token', 'invalid') == token and isinstance(token_info.get('last_modified', False), datetime):
-                    dt_delta = datetime.now(tz=timezone.utc) - token_info['last_modified']
-                    if dt_delta.total_seconds() < __SESSION_EXPIRY_SECONDS__:
-                        session = user
-                        break
-        except Exception as e:
-            print("Warning, error while retrieving user token: ", str(e), file=sys.stderr)
-
+            filepath = os.path.join(user_root, "metadata_token.json")
+            if os.path.exists(filepath):
+                tmp_session = load_file(filepath)
+                for token_info in tmp_session.get('token_info', []):
+                    if token_info.get('token', 'invalid') == token:
+                        dt_session = datetime.fromtimestamp(tmp_session.get('timestamp', 0))
+                        dt_delta = datetime.now() - dt_session
+                        if dt_delta.seconds / 3600 < __SESSION_EXPIRY_HOURS__:
+                            session = tmp_session
+                            break
+        except:
+            pass
     return session

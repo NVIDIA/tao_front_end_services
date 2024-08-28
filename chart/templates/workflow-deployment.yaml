@@ -50,11 +50,6 @@ spec:
           value: "{{ .Release.Name }}-pvc"
         - name: IMAGEPULLSECRET
           value: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
-        - name: MONGOSECRET
-          valueFrom:
-            secretKeyRef:
-              name: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
-              key: .dockerconfigjson
         - name: HOSTBASEURL
           value: {{ .Values.hostBaseUrl | default "no_url" | quote }}
         - name: CALLBACK_UUID

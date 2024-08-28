@@ -25,8 +25,8 @@ import shutil
 
 from constants import MONAI_NETWORKS
 from handlers.utilities import search_for_base_experiment, get_model_results_path, get_file_list_from_cloud_storage, search_for_checkpoint, filter_files
-from handlers.stateless_handlers import get_handler_root, get_jobs_root, get_handler_spec_root, get_handler_job_metadata, get_handler_metadata, get_handler_kind, read_base_experiment_metadata, get_workspace_string_identifier, base_exp_uuid
-from handlers.monai.helpers import find_matching_bundle_dir
+from handlers.stateless_handlers import get_handler_root, get_handler_id, get_jobs_root, get_handler_spec_root, get_handler_job_metadata, get_handler_metadata, get_handler_kind, read_base_experiment_metadata, get_workspace_string_identifier, base_exp_uuid
+from handlers.medical.helpers import find_matching_bundle_dir
 from utils import read_network_config, safe_load_file
 
 
@@ -58,7 +58,7 @@ def infer_output_dir(job_context, handler_metadata):
         os.makedirs(results_dir)
 
     workspace_id = handler_metadata.get("workspace")
-    workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
+    workspace_identifier = get_workspace_string_identifier(job_context.org_name, workspace_id, workspace_cache={})
     dnn_results_dir = f'{workspace_identifier}results/{job_context.id}'
     return dnn_results_dir
 
@@ -71,7 +71,7 @@ def infer_automl_output_dir(job_context, handler_metadata, job_root, rec_number,
         os.makedirs(results_dir)
 
     workspace_id = handler_metadata.get("workspace")
-    workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
+    workspace_identifier = get_workspace_string_identifier(job_context.org_name, workspace_id, workspace_cache={})
     dnn_results_dir = f'{workspace_identifier}results/{exp_job_id}'
     if not workspace_prefix_enable:
         dnn_results_dir = f'/results/{exp_job_id}'
@@ -121,8 +121,9 @@ def infer_pruned_model(job_context, handler_metadata):
     if not jobs_root:
         return None
     workspace_id = handler_metadata.get("workspace")
-    workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
-    parent_job_metadata = get_handler_job_metadata(job_context.parent_id)
+    workspace_identifier = get_workspace_string_identifier(job_context.org_name, workspace_id, workspace_cache={})
+    parent_handler_id = get_handler_id(job_context.org_name, job_context.parent_id)
+    parent_job_metadata = get_handler_job_metadata(job_context.org_name, parent_handler_id, job_context.parent_id)
     parent_action = parent_job_metadata.get("action", "")
     pruned_model = None
     if parent_action == "retrain":
@@ -132,13 +133,13 @@ def infer_pruned_model(job_context, handler_metadata):
 
 def infer_parent_model(job_context, handler_metadata):
     """Returns path of the weight file of the parent job"""
-    parent_model = get_model_results_path(handler_metadata, job_context.parent_id)
+    parent_model = get_model_results_path(job_context, handler_metadata, job_context.parent_id)
     return parent_model
 
 
 def infer_resume_model(job_context, handler_metadata):
     """Returns path of the weight file of the current job"""
-    parent_model = get_model_results_path(handler_metadata, job_context.id)
+    parent_model = get_model_results_path(job_context, handler_metadata, job_context.id)
     return parent_model
 
 
@@ -162,7 +163,7 @@ def infer_automl_assign_ptm(job_context, handler_metadata, job_root, rec_number,
     """Returns path of path of the ptm files if there is no model to resume for AutoML"""
     expt_root = infer_automl_output_dir(job_context, handler_metadata, job_root, rec_number, exp_job_id=exp_job_id, workspace_prefix_enable=False)
     workspace_id = handler_metadata.get("workspace")
-    workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+    workspace_metadata = get_handler_metadata(job_context.org_name, workspace_id, "workspaces")
     files = get_file_list_from_cloud_storage(workspace_metadata, expt_root)
     resume_model = search_for_checkpoint(handler_metadata, job_context.id, expt_root, files, "latest_model")
     if not resume_model:
@@ -174,13 +175,13 @@ def infer_automl_resume_model(job_context, handler_metadata, job_root, rec_numbe
     """Returns path of the checkpoint file for the automl recommendation to resume on"""
     expt_root = infer_automl_output_dir(job_context, handler_metadata, job_root, rec_number, exp_job_id=exp_job_id, workspace_prefix_enable=False)
     workspace_id = handler_metadata.get("workspace")
-    workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+    workspace_metadata = get_handler_metadata(job_context.org_name, workspace_id, "workspaces")
     files = get_file_list_from_cloud_storage(workspace_metadata, expt_root)
     resume_model = filter_files(files)
     resume_model.sort(reverse=False)
     if resume_model:
         resume_model = resume_model[0]
-        workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
+        workspace_identifier = get_workspace_string_identifier(job_context.org_name, workspace_id, workspace_cache={})
         resume_model = f"{workspace_identifier}/{resume_model}"
     return resume_model
 
@@ -189,12 +190,12 @@ def infer_automl_ptm_if_no_resume_model(job_context, handler_metadata, job_root,
     """Returns path of the checkpoint file for the automl recommendation to resume on"""
     expt_root = infer_automl_output_dir(job_context, handler_metadata, job_root, rec_number, exp_job_id=exp_job_id, workspace_prefix_enable=False)
     workspace_id = handler_metadata.get("workspace")
-    workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+    workspace_metadata = get_handler_metadata(job_context.org_name, workspace_id, "workspaces")
     files = get_file_list_from_cloud_storage(workspace_metadata, expt_root)
     resume_model = filter_files(files)
     resume_model.sort(reverse=False)
     if resume_model:
-        workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
+        workspace_identifier = get_workspace_string_identifier(job_context.org_name, workspace_id, workspace_cache={})
         resume_model = f"{workspace_identifier}/{resume_model[0]}"
         return resume_model
     return infer_ptm(job_context, handler_metadata)
@@ -227,21 +228,23 @@ def infer_parent_model_evaluate(job_context, handler_metadata):
     # If extension is None: output is based on RESULTS_RELPATH
     # If extension exists, then search for that extension
     parent_job_id = job_context.parent_id
-    parent_action = get_handler_job_metadata(parent_job_id).get("action")
+    handler_id = handler_metadata.get("id")
+    parent_action = get_handler_job_metadata(job_context.org_name, handler_id, parent_job_id).get("action")
 
     if parent_action == "export":
         results_root = get_jobs_root(user_id=job_context.user_id, org_name=job_context.org_name)
         parent_model = os.path.join(results_root, str(job_context.parent_id), "model.engine")
     else:
-        parent_model = get_model_results_path(handler_metadata, job_context.parent_id)
+        parent_model = get_model_results_path(job_context, handler_metadata, job_context.parent_id)
 
     return parent_model
 
 
-def infer_framework_evaluate(job_context):
+def infer_framework_evaluate(job_context, handler_metadata):
     """Returns framework to evaluate model on based on the parent action"""
     parent_job_id = job_context.parent_id
-    parent_action = get_handler_job_metadata(parent_job_id).get("action")
+    handler_id = handler_metadata.get("id")
+    parent_action = get_handler_job_metadata(job_context.org_name, handler_id, parent_job_id).get("action")
 
     if parent_action == "export":
         return "tensorrt"
@@ -250,7 +253,7 @@ def infer_framework_evaluate(job_context):
 
 def infer_framework_evaluate_storetrue(job_context, handler_metadata):
     """Returns whether the evaluation framework is tensorrt or not"""
-    framework = infer_framework_evaluate(job_context)
+    framework = infer_framework_evaluate(job_context, handler_metadata)
     return framework == "tensorrt"
 
 
@@ -334,7 +337,7 @@ def infer_parent_spec(job_context, handler_metadata):
     network_config = read_network_config(network)
     api_params = network_config.get("api_params", {})
 
-    parent_action = get_handler_job_metadata(job_context.parent_id).get("action")
+    parent_action = get_handler_job_metadata(job_context.org_name, handler_metadata.get("id"), job_context.parent_id).get("action")
     if handler_metadata.get("automl_settings", {}).get("automl_enabled") is True and parent_action == "train":
         root = get_jobs_root(user_id=job_context.user_id, org_name=job_context.org_name)
         automl_root = os.path.join(root, parent_job_id, "best_model")
@@ -358,7 +361,7 @@ def infer_parent_spec_copied(job_context, handler_metadata):
     network_config = read_network_config(network)
     api_params = network_config.get("api_params", {})
 
-    parent_action = get_handler_job_metadata(job_context.parent_id).get("action")
+    parent_action = get_handler_job_metadata(job_context.org_name, handler_metadata.get("id"), job_context.parent_id).get("action")
     if handler_metadata.get("automl_settings", {}).get("automl_enabled") is True and parent_action == "train":
         root = get_jobs_root(user_id=job_context.user_id, org_name=job_context.org_name)
         automl_root = os.path.join(root, parent_job_id, "best_model")
@@ -406,10 +409,10 @@ def infer_label_output(job_context, handler_metadata):
 
 # MONAI helper functions
 
-def infer_monai_output_dir(job_context, handler_metadata):
-    """Returns path of monai output dir by appending bundle name to results dir"""
+def infer_medical_output_dir(job_context, handler_metadata):
+    """Returns path of medical output dir by appending bundle name to results dir"""
     results_dir = infer_output_dir(job_context, handler_metadata)
-    ptm_model_list = get_handler_metadata(job_context.handler_id, "experiments")["base_experiment"]
+    ptm_model_list = get_handler_metadata(job_context.org_name, job_context.handler_id)["base_experiment"]
     ptm_model = ptm_model_list[0] if ptm_model_list else ""
     ptm_model_path = get_handler_root(base_exp_uuid, "experiments", base_exp_uuid, ptm_model) if ptm_model else ""
     if ptm_model and not ptm_model_path:
@@ -467,4 +470,4 @@ CLI_CONFIG_TO_FUNCTIONS = {"output_dir": infer_output_dir,
                            "output_dir_inference_json": lambda a, b: infer_output_dir(a, b) + "/annotations_mal.json",
                            "from_csv": lambda a, b: None,  # Used to infer the param from spec sheet
                            "auto_label_output": infer_label_output,
-                           "monai_output_dir": infer_monai_output_dir}
+                           "medical_output_dir": infer_medical_output_dir}

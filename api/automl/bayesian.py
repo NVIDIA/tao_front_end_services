@@ -99,7 +99,7 @@ class Bayesian(AutoMLAlgorithmBase):
         """Load the Bayesian algorithm related variables to brain.json"""
         file_path = root + "/brain.json"
         if not os.path.exists(file_path):
-            return Bayesian(job_context, root, network, parameters)
+            return Bayesian(job_context, root, network)
 
         json_loaded = safe_load_file(file_path)
         Xs = []

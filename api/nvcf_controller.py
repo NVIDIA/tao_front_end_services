@@ -100,6 +100,7 @@ async def create_nvcf_job(nvcf_cr):
 
     namespace = nvcf_cr['metadata']['namespace']
     custom_resource_name = nvcf_cr['metadata']['name']
+    org_name = nvcf_cr["spec"].get("org_name")
 
     action = nvcf_cr["spec"].get("action")
     network = nvcf_cr["spec"].get("network")
@@ -130,7 +131,7 @@ async def create_nvcf_job(nvcf_cr):
     )
 
     cloud_metadata = {}
-    get_cloud_metadata(nvcf_cr["spec"].get("workspace_ids"), cloud_metadata)
+    get_cloud_metadata(org_name, nvcf_cr["spec"].get("workspace_ids"), cloud_metadata)
 
     ngc_api_key = nvcf_cr["spec"].get("ngc_api_key")
 
@@ -213,7 +214,7 @@ def overwrite_job_logs_from_bcp(logfile, job_name):
     return
 
 
-def get_nvcf_job_status(nvcf_cr, status="", function_id="", version_id=""):
+def get_nvcf_job_status(nvcf_cr, status=""):
     """Get and update NVCF custom resource status"""
     if not status:
         custom_resource_name = nvcf_cr["metadata"].get('name')
@@ -266,9 +267,8 @@ def get_nvcf_job_status(nvcf_cr, status="", function_id="", version_id=""):
                 status = "Pending"
 
     if status in ("Done", "Error"):
-        print(f"Status is {status}. Hence, deleting the function {function_id} with version {version_id}", file=sys.stderr)
-        if function_id and version_id:
-            delete_function_version(function_id, version_id)
+        print(f"Status is {status}. Hence, deleting the function", file=sys.stderr)
+        delete_function_version(function_id, version_id)
 
     if not status:
         print("Status couldn't be inferred", file=sys.stderr)

@@ -43,11 +43,6 @@ spec:
           value: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         - name: CALLBACK_UUID
           value: {{ .Values.serviceAdminUUID | default "02a55e1e-0091-4711-b29e-12a61c0d29bf" | quote }}
-        - name: MONGOSECRET
-          valueFrom:
-            secretKeyRef:
-              name: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
-              key: .dockerconfigjson
 {{- if .Values.enableVault }}
         - name: VAULT_SECRET_PATH
           value: "{{ .Values.vault.secretMountPath }}"

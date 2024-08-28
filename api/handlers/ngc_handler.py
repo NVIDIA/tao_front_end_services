@@ -22,8 +22,7 @@ import io
 import zipfile
 
 from handlers.encrypt import NVVaultEncryption
-from handlers.mongo_handler import MongoHandler
-from handlers.stateless_handlers import get_handler_metadata, get_jobs_root, get_user, get_workspace_string_identifier, BACKEND
+from handlers.stateless_handlers import get_handler_metadata, get_jobs_root, get_workspace_string_identifier, safe_load_file, safe_dump_file, BACKEND
 from handlers.cloud_storage import create_cs_instance
 from utils import send_delete_request_with_retry, sha256_checksum, read_network_config, get_bcp_api_key, get_ngc_artifact_base_url, send_get_request_with_retry
 
@@ -54,14 +53,19 @@ def ngc_login(ngc_api_key="", org_name="", team_name=""):
 
 def get_token(user_id, refresh=False, ngc_api_key="", org_name="", team_name=""):
     """Reads the latest token if exists else creates one"""
-    mongo_users = MongoHandler("tao", "users")
-    user = get_user(user_id, mongo_users)
-    if not user.get("ngc_login_token") or refresh:
+    ngc_session_cache_file = "/shared/ngc_session_cache.json"
+    ngc_session_cache = safe_load_file(ngc_session_cache_file)
+    if refresh or not os.path.exists(ngc_session_cache_file):
+        key = ngc_session_cache.get(user_id, {}).get("key", "")
+        sid_cookie = ngc_session_cache.get(user_id, {}).get("sid_cookie", "")
+        ssid_cookie = ngc_session_cache.get(user_id, {}).get("ssid_cookie", "")
         token = ngc_login(ngc_api_key, org_name, team_name)
-        ngc_session_cache = {"id": user_id, "ngc_login_token": token}
-        mongo_users.upsert({"id": user_id}, ngc_session_cache)
+        ngc_session_cache[user_id] = {"key": key, "ngc_login_token": token, "sid_cookie": sid_cookie, "ssid_cookie": ssid_cookie}
+        safe_dump_file(ngc_session_cache_file, ngc_session_cache)
     else:
-        token = user.get("ngc_login_token", "")
+        token = ngc_session_cache.get(user_id, {}).get("ngc_login_token", "")
+        if not token:
+            token = get_token(user_id, True, ngc_api_key, org_name, team_name)
     return token
 
 
@@ -70,6 +74,16 @@ def get_ngc_headers(user_id, refresh=False, ngc_api_key="", org_name="", team_na
     token = get_token(user_id, refresh, ngc_api_key, org_name, team_name)
     headers = {"Authorization": f"Bearer {token}"}
     return headers
+
+
+def get_token_from_cookie(cookie):
+    url = 'https://stg.authn.nvidia.com/token?service=ngc'
+    if DEPLOYMENT_MODE == "PROD":
+        url = 'https://authn.nvidia.com/token?service=ngc'
+
+    headers = {'Accept': 'application/json', 'Cookie': cookie}
+    response = send_get_request_with_retry(url, headers=headers)
+    return response
 
 
 class ErrorResponse:
@@ -109,12 +123,12 @@ def send_ngc_api_request(user_id, endpoint, requests_method, request_body, refre
 
 def get_user_api_key(user_id):
     """Return user API key"""
-    ngc_user_details = get_user(user_id)
-    encrypted_ngc_api_key = ngc_user_details.get("key")
-    encrypted_sid_cookie = ngc_user_details.get("sid_cookie")
-    encrypted_ssid_cookie = ngc_user_details.get("ssid_cookie")
+    ngc_user_details = safe_load_file("/shared/ngc_session_cache.json")
+    encrypted_ngc_api_key = ngc_user_details.get(user_id, {}).get("key")
+    encrypted_sid_cookie = ngc_user_details.get(user_id, {}).get("sid_cookie")
+    encrypted_ssid_cookie = ngc_user_details.get(user_id, {}).get("ssid_cookie")
 
-    use_cookie = False
+    ngc_cookie = False
     # Decrypt the ngc key
     if encrypted_ngc_api_key:
         decrypted_key = encrypted_ngc_api_key
@@ -122,7 +136,7 @@ def get_user_api_key(user_id):
         decrypted_key = encrypted_ssid_cookie
         if encrypted_sid_cookie:
             decrypted_key = encrypted_sid_cookie
-        use_cookie = True
+        ngc_cookie = True
 
     if BACKEND in ("BCP", "NVCF"):
         config_path = os.getenv("VAULT_SECRET_PATH", None)
@@ -130,16 +144,16 @@ def get_user_api_key(user_id):
         if decrypted_key and encryption.check_config()[0]:
             decrypted_key = encryption.decrypt(decrypted_key)
 
-    if use_cookie:
+    if ngc_cookie:
         cookie = decrypted_key
         decrypted_key = f"SSID={cookie}"
         if encrypted_sid_cookie:
             decrypted_key = f"SID={cookie}"
 
-    return decrypted_key, use_cookie
+    return decrypted_key, ngc_cookie
 
 
-def create_model(org_name, team_name, handler_metadata, source_file, ngc_api_key, use_cookie, display_name, description):
+def create_model(org_name, team_name, handler_metadata, source_file, ngc_api_key, ngc_cookie, display_name, description):
     """Create model in ngc private registry"""
     endpoint = "https://api.stg.ngc.nvidia.com/v2"
     if DEPLOYMENT_MODE == "PROD":
@@ -166,8 +180,13 @@ def create_model(org_name, team_name, handler_metadata, source_file, ngc_api_key
             "displayName": display_name,
             }
 
-    if use_cookie:
-        headers = {"Cookie": ngc_api_key}
+    if ngc_cookie:
+        response = get_token_from_cookie(ngc_api_key, ngc_cookie)
+        if not response.ok:
+            print("API response is not ok", file=sys.stderr)
+            return response
+        token = response.json()["token"]
+        headers = {"Authorization": f"Bearer {token} "}
         response = requests.post(url=endpoint, data=data, headers=headers)
     else:
         response = send_ngc_api_request(user_id, endpoint=endpoint, requests_method="POST", request_body=json.dumps(data), refresh=True, json=True, ngc_api_key=ngc_api_key, org_name=org_name, team_name=team_name)
@@ -193,12 +212,12 @@ def upload_model(org_name, team_name, handler_metadata, source_file, ngc_api_key
     num_epochs_trained = handler_metadata["checkpoint_epoch_number"].get(f"latest_model_{job_id}", 0)
     workspace_id = handler_metadata.get("workspace")
 
-    workspace_identifier = get_workspace_string_identifier(workspace_id, workspace_cache={})
+    workspace_identifier = get_workspace_string_identifier(org_name, workspace_id, workspace_cache={})
     cloud_path = source_file[len(workspace_identifier):]
     jobs_root = get_jobs_root(handler_metadata.get("user_id"), org_name=org_name)
     local_path = os.path.join(jobs_root, cloud_path[cloud_path.find(job_id):])
 
-    workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+    workspace_metadata = get_handler_metadata(org_name, workspace_id, "workspaces")
     cs_instance, _ = create_cs_instance(workspace_metadata)
     cs_instance.download_file(cloud_path, local_path)
 
@@ -225,7 +244,7 @@ def upload_model(org_name, team_name, handler_metadata, source_file, ngc_api_key
     return 200, "Published model into requested org"
 
 
-def delete_model(org_name, team_name, handler_metadata, ngc_api_key, use_cookie, job_id, job_action):
+def delete_model(org_name, team_name, handler_metadata, ngc_api_key, ngc_cookie, job_id, job_action):
     """Delete model from ngc registry"""
     network = handler_metadata.get("network_arch")
 
@@ -242,8 +261,13 @@ def delete_model(org_name, team_name, handler_metadata, ngc_api_key, use_cookie,
     endpoint += f"/models/{network}/versions/{job_action}_{job_id}_{epoch_number}"
     print(f"Deleting: {org_name}/{team_name}/{network}:{job_action}_{job_id}_{epoch_number}", file=sys.stderr)
 
-    if use_cookie:
-        headers = {"Cookie": ngc_api_key}
+    if ngc_cookie:
+        response = get_token_from_cookie(ngc_api_key, ngc_cookie)
+        if not response.ok:
+            print("API response is not ok", file=sys.stderr)
+            return response
+        token = response.json()["token"]
+        headers = {"Authorization": f"Bearer {token} "}
         response = send_delete_request_with_retry(endpoint, headers)
     else:
         response = send_ngc_api_request(user_id="", endpoint=endpoint, requests_method="DELETE", request_body={}, refresh=True, ngc_api_key=ngc_api_key, org_name=org_name, team_name=team_name)

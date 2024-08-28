@@ -25,7 +25,7 @@ import time
 import traceback
 import uuid
 
-import ruamel.yaml
+import yaml
 from automl.utils import delete_lingering_checkpoints, wait_for_job_completion
 from constants import (AUTOML_DISABLED_NETWORKS, NO_SPEC_ACTIONS_MODEL, TAO_NETWORKS, _DATA_SERVICES_ACTIONS,
                        MONAI_NETWORKS, MEDICAL_AUTOML_ARCHITECT, MEDICAL_NETWORK_ARCHITECT, MEDICAL_CUSTOM_ARCHITECT, NETWORK_METRIC_MAPPING, NETWORK_CONTAINER_MAPPING)
@@ -36,14 +36,14 @@ from handlers.docker_images import DOCKER_IMAGE_MAPPER, DOCKER_IMAGE_VERSION
 from handlers.infer_data_sources import DS_CONFIG_TO_FUNCTIONS
 from handlers.infer_params import CLI_CONFIG_TO_FUNCTIONS
 from handlers.encrypt import NVVaultEncryption
-from handlers.monai.helpers import CUSTOMIZED_BUNDLE_URL_FILE, CUSTOMIZED_BUNDLE_URL_KEY, MEDICAL_SERVICE_SCRIPTS
+from handlers.medical.helpers import CUSTOMIZED_BUNDLE_URL_FILE, CUSTOMIZED_BUNDLE_URL_KEY, MEDICAL_SERVICE_SCRIPTS
 # TODO: force max length of characters in a line to be 120
 from handlers.stateless_handlers import (BACKEND, base_exp_uuid, get_base_experiment_metadata, get_handler_job_metadata,
                                          get_handler_log_root, get_handler_metadata, get_jobs_root, get_handler_root,
                                          get_handler_spec_root, get_toolkit_status, printc, resolve_metadata,
-                                         update_job_metadata, update_job_status, write_handler_metadata)
+                                         update_job_metadata, update_job_status, write_handler_metadata, get_handler_kind)
 from handlers.utilities import (StatusParser, build_cli_command, generate_cl_script, get_total_epochs, load_json_spec, process_classwise_config,
-                                read_nested_dict, search_for_base_experiment, get_num_gpus_from_spec, validate_monai_bundle_params,
+                                read_nested_dict, search_for_base_experiment, get_num_gpus_from_spec, validate_medical_bundle_params,
                                 write_nested_dict, get_cloud_metadata)
 from utils import remove_key_by_flattened_string, read_network_config, find_closest_number, get_admin_api_key, safe_load_file, safe_dump_file
 from job_utils import executor as jobDriver
@@ -99,21 +99,21 @@ class ActionPipeline:
         self.action = self.job_context.action
         self.network_config = read_network_config(self.network)
         self.api_params = self._read_api_params()
-        self.handler_kind = self.job_context.kind
-        self.handler_metadata = get_handler_metadata(self.job_context.handler_id, self.handler_kind)
+        self.handler_metadata = get_handler_metadata(self.job_context.org_name, self.job_context.handler_id)
         self.workspace_id = self.handler_metadata.get("workspace")
-        self.workspace_metadata = get_handler_metadata(self.workspace_id, "workspaces")
+        self.workspace_metadata = get_handler_metadata(self.job_context.org_name, self.workspace_id, "workspaces")
         self.handler_spec_root = get_handler_spec_root(self.job_context.user_id, self.job_context.org_name, self.job_context.handler_id)
         self.handler_root = get_handler_root(self.job_context.org_name, None, self.job_context.handler_id, None)
         self.jobs_root = get_jobs_root(self.job_context.user_id, self.job_context.org_name)
         self.handler_log_root = get_handler_log_root(self.job_context.user_id, self.job_context.org_name, self.job_context.handler_id)
         self.handler_id = self.job_context.handler_id
+        self.handler_kind = get_handler_kind(self.handler_metadata)
         self.tao_deploy_actions = False
-        self.parent_job_action = get_handler_job_metadata(self.job_context.parent_id).get("action")
+        self.parent_job_action = get_handler_job_metadata(self.job_context.org_name, self.handler_id, self.job_context.parent_id).get("action")
         if self.job_context.action in ("gen_trt_engine", "trtexec") or self.parent_job_action in ("gen_trt_engine", "trtexec"):
             self.tao_deploy_actions = True
         self.image = DOCKER_IMAGE_MAPPER[self.api_params.get("image", "")]
-        if self.job_context.action in _DATA_SERVICES_ACTIONS and not self.network.startswith("monai"):
+        if self.job_context.action in _DATA_SERVICES_ACTIONS and not self.network.startswith("medical"):
             self.image = DOCKER_IMAGE_MAPPER["TAO_DS"]
         # If current or parent action is gen_trt_engine or trtexec, then it'a a tao-deploy container action
         if self.tao_deploy_actions:
@@ -142,7 +142,7 @@ class ActionPipeline:
         if BACKEND in ("BCP", "NVCF"):
             self.ngc_runner = True
         self.local_cluster = False
-        self.monai_env_variable = {}
+        self.medical_env_variable = {}
         self.num_gpu = self.job_context.specs.get("num_gpu", self.job_context.num_gpu) if self.job_context.specs else self.job_context.num_gpu
 
     def _read_api_params(self):
@@ -232,7 +232,7 @@ class ActionPipeline:
 
         elif BACKEND == "NVCF":
             nv_job_metadata["action"] = self.action
-            nv_job_metadata["workspace_ids"] = list(self.workspace_ids)
+            nv_job_metadata["workspace_ids"] = self.workspace_ids
             nv_job_metadata["deployment_string"] = os.getenv(f'FUNCTION_{NETWORK_CONTAINER_MAPPING[self.network]}')
             if self.tao_deploy_actions:
                 nv_job_metadata["deployment_string"] = os.getenv('FUNCTION_TAO_DEPLOY')
@@ -245,10 +245,10 @@ class ActionPipeline:
         self.workspace_ids = []
         workspace_cache = {}
 
-        def process_metadata(data_type, dataset_id=None, metadata=None, workspace_cache={}):
+        def process_metadata(org_name, data_type, dataset_id=None, metadata=None, workspace_cache={}):
             """Process metadata for datasets, workspaces, etc."""
             if not metadata:
-                metadata = resolve_metadata(data_type, dataset_id)
+                metadata = resolve_metadata(org_name, data_type, dataset_id)
             else:
                 metadata = copy.deepcopy(metadata)
             workspace_id = metadata.get("workspace", "")
@@ -258,23 +258,23 @@ class ActionPipeline:
 
         if self.handler_metadata.get("train_datasets", []):
             for train_ds in self.handler_metadata.get("train_datasets", []):
-                process_metadata("dataset", dataset_id=train_ds, workspace_cache={})
+                process_metadata(self.job_context.org_name, "dataset", dataset_id=train_ds, workspace_cache={})
         elif self.job_context.network not in ["auto_label", "image"] + MEDICAL_AUTOML_ARCHITECT + MEDICAL_NETWORK_ARCHITECT:
-            process_metadata("dataset", metadata=self.handler_metadata, workspace_cache=workspace_cache)
+            process_metadata(self.job_context.org_name, "dataset", metadata=self.handler_metadata, workspace_cache=workspace_cache)
 
         eval_ds = self.handler_metadata.get("eval_dataset", None)
         if eval_ds:
-            process_metadata("dataset", dataset_id=eval_ds, workspace_cache=workspace_cache)
+            process_metadata(self.job_context.org_name, "dataset", dataset_id=eval_ds, workspace_cache=workspace_cache)
 
         infer_ds = self.handler_metadata.get("inference_dataset", None)
         if infer_ds:
-            process_metadata("dataset", dataset_id=infer_ds, workspace_cache=workspace_cache)
+            process_metadata(self.job_context.org_name, "dataset", dataset_id=infer_ds, workspace_cache=workspace_cache)
 
         experiment_metadata = copy.deepcopy(self.handler_metadata)
         exp_workspace_id = experiment_metadata.get("workspace")
         self.workspace_ids.append(exp_workspace_id)
         if self.network not in TAO_NETWORKS or (self.network in TAO_NETWORKS and BACKEND == "local-k8s"):
-            get_cloud_metadata(self.workspace_ids, self.cloud_metadata)
+            get_cloud_metadata(self.job_context.org_name, self.workspace_ids, self.cloud_metadata)
 
     def handle_multiple_ptm_fields(self):
         """Remove one of end-end or backbone related PTM field based on the Handler metadata info"""
@@ -320,7 +320,7 @@ class ActionPipeline:
     def monitor_job(self):
         """Monitors the job status and updates job metadata"""
         if self.network in MONAI_NETWORKS:
-            _, _, outdir = CLI_CONFIG_TO_FUNCTIONS["monai_output_dir"](self.job_context, self.handler_metadata)
+            _, _, outdir = CLI_CONFIG_TO_FUNCTIONS["medical_output_dir"](self.job_context, self.handler_metadata)
             outdir = outdir.rstrip(os.path.sep)
         else:
             _, _, outdir = self.generate_run_command()
@@ -338,25 +338,17 @@ class ActionPipeline:
             metric = NETWORK_METRIC_MAPPING.get(self.network, "loss")
 
         k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
-
-        # Delete job if is canceled/paused during pod creation
-        metadata_status = get_handler_job_metadata(self.job_name).get("status", "Error")
-        if metadata_status in ("Canceling", "Canceled", "Pausing", "Paused"):
-            self.detailed_print(f"Terminating job {self.job_name}", file=sys.stderr)
-            jobDriver.delete(self.job_name, use_ngc=self.ngc_runner)
-
-        # Monitor job status
         while k8s_status in ["Done", "Error", "Running", "Pending"]:
             # If Done, try running self.post_run()
-            metadata_status = get_handler_job_metadata(self.job_name).get("status", "Error")
+            metadata_status = get_handler_job_metadata(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind).get("status", "Error")
             if metadata_status in ("Canceled", "Paused") and k8s_status == "Running":
                 self.detailed_print(f"Terminating job {self.job_name}", file=sys.stderr)
                 jobDriver.delete(self.job_name, use_ngc=self.ngc_runner)
             if k8s_status == "Done":
-                update_job_status(self.handler_id, self.job_name, status="Running", kind=self.handler_kind)
+                update_job_status(self.job_context.org_name, self.handler_id, self.job_name, status="Running", kind=self.handler_kind)
                 # Retrieve status one last time!
                 new_results = status_parser.update_results(total_epochs)
-                update_job_metadata(self.handler_id, self.job_name, metadata_key="result", data=new_results, kind=self.handler_kind)
+                update_job_metadata(self.job_context.org_name, self.handler_id, self.job_name, metadata_key="result", data=new_results, kind=self.handler_kind)
                 try:
                     self.detailed_print("Post running", file=sys.stderr)
                     # If post run is done, make it done
@@ -365,24 +357,24 @@ class ActionPipeline:
                         _, best_checkpoint_epoch_number, latest_checkpoint_epoch_number = status_parser.read_metric(results=new_results, metric=metric, brain_epoch_number=total_epochs)
                         self.handler_metadata["checkpoint_epoch_number"][f"best_model_{self.job_name}"] = best_checkpoint_epoch_number
                         self.handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.job_name}"] = latest_checkpoint_epoch_number
-                        write_handler_metadata(self.handler_id, self.handler_metadata, self.handler_kind)
+                        write_handler_metadata(self.job_context.org_name, self.handler_id, self.handler_metadata, self.handler_kind)
                     if not os.path.exists(f"{self.jobs_root}/{self.job_name}"):
                         os.makedirs(f"{self.jobs_root}/{self.job_name}")
                     if BACKEND == "BCP" and self.network in TAO_NETWORKS:
                         overwrite_job_logs_from_bcp(self.logfile, self.job_name)
-                    update_job_status(self.handler_id, self.job_name, status="Done", kind=self.handler_kind)
+                    update_job_status(self.job_context.org_name, self.handler_id, self.job_name, status="Done", kind=self.handler_kind)
                     break
                 except:
                     # If post run fails, call it Error
                     self.detailed_print(traceback.format_exc(), file=sys.stderr)
-                    update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+                    update_job_status(self.job_context.org_name, self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
                     break
             # If running in K8s, update results to job_context
             elif k8s_status == "Running":
-                update_job_status(self.handler_id, self.job_name, status="Running", kind=self.handler_kind)
+                update_job_status(self.job_context.org_name, self.handler_id, self.job_name, status="Running", kind=self.handler_kind)
                 # Update results
                 new_results = status_parser.update_results(total_epochs)
-                update_job_metadata(self.handler_id, self.job_name, metadata_key="result", data=new_results, kind=self.handler_kind)
+                update_job_metadata(self.job_context.org_name, self.handler_id, self.job_name, metadata_key="result", data=new_results, kind=self.handler_kind)
 
             # Pending is if we have queueing systems down the road
             elif k8s_status == "Pending":
@@ -391,19 +383,19 @@ class ActionPipeline:
 
             # If the job never submitted or errored out!
             else:
-                update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+                update_job_status(self.job_context.org_name, self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
                 break
             # Poll every 30 seconds
             time.sleep(30)
 
             k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
 
-        metadata_status = get_handler_job_metadata(self.job_name).get("status", "Error")
+        metadata_status = get_handler_job_metadata(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind).get("status", "Error")
 
-        toolkit_status = get_toolkit_status(self.job_name)
+        toolkit_status = get_toolkit_status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind)
         self.detailed_print(f"Toolkit status for {self.job_name} is {toolkit_status}", file=sys.stderr)
         if metadata_status not in ("Canceled", "Canceling", "Paused", "Pausing") and toolkit_status != "SUCCESS" and self.job_context.action != "trtexec":
-            update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+            update_job_status(self.job_context.org_name, self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
             metadata_status = "Error"
 
         self.detailed_print(f"Job Done: {self.job_name} Final status: {metadata_status}", file=sys.stderr)
@@ -473,12 +465,12 @@ class ActionPipeline:
             docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
             self.decrypt_docker_env_vars(docker_env_vars)
             job_env_variables = copy.deepcopy(docker_env_vars)
-            # Add environment variables from monai.
+            # Add environment variables from medical.
             self.generate_env_variables(job_env_variables)
-            if self.monai_env_variable:
-                job_env_variables.update(self.monai_env_variable)
+            if self.medical_env_variable:
+                job_env_variables.update(self.medical_env_variable)
 
-            # The monai local jobs like training for cl jobs are designed to run on cluster local GPUs.
+            # The medical local jobs like training for cl jobs are designed to run on cluster local GPUs.
             if self.ngc_runner:
                 self.generate_nv_job_metadata(self.run_command, nv_job_metadata, job_env_variables)
             else:
@@ -512,11 +504,11 @@ class ActionPipeline:
             with open(self.logfile, "a", encoding='utf-8') as f:
                 f.write(f"Error log: \n {e}")
                 f.write("\nError EOF\n")
-            update_job_status(self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
+            update_job_status(self.job_context.org_name, self.handler_id, self.job_name, status="Error", kind=self.handler_kind)
             result_dict = {"detailed_status": {"message": "Error due to unmet dependencies"}}
             if isinstance(e, TimeoutError):
                 result_dict = {"detailed_status": {"message": "Data downloading from cloud storage failed."}}
-            update_job_metadata(self.handler_id, self.job_name, metadata_key="result", data=result_dict, kind=self.handler_kind)
+            update_job_metadata(self.job_context.org_name, self.handler_id, self.job_name, metadata_key="result", data=result_dict, kind=self.handler_kind)
             return
 
 
@@ -618,8 +610,7 @@ class TrainVal(CLIPipeline):
         if "cli_params" in network_config and action in network_config["cli_params"] and "experiment_spec_file" in network_config["cli_params"][action].keys() and network_config["cli_params"][action]["experiment_spec_file"] == "parent_spec_copied":
             spec_path = CLI_CONFIG_TO_FUNCTIONS["experiment_spec"](self.job_context, self.handler_metadata)
             with open(spec_path, "r", encoding='utf-8') as spec_file:
-                yaml = ruamel.yaml.YAML(typ='safe')
-                parent_spec = yaml.load(spec_file)
+                parent_spec = yaml.safe_load(spec_file)
             if action in parent_spec.keys() and action in spec.keys():
                 parent_spec[action] = spec[action]
             if "dataset" in parent_spec.keys() and "dataset" in spec.keys():
@@ -672,7 +663,7 @@ class TrainVal(CLIPipeline):
                 self.handler_metadata["format"] = "coco"
             elif self.spec["data"]["input_format"] == "COCO":
                 self.handler_metadata["format"] = "kitti"
-            write_handler_metadata(self.handler_id, self.handler_metadata, self.handler_kind)
+            write_handler_metadata(self.job_context.org_name, self.handler_id, self.handler_metadata, self.handler_kind)
 
 
 class AutoMLPipeline(ActionPipeline):
@@ -687,7 +678,6 @@ class AutoMLPipeline(ActionPipeline):
         self.expt_root = f"{self.job_root}/experiment_{self.rec_number}"
         self.recs_dict = safe_load_file(f"{self.job_root}/controller.json")
         self.brain_dict = safe_load_file(f"{self.job_root}/brain.json")
-        self.action_spec_path = os.path.join(self.job_root, f"recommendation_{self.rec_number}.{self.api_params['spec_backend']}")
         # Assign a new job id if not assigned already
         self.job_name = self.recs_dict[self.rec_number].get("job_id", None)
         if not self.job_name:
@@ -761,7 +751,9 @@ class AutoMLPipeline(ActionPipeline):
         safe_dump_file(os.path.join(self.job_root, f"recommendation_{self.rec_number}.json"), self.spec)
         updated_spec = SPEC_BACKEND_TO_FUNCTIONS[self.api_params["spec_backend"]](self.spec)
         extension = self.api_params['spec_backend']
-        safe_dump_file(self.action_spec_path, updated_spec, file_type=extension)
+        action_spec_path = os.path.join(self.job_root, f"recommendation_{self.rec_number}.{extension}")
+        safe_dump_file(action_spec_path, updated_spec, file_type=extension)
+        return action_spec_path
 
     def generate_run_command(self):
         """Generate the command to be run inside docker for AutoML experiment"""
@@ -780,14 +772,13 @@ class AutoMLPipeline(ActionPipeline):
                 break
         return rec_number
 
-    def monitor_job(self, job_env_variables=None, nv_job_metadata=None):
+    def monitor_job(self, action_spec_path=None, job_env_variables=None, nv_job_metadata=None):
         """Monitors the job status and updates job metadata"""
-        if not self.spec:
+        if not self.config:
             recommended_values = self.recs_dict[self.rec_number].get("specs", {})
             self.spec = self.generate_config(recommended_values)
             self.handle_multiple_ptm_fields()
             self.get_handler_cloud_details()
-            self.save_recommendation_specs()
 
         if not job_env_variables:
             docker_env_vars = self.handler_metadata.get("docker_env_vars", {})
@@ -800,12 +791,12 @@ class AutoMLPipeline(ActionPipeline):
             nv_job_metadata = {}
             if self.ngc_runner:
                 self.generate_nv_job_metadata(run_command, nv_job_metadata, job_env_variables)
-                nv_job_metadata["spec_file_path"] = self.action_spec_path
+                nv_job_metadata["spec_file_path"] = action_spec_path
 
         k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=self.ngc_runner, network=self.network, action=self.action)
         while k8s_status in ["Done", "Error", "Running", "Pending", "Creating"]:
             time.sleep(5)
-            if os.path.exists(os.path.join(self.expt_root, "status.json")) or (BACKEND in ("BCP", "NVCF") and k8s_status == "Running"):
+            if os.path.exists(os.path.join(self.expt_root, "status.json")):
                 break
             if k8s_status == "Error":
                 self.detailed_print(f"Relaunching job {self.job_name}", file=sys.stderr)
@@ -826,7 +817,7 @@ class AutoMLPipeline(ActionPipeline):
             self.spec = self.generate_config(recommended_values)
             self.handle_multiple_ptm_fields()
             self.get_handler_cloud_details()
-            self.save_recommendation_specs()
+            action_spec_path = self.save_recommendation_specs()
             run_command = self.generate_run_command()
 
             self.detailed_print(run_command, file=sys.stderr)
@@ -843,14 +834,14 @@ class AutoMLPipeline(ActionPipeline):
             nv_job_metadata = {}
             if self.ngc_runner:
                 self.generate_nv_job_metadata(run_command, nv_job_metadata, job_env_variables)
-                nv_job_metadata["spec_file_path"] = self.action_spec_path
+                nv_job_metadata["spec_file_path"] = action_spec_path
 
             if self.network in TAO_NETWORKS and BACKEND == "local-k8s":
                 self.create_microservice_action_job(job_env_variables)
             else:
                 jobDriver.create(self.job_context.user_id, self.job_context.org_name, self.job_name, self.image, run_command, num_gpu=self.num_gpu, docker_env_vars=job_env_variables, nv_job_metadata=nv_job_metadata)
             self.detailed_print(f"AutoML recommendation with experiment id {self.rec_number} and job id {self.job_name} submitted", file=sys.stderr)
-            self.monitor_job(job_env_variables, nv_job_metadata)
+            self.monitor_job(action_spec_path, job_env_variables, nv_job_metadata)
 
             return True
 
@@ -861,7 +852,7 @@ class AutoMLPipeline(ActionPipeline):
             self.recs_dict[self.rec_number]["status"] = "failure"
             safe_dump_file(f"{self.job_root}/controller.json", self.recs_dict)
 
-            update_job_status(self.handler_id, self.job_context.id, status="Error", kind=self.handler_kind)
+            update_job_status(self.job_context.org_name, self.handler_id, self.job_context.id, status="Error", kind=self.handler_kind)
             jobDriver.delete(self.job_context.id, use_ngc=False)
             return False
 
@@ -897,7 +888,7 @@ class ContinualLearning(ActionPipeline):
             k8s_status = jobDriver.status(self.job_context.org_name, self.handler_id, self.job_name, self.handler_kind, use_ngc=False)
         self.detailed_print(f"Job status: {k8s_status}", file=sys.stderr)
         if k8s_status == "Error":
-            update_job_status(self.handler_id, self.job_context.id, status="Error")
+            update_job_status(self.job_context.org_name, self.handler_id, self.job_context.id, status="Error")
         self.detailed_print("Continual Learning finished.", file=sys.stderr)
 
     def run(self):
@@ -930,7 +921,7 @@ class ContinualLearning(ActionPipeline):
         except Exception:
             self.detailed_print(f"ContinualLearning for {self.network} failed because {traceback.format_exc()}", file=sys.stderr)
             shutil.copy(self.logfile, self.logs_from_toolkit)
-            update_job_status(self.handler_id, self.job_context.id, status="Error")
+            update_job_status(self.job_context.org_name, self.handler_id, self.job_context.id, status="Error")
 
 
 class BundleTrain(ActionPipeline):
@@ -970,7 +961,7 @@ class BundleTrain(ActionPipeline):
             spec = load_json_spec(spec_json_path)
 
         for k, v in spec.items():
-            if isinstance(v, str) and v == "$default_monai_label_mapping":
+            if isinstance(v, str) and v == "$default_medical_label_mapping":
                 labels = self.handler_metadata.get("model_params", {}).get("labels", None)
                 spec[k] = {"default": [[int(i), int(i)] for i in labels]}
                 self.detailed_print(f"Using default {k}: {spec[k]}", file=sys.stderr)
@@ -979,9 +970,9 @@ class BundleTrain(ActionPipeline):
 
     def generate_config(self):
         """
-        Generate config for monai bundle train
+        Generate config for medical bundle train
         Returns:
-        spec: contains the params for building monai bundle train command
+        spec: contains the params for building medical bundle train command
         Notes:
         Similar to TrainVal.generate_config, but we have the following differences:
         - Drop using network config files
@@ -989,7 +980,7 @@ class BundleTrain(ActionPipeline):
         But we cannot delete the network config and the csv spec file, because they are used by the app_handler, e.g. save_spec and job_run methods.
         """
         spec = self.get_spec()
-        success, msg = validate_monai_bundle_params(spec)
+        success, msg = validate_medical_bundle_params(spec)
         if not success:
             self.detailed_print(msg, file=sys.stderr)
             raise RuntimeError(msg)
@@ -1015,7 +1006,7 @@ class BundleTrain(ActionPipeline):
         for dataset_usage in datasets_info:
             secret = datasets_info[dataset_usage].pop("client_secret", "")
             secret_env = datasets_info[dataset_usage]["secret_env"]
-            self.monai_env_variable.update({secret_env: secret})
+            self.medical_env_variable.update({secret_env: secret})
 
     def get_dicom_convert(self, datasets_info):
         """Check if need to convert the dicom datasets."""
@@ -1118,7 +1109,7 @@ class BundleTrain(ActionPipeline):
 
     def generate_run_command(self):
         """Generate run command"""
-        ptm_root, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["monai_output_dir"](self.job_context, self.handler_metadata)
+        ptm_root, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["medical_output_dir"](self.job_context, self.handler_metadata)
         copy_needed = bool(ptm_root)
         overriden_output_dir = overriden_output_dir.rstrip(os.path.sep)
         status_file = os.path.join(overriden_output_dir, "status.json")
@@ -1139,7 +1130,7 @@ class BundleTrain(ActionPipeline):
             bundle_url = self._get_bundle_url(ptm_root)
             if not bundle_url:
                 raise RuntimeError("Cannot find the pretrained model url for the customized bundle.")
-        elif self.network != "monai_automl_generated":  # monai_automl_generated does not need ngc path nor ptm_root
+        elif self.network != "medical_automl_generated":  # medical_automl_generated does not need ngc path nor ptm_root
             ngc_path = self.get_ngc_path()
             if not ngc_path:
                 raise RuntimeError("Cannot find the ngc path for the pretrained model.")
@@ -1164,7 +1155,7 @@ class BatchInfer(BundleTrain):
 
     def generate_run_command(self):
         """Generate batch inference run command"""
-        ptm_root, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["monai_output_dir"](self.job_context, self.handler_metadata)
+        ptm_root, bundle_name, overriden_output_dir = CLI_CONFIG_TO_FUNCTIONS["medical_output_dir"](self.job_context, self.handler_metadata)
         status_file = os.path.join(overriden_output_dir, "status.json")
         datasets_info = self.spec.pop("datasets_info", {})
         train_job_id = self.spec.pop("train_job_id", "")
@@ -1235,7 +1226,7 @@ class Auto3DSegTrain(BundleTrain):
             "name": self.spec.get("output_experiment_name", "auto3dseg_automl_experiment"),
             "description": self.spec.get("output_experiment_description", "AutoML Generated Segmentation Model based on MONAI Auto3DSeg"),
             "type": "medical",
-            "network_arch": "monai_automl_generated",
+            "network_arch": "medical_automl_generated",
             "inference_dataset": self.spec.get("inference_dataset"),
             "realtime_infer": False,
             "bundle_url": cloud_folder,
@@ -1264,10 +1255,10 @@ class Auto3DSegInfer(BundleTrain):
 
     def generate_config(self):
         """
-        Generate spec for monai inference and creates "datalist.json"
+        Generate spec for medical inference and creates "datalist.json"
 
         Returns:
-            spec: contains the params for building monai bundle train command
+            spec: contains the params for building medical bundle train command
         """
         # load spec
         spec = self.get_spec()
@@ -1318,10 +1309,10 @@ ACTIONS_TO_FUNCTIONS = {"train": TrainVal,
                         "odconvert": TrainVal,
                         "pyt_odconvert": TrainVal,
                         "data_services": TrainVal,
-                        "monai_annotation": ContinualLearning,
+                        "medical_annotation": ContinualLearning,
                         "medical_automl_auto3dseg": Auto3DSegTrain,
-                        "monai_train": BundleTrain,
+                        "medical_train": BundleTrain,
                         "medical_automl_batchinfer": Auto3DSegInfer,
-                        "monai_batchinfer": BatchInfer,
-                        "monai_generate": BatchInfer,
+                        "medical_batchinfer": BatchInfer,
+                        "medical_generate": BatchInfer,
                         }

@@ -20,7 +20,7 @@ import sys
 import traceback
 
 from handlers.encrypt import NVVaultEncryption
-from handlers.mongo_handler import MongoHandler
+from utils import safe_load_file, safe_dump_file
 
 BACKEND = os.getenv("BACKEND", "local-k8s")
 DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "PROD")
@@ -56,7 +56,7 @@ def get_from_ngc(key):
             return creds, err
         user_id = str(uuid.uuid5(uuid.UUID(int=0), str(ngc_user_id)))
         creds = {'user_id': user_id, 'token': token}
-        mongo = MongoHandler("tao", "users")
+
         encrypted_key = key
         if BACKEND in ("BCP", "NVCF"):
             config_path = os.getenv("VAULT_SECRET_PATH", None)
@@ -67,10 +67,13 @@ def get_from_ngc(key):
                 err = "Vault service does not work, can't store API key"
                 return creds, err
 
-        user_query = {'id': user_id}
-        user = mongo.find_one(user_query)
-        if 'key' not in user or encrypted_key != user['key']:
-            mongo.upsert(user_query, {'id': user_id, 'key': encrypted_key})
+        filename = "/shared/ngc_session_cache.json"
+        session = safe_load_file(filename)
+        if user_id not in session.keys():
+            session[user_id] = {}
+        if 'key' not in session[user_id] or encrypted_key != session[user_id]['key']:
+            session[user_id]['key'] = encrypted_key
+            safe_dump_file(filename, session)
 
     except Exception as e:
         print(traceback.format_exc(), file=sys.stderr)
@@ -91,12 +94,19 @@ def save_cookie(user_id, sid_cookie, ssid_cookie):
             if ssid_cookie:
                 encrypted_ssid_cookie = encryption.encrypt(ssid_cookie)
 
-    mongo = MongoHandler("tao", "users")
-    user_query = {'id': user_id}
-    user = mongo.find_one(user_query)
-    if sid_cookie:
-        if 'sid_cookie' not in user or encrypted_sid_cookie != user['sid_cookie']:
-            mongo.upsert(user_query, {'id': user_id, 'sid_cookie': encrypted_sid_cookie})
-    if ssid_cookie:
-        if 'ssid_cookie' not in user or encrypted_ssid_cookie != user['ssid_cookie']:
-            mongo.upsert(user_query, {'id': user_id, 'ssid_cookie': encrypted_ssid_cookie})
+    filename = "/shared/ngc_session_cache.json"
+    session = safe_load_file(filename)
+    needs_write = False
+    if user_id:
+        if user_id not in session.keys():
+            session[user_id] = {}
+        if sid_cookie:
+            if 'sid_cookie' not in session[user_id] or encrypted_sid_cookie != session[user_id]['sid_cookie']:
+                session[user_id]['sid_cookie'] = encrypted_sid_cookie
+                needs_write = True
+        if ssid_cookie:
+            if 'ssid_cookie' not in session[user_id] or encrypted_ssid_cookie != session[user_id]['ssid_cookie']:
+                session[user_id]['ssid_cookie'] = encrypted_ssid_cookie
+                needs_write = True
+    if needs_write:
+        safe_dump_file(filename, session)

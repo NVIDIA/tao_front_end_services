@@ -138,8 +138,6 @@ def convert(path, classes=[]):
             #     parameter = harden_parameter_name(parameter)
             display_name = row.get('display_name')
             value_type = row.get('value_type')
-            if value_type and value_type.lower() == 'hidden':
-                continue
             # if value_type:
             #     value_type = harden_value_type(value_type)
             description = row.get('description')
@@ -203,8 +201,10 @@ def convert(path, classes=[]):
                     if obj.get('required') is None:
                         obj['required'] = []
                     obj['required'].append(last_param)
-                if popular not in (None, '') and popular.lower() == 'yes':
-                    obj['popular'] = {last_param: default_value}
+                if popular is not None and popular.lower() == 'yes':
+                    if obj.get('popular') is None:
+                        obj['popular'] = []
+                    obj['popular'].append(last_param)
                 if automl_enabled is not None and automl_enabled.lower() == 'true':
                     if obj.get('automl_default_parameters') is None:
                         obj['automl_default_parameters'] = []
@@ -225,11 +225,8 @@ def convert(path, classes=[]):
                 param = params.pop()
                 if isArray:
                     default = []
-                    popular = []
                     if hasDefault:
                         default = [obj['default']]
-                    if isPopular:
-                        popular = [obj['popular']]
                     if classes != []:
                         # dynamic patching of default for given dataset classes
                         if joined_params == 'classwise_config':
@@ -256,21 +253,18 @@ def convert(path, classes=[]):
                     }
                     if hasDefault or default != []:
                         obj['default'] = {param: default}
-                    if isPopular or popular != []:
-                        obj['popular'] = {param: default}
                 else:
                     default = obj.get('default')
-                    popular = obj.get('popular')
                     obj = {
                         'type': 'object',
-                        'properties': {param: obj},
+                        'properties': {param: obj}
                     }
                     if hasDefault:
                         obj['default'] = {param: default}
-                    if isPopular:
-                        obj['popular'] = {param: popular}
                 if isRequired:
                     obj['required'] = [param]
+                if isPopular:
+                    obj['popular'] = [param]
                 if isAutomlenabled:
                     if not schema.get('automl_default_parameters'):
                         schema['automl_default_parameters'] = [parameter]

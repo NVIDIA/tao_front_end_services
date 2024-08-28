@@ -1,5 +1,5 @@
 {
     "registry": "nvcr.io",
-    "repository": "nvidia/tao/tao-toolkit",
-    "digest": "sha256:5d4e2c050bd4d730f68c81d00d696a24ae7b86e9cfd5aca87d21c5235cfa60a1"
+    "repository": "nvidia/tao/tao-api",
+    "digest": "sha256:45d949d5d14061d5fdfd94a50ee07b3c324c2b5f34c3316081263ad10e1e090a"
 }

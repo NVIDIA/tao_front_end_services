@@ -18,9 +18,9 @@ import sys
 
 import numpy as np
 from handlers.app_handler import AppHandler
-from handlers.monai.helpers import ImageLabelRecord
+from handlers.medical.helpers import ImageLabelRecord
 from handlers.stateless_handlers import (get_handler_metadata,
-                                         get_jobs_for_handler,
+                                         list_all_job_metadata,
                                          printc,
                                          safe_load_file)
 from handlers.tis_handler import TISHandler
@@ -34,7 +34,7 @@ def update_inference_model(job_context_dict, job_id):
     user_id = job_context_dict.get("user_id")
     org_name = job_context_dict.get("org_name")
     # Read handler metadata
-    handler_metadata = get_handler_metadata(model_id, "experiments")
+    handler_metadata = get_handler_metadata(org_name, model_id)
     if not handler_metadata["realtime_infer"]:
         raise ValueError(f"User {org_name} model {model_id} is not enabled for Realtime Inference")
     model_params = handler_metadata["model_params"]
@@ -53,7 +53,7 @@ def trigger_train(train_spec, job_context_dict, current_record, latest_record):
     Trigger training job for the current model.
 
     Args:
-        train_spec: Training spec dict for the monai training.
+        train_spec: Training spec dict for the medical training.
         job_context_dict: Job context for the current annotation job.
         current_record: Current record obtained from the `notify`. Not used with the current implementation.
         latest_record: latest record generated from the previous `notify`. Not used with the current implementation.
@@ -110,7 +110,7 @@ def initialize_cl_tracker(stop_criteria):
 
 def cancel_trigger_jobs(org_name, experiment_id, jobs_trigger, jobs_done):
     """Cancel all the triggered jobs for the current model."""
-    job_metadatas = get_jobs_for_handler(experiment_id, "experiment")
+    job_metadatas = list_all_job_metadata(org_name, experiment_id)
     for job_metadata in job_metadatas:
         if job_metadata.get("id", "") in jobs_trigger and job_metadata["id"] not in jobs_done:
             response = AppHandler.job_cancel(org_name, experiment_id, job_metadata.get("id"), "experiment")
@@ -167,8 +167,9 @@ def process_notification_record(notify_record, latest_mod_time, latest_record, t
 
 def handle_job_updates(cl_state, jobs_trigger, jobs_done, metric_sorter, job_context_dict):
     """Handle the job updates for the Continual Learning Job."""
+    org_name = job_context_dict.get("org_name")
     handler_id = job_context_dict.get("handler_id")
-    job_metadatas = get_jobs_for_handler(handler_id, "experiment")
+    job_metadatas = list_all_job_metadata(org_name, handler_id)
     for job_metadata in job_metadatas:
         job_id = job_metadata.get("id", "")
         if job_id in jobs_trigger and job_id not in jobs_done:

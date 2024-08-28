@@ -21,7 +21,7 @@ import time
 from kubernetes import client, config
 
 from utils import safe_load_file
-from handlers.stateless_handlers import get_jobs_root, BACKEND
+from handlers.stateless_handlers import get_jobs_root
 
 
 def fix_input_dimension(dimension_value, factor=32):
@@ -97,20 +97,12 @@ def wait_for_job_completion(job_id):
         dgx_active_jobs = []
         if os.getenv("BACKEND", "") in ("BCP", "NVCF"):
             custom_api = client.CustomObjectsApi()
-            if BACKEND == "BCP":
-                crd_group = 'dgx-job-manager.nvidia.io'
-                crd_version = 'v1alpha1'
-                crd_plural = 'dgxjobs'
-            elif BACKEND == "NVCF":
-                crd_group = 'nvcf-job-manager.nvidia.io'
-                crd_version = 'v1alpha1'
-                crd_plural = 'nvcfjobs'
+            crd_group = 'dgx-job-manager.nvidia.io'
+            crd_version = 'v1alpha1'
+            crd_plural = 'dgxjobs'
             # List all instances of the Custom Resource across all namespaces
             custom_resources = custom_api.list_cluster_custom_object(crd_group, crd_version, crd_plural)
-            if BACKEND == "BCP":
-                dgx_active_jobs = [dgx_cr["spec"].get("name") for dgx_cr in custom_resources['items']]
-            elif BACKEND == "NVCF":
-                dgx_active_jobs = [dgx_cr["spec"].get("job_id") for dgx_cr in custom_resources['items']]
+            dgx_active_jobs = [dgx_cr["spec"].get("name") for dgx_cr in custom_resources['items']]
 
         ret = client.BatchV1Api().list_job_for_all_namespaces()
         active_jobs = dgx_active_jobs + [job.metadata.name for job in ret.items]

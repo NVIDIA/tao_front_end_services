@@ -40,9 +40,9 @@ from health_utils import health_check
 
 from enum_constants import DatasetFormat, DatasetType, ExperimentNetworkArch, Metrics
 from handlers.app_handler import AppHandler as app_handler
-from handlers.stateless_handlers import resolve_metadata, get_root, get_metrics, set_metrics
+from handlers.stateless_handlers import resolve_metadata, get_root
 from handlers.utilities import validate_uuid
-from utils import is_pvc_space_free, safe_load_file, log_monitor, log_api_error, is_cookie_request, DataMonitorLogTypeEnum
+from utils import is_pvc_space_free, safe_load_file, safe_dump_file, log_monitor, log_api_error, is_cookie_request, DataMonitorLogTypeEnum
 from job_utils.workflow import Workflow
 
 from werkzeug.exceptions import HTTPException
@@ -243,7 +243,7 @@ class CustomProfilerMiddleware(ProfilerMiddleware):
 
 
 app = Flask(__name__)
-app.json.sort_keys = False
+app.config['JSON_SORT_KEYS'] = False
 app.config['TRAP_HTTP_EXCEPTIONS'] = True
 if os.getenv("PROFILER", "FALSE") == "True":
     app.config["PROFILE"] = True
@@ -316,7 +316,7 @@ class GraphSchema(Schema):
     x_max = fields.Int(allow_none=True, validate=fields.validate.Range(min=-sys.maxsize - 1, max=sys.maxsize), format=sys_int_format())
     y_min = fields.Float(allow_none=True)
     y_max = fields.Float(allow_none=True)
-    values = fields.Dict(keys=fields.Str(allow_none=True), values=fields.Float(allow_none=True))
+    values = fields.Dict(keys=fields.Int(allow_none=True), values=fields.Float(allow_none=True))
     units = fields.Str(allow_none=True, format="regex", regex=r'.*', validate=fields.validate.Length(max=100))
 
 
@@ -351,9 +351,8 @@ class KPISchema(Schema):
         """Class enabling sorting field values by the order in which they are declared"""
 
         ordered = True
-        unknown = EXCLUDE
     metric = EnumFieldPrefix(Metrics)
-    values = fields.Dict(allow_none=True)
+    values = fields.Dict(keys=fields.Int(allow_none=True), values=fields.Float(allow_none=True))
 
 
 class CustomFloatField(fields.Float):
@@ -646,14 +645,12 @@ def metrics_upsert():
 
     # update metrics.json
 
-    metrics = get_metrics()
+    metrics = safe_load_file(os.path.join(get_root(), 'metrics.json'))
     if not metrics:
-        metrics = safe_load_file(os.path.join(get_root(), 'metrics.json'))
-        if not metrics:
-            metadata = {"error_desc": "Metrics.json file not exists or can not be updated now, please try again later.", "error_code": 503}
-            schema = ErrorRspSchema()
-            response = make_response(jsonify(schema.dump(schema.load(metadata))), 500)
-            return response
+        metadata = {"error_desc": "Metrics.json file not exists or can not be updated now, please try again later.", "error_code": 503}
+        schema = ErrorRspSchema()
+        response = make_response(jsonify(schema.dump(schema.load(metadata))), 500)
+        return response
 
     old_now = datetime.fromisoformat(metrics.get('last_updated', now.isoformat()))
     version = re.sub("[^a-zA-Z0-9]", "_", data.get('version', 'unknown')).lower()
@@ -676,7 +673,7 @@ def metrics_upsert():
         metrics[f'gpu_{gpu}_action_{action}'] = metrics.get(f'gpu_{gpu}_action_{action}', 0) + 1
     metrics['last_updated'] = now.isoformat()
 
-    set_metrics(metrics)
+    safe_dump_file(os.path.join(get_root(), 'metrics.json'), metrics)
 
     # success
 
@@ -771,7 +768,6 @@ class WorkspaceReqSchema(Schema):
         ordered = True
         unknown = EXCLUDE
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
-    shared = fields.Bool(allow_none=False)
     version = fields.Str(format="regex", regex=r'^\d+\.\d+\.\d+$', validate=fields.validate.Length(max=10))
     cloud_type = EnumField(CloudPullTypesEnum, allow_none=False)
     cloud_specific_details = fields.Field(allow_none=False)
@@ -797,15 +793,6 @@ class WorkspaceReqSchema(Schema):
                 raise fields.ValidationError(str(e))
 
 
-class DateTimeField(fields.DateTime):
-    """Class defining datetime object deserialization (since marshmallow doesn't handle python date objects natively, expects a date string instead)"""
-
-    def _deserialize(self, value, attr, data, **kwargs):
-        if isinstance(value, datetime):
-            return value
-        return super()._deserialize(value, attr, data, **kwargs)
-
-
 class WorkspaceRspSchema(Schema):
     """Class defining Cloud pull schema"""
 
@@ -817,10 +804,9 @@ class WorkspaceRspSchema(Schema):
 
     id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
     user_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
-    created_on = DateTimeField()
-    last_modified = DateTimeField()
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
-    shared = fields.Bool(allow_none=False)
     version = fields.Str(format="regex", regex=r'^\d+\.\d+\.\d+$', validate=fields.validate.Length(max=10))
     cloud_type = EnumField(CloudPullTypesEnum, allow_none=False)
 
@@ -833,12 +819,6 @@ class WorkspaceListRspSchema(Schema):
 
         ordered = True
     workspaces = fields.List(fields.Nested(WorkspaceRspSchema), validate=validate.Length(max=sys.maxsize))
-
-
-class DatasetPathLstSchema(Schema):
-    """Class defining dataset actions schema"""
-
-    dataset_paths = fields.List(fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True), validate=validate.Length(max=sys.maxsize))
 
 
 @app.route('/api/v1/orgs/<org_name>/workspaces', methods=['GET'])
@@ -899,7 +879,7 @@ def workspace_list(org_name):
         required: false
         schema:
           type: string
-          enum: ["monai", "unet", "custom" ]
+          enum: ["medical", "unet", "custom" ]
       - name: type
         in: query
         description: Optional type filter
@@ -1005,77 +985,6 @@ def workspace_retrieve(org_name, workspace_id):
     schema = None
     if response.code == 200:
         schema = WorkspaceRspSchema()
-    else:
-        schema = ErrorRspSchema()
-    # Load metadata in schema and return
-    schema_dict = schema.dump(schema.load(response.data))
-    return make_response(jsonify(schema_dict), response.code)
-
-
-@app.route('/api/v1/orgs/<org_name>/workspaces/<workspace_id>:get_datasets', methods=['GET'])
-@disk_space_check
-def workspace_retrieve_datasets(org_name, workspace_id):
-    """Retrieve Datasets from Workspace.
-    ---
-    get:
-      tags:
-      - WORKSPACE
-      summary: Retrieve datasets from Workspace
-      description: Returns the datasets matched with the request body args inside the Workspace
-      parameters:
-      - name: org_name
-        in: path
-        description: Org Name
-        required: true
-        schema:
-          type: string
-          maxLength: 255
-          pattern: '^[a-zA-Z0-9_-]+$'
-      - name: workspace_id
-        in: path
-        description: ID of Workspace to return
-        required: true
-        schema:
-          type: string
-          format: uuid
-          maxLength: 36
-      responses:
-        200:
-          description: Returned list of dataset paths within Workspace
-          content:
-            application/json:
-              schema: DatasetPathLstSchema
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: '#/components/headers/Access-Control-Allow-Origin'
-            X-RateLimit-Limit:
-              $ref: '#/components/headers/X-RateLimit-Limit'
-        404:
-          description: User or Workspace not found
-          content:
-            application/json:
-              schema: ErrorRspSchema
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: '#/components/headers/Access-Control-Allow-Origin'
-            X-RateLimit-Limit:
-              $ref: '#/components/headers/X-RateLimit-Limit'
-    """
-    message = validate_uuid(workspace_id=workspace_id)
-    if message:
-        metadata = {"error_desc": message, "error_code": 1}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
-    dataset_type = request.args.get("dataset_type", None)
-    dataset_format = request.args.get("dataset_format", None)
-    dataset_intention = request.args.getlist("dataset_intention")
-    # Get response
-    response = app_handler.retrieve_cloud_datasets(org_name, workspace_id, dataset_type, dataset_format, dataset_intention)
-    # Get schema
-    schema = None
-    if response.code == 200:
-        schema = DatasetPathLstSchema()
     else:
         schema = ErrorRspSchema()
     # Load metadata in schema and return
@@ -1437,7 +1346,6 @@ class DatasetReqSchema(Schema):
         ordered = True
         unknown = EXCLUDE
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
-    shared = fields.Bool(allow_none=False)
     user_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
     docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True))
@@ -1466,8 +1374,8 @@ class DatasetJobSchema(Schema):
         unknown = EXCLUDE
     id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
     parent_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
-    created_on = DateTimeField()
-    last_modified = DateTimeField()
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
     action = EnumField(ActionEnum)
     status = EnumField(JobStatusEnum)
     result = fields.Nested(JobResultSchema)
@@ -1491,10 +1399,9 @@ class DatasetRspSchema(Schema):
 
     id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
     user_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
-    created_on = DateTimeField()
-    last_modified = DateTimeField()
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
-    shared = fields.Bool(allow_none=False)
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))
     docker_env_vars = fields.Dict(keys=EnumField(AllowedDockerEnvVariables), values=fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500), allow_none=True))
     version = fields.Str(format="regex", regex=r'^\d+\.\d+\.\d+$', validate=fields.validate.Length(max=10))
@@ -1902,7 +1809,7 @@ def dataset_create(org_name):
     schema_dict = schema.dump(schema.load(response.data))
     if response.code != 201:
         ds_format = request_dict.get("format", "")
-        log_type = DataMonitorLogTypeEnum.medical_dataset if ds_format == "monai" else DataMonitorLogTypeEnum.tao_dataset
+        log_type = DataMonitorLogTypeEnum.medical_dataset if ds_format == "medical" else DataMonitorLogTypeEnum.tao_dataset
         log_api_error(user_id, org_name, from_ui, schema_dict, log_type, action="creation")
 
     return make_response(jsonify(schema_dict), response.code)
@@ -2232,12 +2139,12 @@ def dataset_job_run(org_name, dataset_id):
     from_ui = is_cookie_request(request)
     # Get response
     response = app_handler.job_run(org_name, dataset_id, requested_job, requested_action, "dataset", specs=specs, name=name, description=description, num_gpu=num_gpu, platform=platform, from_ui=from_ui)
-    handler_metadata = resolve_metadata("dataset", dataset_id)
+    handler_metadata = resolve_metadata(org_name, "dataset", dataset_id)
     dataset_format = handler_metadata.get("format")
     # Get schema
     if response.code == 201:
         # MONAI dataset jobs are sync jobs and the response should be returned directly.
-        if dataset_format == "monai":
+        if dataset_format == "medical":
             return make_response(jsonify(response.data), response.code)
         if isinstance(response.data, str) and not validate_uuid(response.data):
             return make_response(jsonify(response.data), response.code)
@@ -3125,7 +3032,7 @@ class ExperimentExportTypeEnum(Enum):
     """Class defining model export type"""
 
     tao = 'tao'
-    monai_bundle = 'monai_bundle'
+    medical_bundle = 'medical_bundle'
 
 
 class AutoMLAlgorithm(Enum):
@@ -3167,7 +3074,6 @@ class BaseExperimentMetadataSchema(Schema):
     domain = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     backbone_type = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     backbone_class = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
-    num_parameters = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=10), allow_none=True)
     license = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     model_card_link = fields.URL(validate=fields.validate.Length(max=2048), allow_none=True)
     is_backbone = fields.Bool()
@@ -3184,7 +3090,6 @@ class ExperimentReqSchema(Schema):
         ordered = True
         unknown = EXCLUDE
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
-    shared = fields.Bool(allow_none=False)
     user_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))  # Model version description - not changing variable name for backward compatability
     model_description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))  # Description common to all versions of models
@@ -3214,10 +3119,7 @@ class ExperimentReqSchema(Schema):
     model_params = fields.Dict(allow_none=True)
     bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     realtime_infer_request_timeout = fields.Int(format="int64", validate=validate.Range(min=0, max=sys.maxsize), allow_none=True)
-    experiment_actions = fields.List(fields.Nested(ExperimentActions, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
-    tensorboard_enabled = fields.Bool(allow_none=True)
     tags = fields.List(fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500)), validate=validate.Length(max=sys.maxsize))
-    retry_experiment_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
 
 
 class ExperimentJobSchema(Schema):
@@ -3230,8 +3132,8 @@ class ExperimentJobSchema(Schema):
         unknown = EXCLUDE
     id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
     parent_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36), allow_none=True)
-    created_on = DateTimeField()
-    last_modified = DateTimeField()
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
     action = EnumField(ActionEnum)
     status = EnumField(JobStatusEnum)
     result = fields.Nested(JobResultSchema)
@@ -3256,10 +3158,9 @@ class ExperimentRspSchema(Schema):
 
     id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
     user_id = fields.Str(format="uuid", validate=fields.validate.Length(max=36))
-    created_on = DateTimeField()
-    last_modified = DateTimeField()
+    created_on = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
+    last_modified = fields.Str(format='date-time', validate=fields.validate.Length(max=26))
     name = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
-    shared = fields.Bool(allow_none=False)
     description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))  # Model version description - not changing variable name for backward compatability
     model_description = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000))  # Description common to all versions of models
     version = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500))
@@ -3298,8 +3199,6 @@ class ExperimentRspSchema(Schema):
     realtime_infer_request_timeout = fields.Int(format="int64", validate=validate.Range(min=0, max=86400), allow_none=True)
     bundle_url = fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=1000), allow_none=True)
     base_experiment_metadata = fields.Nested(BaseExperimentMetadataSchema, allow_none=True)
-    experiment_actions = fields.List(fields.Nested(ExperimentActions, allow_none=True), validate=fields.validate.Length(max=sys.maxsize))
-    tensorboard_enabled = fields.Bool(default=False)
     tags = fields.List(fields.Str(format="regex", regex=r'.*', validate=fields.validate.Length(max=500)), validate=validate.Length(max=sys.maxsize))
 
 
@@ -3581,6 +3480,12 @@ def base_experiment_list(org_name):
         allowEmptyValue: true
         schema:
           type: boolean
+      - name: user_only
+        in: query
+        description: Optional filter to select user owned experiments only
+        required: false
+        schema:
+          type: boolean
       responses:
         200:
           description: Returned the list of Experiments
@@ -3593,7 +3498,8 @@ def base_experiment_list(org_name):
             X-RateLimit-Limit:
               $ref: '#/components/headers/X-RateLimit-Limit'
     """
-    experiments = app_handler.list_base_experiments()
+    user_only = str(request.args.get('user_only', None)) in {'True', 'yes', 'y', 'true', 't', '1', 'on'}
+    experiments = app_handler.list_base_experiments(user_only)
     filtered_experiments = filtering.apply(request.args, experiments)
     paginated_experiments = pagination.apply(request.args, filtered_experiments)
     metadata = {"experiments": paginated_experiments}
@@ -3813,7 +3719,7 @@ def experiment_create(org_name):
     schema_dict = schema.dump(schema.load(response.data))
     if response.code != 201:
         mdl_nw = request_dict.get("network_arch", None)
-        is_medical = isinstance(mdl_nw, str) and mdl_nw.startswith("monai_")
+        is_medical = isinstance(mdl_nw, str) and mdl_nw.startswith("medical_")
         log_type = DataMonitorLogTypeEnum.medical_experiment if is_medical else DataMonitorLogTypeEnum.tao_experiment
         log_api_error(user_id, org_name, from_ui, schema_dict, log_type, action="creation")
 
@@ -4273,12 +4179,7 @@ def experiment_job_run(org_name, experiment_id):
     requested_job = request_schema_data.get('parent_job_id', None)
     if requested_job:
         requested_job = str(requested_job)
-    requested_action = request_schema_data.get('action', None)
-    if not requested_action:
-        metadata = {"error_desc": "Action is required to run job", "error_code": 400}
-        schema = ErrorRspSchema()
-        response = make_response(jsonify(schema.dump(schema.load(metadata))), 400)
-        return response
+    requested_action = request_schema_data.get('action', "")
     specs = request_schema_data.get('specs', {})
     name = request_schema_data.get('name', '')
     description = request_schema_data.get('description', '')
@@ -4314,7 +4215,7 @@ def experiment_job_run(org_name, experiment_id):
                 return send_file_response
             except Exception as e:
                 # get user_id for more information
-                handler_metadata = resolve_metadata("experiment", experiment_id)
+                handler_metadata = resolve_metadata(org_name, "experiment", experiment_id)
                 user_id = handler_metadata.get("user_id")
                 print(f"respond attached data for org: {org_name} experiment: {experiment_id} user: {user_id} failed, got error: {e}", file=sys.stderr)
                 metadata = {"error_desc": "respond attached data failed", "error_code": 2}
@@ -4332,7 +4233,7 @@ def experiment_job_run(org_name, experiment_id):
     schema_dict = schema.dump(schema.load(response.data))
     if response.code != 201:
         try:
-            handler_metadata = resolve_metadata("experiment", experiment_id)
+            handler_metadata = resolve_metadata(org_name, "experiment", experiment_id)
             is_medical = handler_metadata.get("type").lower() == "medical"
             user_id = handler_metadata.get("user_id", None)
             if user_id:
@@ -5885,7 +5786,7 @@ time_loop = Timeloop()
 @time_loop.job(interval=timedelta(seconds=300))
 def clear_cache():
     """Clear cache every 5 minutes"""
-    from handlers.monai_dataset_handler import MonaiDatasetHandler
+    from handlers.medical_dataset_handler import MonaiDatasetHandler
     MonaiDatasetHandler.clean_cache()
 
 
@@ -5904,7 +5805,6 @@ with app.test_request_context():
     spec.path(view=login)
     spec.path(view=workspace_list)
     spec.path(view=workspace_retrieve)
-    spec.path(view=workspace_retrieve_datasets)
     spec.path(view=workspace_delete)
     spec.path(view=workspace_create)
     spec.path(view=workspace_update)

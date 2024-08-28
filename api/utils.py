@@ -16,7 +16,7 @@
 import os
 import sys
 import json
-import ruamel.yaml
+import yaml
 import base64
 import orjson
 import shutil
@@ -337,8 +337,7 @@ def load_file(filepath, attempts=3, file_type="json"):
                 data = orjson.loads(json_data)
         elif file_type == "yaml":
             with open(filepath, "r", encoding="utf-8") as f:
-                yaml = ruamel.yaml.YAML(typ='safe')
-                data = yaml.load(f)
+                data = yaml.safe_load(f)
         return data
     except:
         data = {}
@@ -373,8 +372,7 @@ def safe_load_file(filepath, existing_lock=None, attempts=3, file_type="json"):
                     data = orjson.loads(json_data)
             elif file_type == "yaml":
                 with open(filepath, "r", encoding="utf-8") as f:
-                    yaml = ruamel.yaml.YAML(typ='safe')
-                    data = yaml.load(f)
+                    data = yaml.safe_load(f)
             return data
     except:
         data = {}
@@ -408,8 +406,7 @@ def safe_dump_file(filepath, data, existing_lock=None, file_type="json"):
                 f.write(json_data.decode('utf-8'))
         elif file_type == "yaml":
             with open(tmp_file_path, "w", encoding="utf-8") as f:
-                yaml = ruamel.yaml.YAML()
-                yaml.dump(data, f)
+                yaml.dump(data, f, sort_keys=False)
         elif file_type == "protobuf":
             with open(tmp_file_path, "w", encoding='utf-8') as f:
                 f.write(data)

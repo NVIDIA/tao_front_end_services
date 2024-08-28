@@ -35,7 +35,7 @@ def automl_start(root, network, jc, resume, automl_algorithm, automl_max_recomme
         if "model.head.type" in parameter_names and automl_algorithm == "hyperband":
             error_message = "Hyperband not supported when non-epoch based models are chosen. Change algorithm to bayesian"
             result = {"message": error_message}
-            update_job_metadata(jc.handler_id, jc.id, metadata_key="result", data=result, kind="experiments")
+            update_job_metadata(jc.org_name, jc.handler_id, jc.id, metadata_key="result", data=result, kind="experiments")
             raise ValueError(error_message)
 
     if resume:
@@ -177,4 +177,4 @@ if __name__ == "__main__":
 
     except Exception:
         print(f"AutoML start for network {network} failed due to exception {traceback.format_exc()}", file=sys.stderr)
-        update_job_status(handler_id, automl_job_id, status="Error", kind="experiments")
+        update_job_status(org_name, handler_id, automl_job_id, status="Error", kind="experiments")

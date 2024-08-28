@@ -133,12 +133,6 @@
                         "nullable": true,
                         "type": "string"
                     },
-                    "num_parameters": {
-                        "format": "regex",
-                        "maxLength": 10,
-                        "nullable": true,
-                        "type": "string"
-                    },
                     "spec_file_present": {
                         "type": "boolean"
                     },
@@ -399,21 +393,6 @@
                 },
                 "type": "object"
             },
-            "DatasetPathLst": {
-                "properties": {
-                    "dataset_paths": {
-                        "items": {
-                            "format": "regex",
-                            "maxLength": 500,
-                            "nullable": true,
-                            "type": "string"
-                        },
-                        "maxItems": 9223372036854775807,
-                        "type": "array"
-                    }
-                },
-                "type": "object"
-            },
             "DatasetReq": {
                 "properties": {
                     "client_id": {
@@ -477,7 +456,7 @@
                             "classification_tf2",
                             "visual_changenet_segment",
                             "visual_changenet_classify",
-                            "monai"
+                            "medical"
                         ],
                         "type": "string"
                     },
@@ -490,9 +469,6 @@
                         "format": "regex",
                         "maxLength": 500,
                         "type": "string"
-                    },
-                    "shared": {
-                        "type": "boolean"
                     },
                     "status": {
                         "enum": [
@@ -667,7 +643,7 @@
                             "classification_tf2",
                             "visual_changenet_segment",
                             "visual_changenet_classify",
-                            "monai"
+                            "medical"
                         ],
                         "type": "string"
                     },
@@ -698,9 +674,6 @@
                         "format": "regex",
                         "maxLength": 500,
                         "type": "string"
-                    },
-                    "shared": {
-                        "type": "boolean"
                     },
                     "status": {
                         "enum": [
@@ -1119,18 +1092,6 @@
                         "maxLength": 36,
                         "type": "string"
                     },
-                    "experiment_actions": {
-                        "items": {
-                            "allOf": [
-                                {
-                                    "$ref": "#/components/schemas/ExperimentActions"
-                                }
-                            ],
-                            "nullable": true
-                        },
-                        "maxItems": 9223372036854775807,
-                        "type": "array"
-                    },
                     "inference_dataset": {
                         "format": "uuid",
                         "maxLength": 36,
@@ -1184,17 +1145,17 @@
                             "centerpose",
                             "auto_label",
                             "image",
-                            "monai_vista3d",
-                            "monai_vista2d",
-                            "monai_segmentation",
-                            "monai_annotation",
-                            "monai_classification",
-                            "monai_detection",
-                            "monai_automl",
-                            "monai_custom",
-                            "monai_genai",
-                            "monai_maisi",
-                            "monai_automl_generated"
+                            "medical_vista3d",
+                            "medical_vista2d",
+                            "medical_segmentation",
+                            "medical_annotation",
+                            "medical_classification",
+                            "medical_detection",
+                            "medical_automl",
+                            "medical_custom",
+                            "medical_genai",
+                            "medical_maisi",
+                            "medical_automl_generated"
                         ],
                         "type": "string"
                     },
@@ -1222,12 +1183,6 @@
                     "sha256_digest": {
                         "nullable": true,
                         "type": "object"
-                    },
-                    "tensorboard_enabled": {
-                        "type": "boolean"
-                    },
-                    "shared": {
-                        "type": "boolean"
                     },
                     "tags": {
                         "items": {
@@ -1424,7 +1379,7 @@
                                 "classification_tf2",
                                 "visual_changenet_segment",
                                 "visual_changenet_classify",
-                                "monai"
+                                "medical"
                             ],
                             "type": "string"
                         },
@@ -1552,17 +1507,17 @@
                             "centerpose",
                             "auto_label",
                             "image",
-                            "monai_vista3d",
-                            "monai_vista2d",
-                            "monai_segmentation",
-                            "monai_annotation",
-                            "monai_classification",
-                            "monai_detection",
-                            "monai_automl",
-                            "monai_custom",
-                            "monai_genai",
-                            "monai_maisi",
-                            "monai_automl_generated"
+                            "medical_vista3d",
+                            "medical_vista2d",
+                            "medical_segmentation",
+                            "medical_annotation",
+                            "medical_classification",
+                            "medical_detection",
+                            "medical_automl",
+                            "medical_custom",
+                            "medical_genai",
+                            "medical_maisi",
+                            "medical_automl_generated"
                         ],
                         "type": "string"
                     },
@@ -1608,12 +1563,6 @@
                     "sha256_digest": {
                         "nullable": true,
                         "type": "object"
-                    },
-                    "tensorboard_enabled": {
-                        "type": "boolean"
-                    },
-                    "shared": {
-                        "type": "boolean"
                     },
                     "tags": {
                         "items": {
@@ -2012,9 +1961,6 @@
                         "maxLength": 500,
                         "type": "string"
                     },
-                    "shared": {
-                        "type": "boolean"
-                    },
                     "version": {
                         "format": "regex",
                         "maxLength": 10,
@@ -2054,9 +2000,6 @@
                         "format": "regex",
                         "maxLength": 500,
                         "type": "string"
-                    },
-                    "shared": {
-                        "type": "boolean"
                     },
                     "user_id": {
                         "format": "uuid",
@@ -5643,7 +5586,7 @@
                         "required": false,
                         "schema": {
                             "enum": [
-                                "monai",
+                                "medical",
                                 "unet",
                                 "custom"
                             ],
@@ -6113,77 +6056,6 @@
                     }
                 },
                 "summary": "Update Workspace",
-                "tags": [
-                    "WORKSPACE"
-                ]
-            }
-        },
-        "/api/v1/orgs/{org_name}/workspaces/{workspace_id}:get_datasets": {
-            "get": {
-                "description": "Returns the datasets matched with the request body args inside the Workspace",
-                "parameters": [
-                    {
-                        "description": "Org Name",
-                        "in": "path",
-                        "name": "org_name",
-                        "required": true,
-                        "schema": {
-                            "maxLength": 255,
-                            "pattern": "^[a-zA-Z0-9_-]+$",
-                            "type": "string"
-                        }
-                    },
-                    {
-                        "description": "ID of Workspace to return",
-                        "in": "path",
-                        "name": "workspace_id",
-                        "required": true,
-                        "schema": {
-                            "format": "uuid",
-                            "maxLength": 36,
-                            "type": "string"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/DatasetPathLst"
-                                }
-                            }
-                        },
-                        "description": "Returned list of dataset paths within Workspace",
-                        "headers": {
-                            "Access-Control-Allow-Origin": {
-                                "$ref": "#/components/headers/Access-Control-Allow-Origin"
-                            },
-                            "X-RateLimit-Limit": {
-                                "$ref": "#/components/headers/X-RateLimit-Limit"
-                            }
-                        }
-                    },
-                    "404": {
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/ErrorRsp"
-                                }
-                            }
-                        },
-                        "description": "User or Workspace not found",
-                        "headers": {
-                            "Access-Control-Allow-Origin": {
-                                "$ref": "#/components/headers/Access-Control-Allow-Origin"
-                            },
-                            "X-RateLimit-Limit": {
-                                "$ref": "#/components/headers/X-RateLimit-Limit"
-                            }
-                        }
-                    }
-                },
-                "summary": "Retrieve datasets from Workspace",
                 "tags": [
                     "WORKSPACE"
                 ]

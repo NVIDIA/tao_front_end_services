@@ -19,13 +19,13 @@ import json
 import time
 from copy import deepcopy
 
-from handlers.stateless_handlers import get_handler_metadata, get_handler_type, get_jobs_root, get_job
+from handlers.stateless_handlers import get_handler_metadata, get_handler_type, get_root, get_jobs_root
 from handlers.utilities import Code, decrypt_handler_metadata
 from handlers.docker_images import DOCKER_IMAGE_MAPPER
 from utils import safe_load_file, safe_dump_file
 from automl.utils import merge_normal_and_automl_job_meta
+from job_utils.automl_job_utils import on_delete_automl_job
 from job_utils import executor as jobDriver
-from datetime import datetime
 
 # TODO Make sure the image name is current docker tag of the API
 image = DOCKER_IMAGE_MAPPER["api"]
@@ -42,12 +42,6 @@ class AutoMLHandler:
     Retrieve: Construct the JobSchema based on Controller's status.json
 
     """
-
-    @staticmethod
-    def serialize_metadata(obj):
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return str(obj)
 
     @staticmethod
     def start(user_id, org_name, experiment_id, job_id, handler_metadata, name=""):
@@ -72,16 +66,15 @@ class AutoMLHandler:
         override_automl_disabled_params = automl_settings.get("override_automl_disabled_params", False)
 
         workspace_id = handler_metadata.get("workspace")
-        workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+        workspace_metadata = get_handler_metadata(org_name, workspace_id, "workspaces")
         decrypted_workspace_metadata = deepcopy(workspace_metadata)
         decrypt_handler_metadata(decrypted_workspace_metadata)
-        decrypted_workspace_metadata.pop('_id', None)
 
         # Call the script
         print("Starting automl", job_id, file=sys.stderr)
 
         run_command = 'umask 0 && unzip -q /opt/ngccli/ngccli_linux.zip -d /opt/ngccli/ && /opt/ngccli/ngc-cli/ngc --version && '
-        run_command += f"""/venv/bin/python3 automl_start.py --user_id={user_id} --org_name={org_name} --name='{name}' --root={root} --automl_job_id={job_id} --network={network} --experiment_id={experiment_id} --resume=False --automl_algorithm={automl_algorithm} --automl_max_recommendations={automl_max_recommendations} --automl_delete_intermediate_ckpt={automl_delete_intermediate_ckpt} --automl_R={automl_R} --automl_nu={automl_nu} --metric={metric} --epoch_multiplier={epoch_multiplier} --automl_add_hyperparameters="{automl_add_hyperparameters}" --automl_remove_hyperparameters="{automl_remove_hyperparameters}" --override_automl_disabled_params={override_automl_disabled_params} --decrypted_workspace_metadata='{json.dumps(decrypted_workspace_metadata, default=AutoMLHandler.serialize_metadata)}'"""
+        run_command += f"""/venv/bin/python3 automl_start.py --user_id={user_id} --org_name={org_name} --name='{name}' --root={root} --automl_job_id={job_id} --network={network} --experiment_id={experiment_id} --resume=False --automl_algorithm={automl_algorithm} --automl_max_recommendations={automl_max_recommendations} --automl_delete_intermediate_ckpt={automl_delete_intermediate_ckpt} --automl_R={automl_R} --automl_nu={automl_nu} --metric={metric} --epoch_multiplier={epoch_multiplier} --automl_add_hyperparameters="{automl_add_hyperparameters}" --automl_remove_hyperparameters="{automl_remove_hyperparameters}" --override_automl_disabled_params={override_automl_disabled_params} --decrypted_workspace_metadata='{json.dumps(decrypted_workspace_metadata)}'"""
         jobDriver.create(user_id, org_name, job_id, image, run_command, num_gpu=0, automl_brain=True)  # TODO: Commented for testing only
 
     @staticmethod
@@ -118,6 +111,12 @@ class AutoMLHandler:
         except:
             return Code(404, [], "job cannot be stopped in platform")
 
+        # Remove any pending jobs from Workflow queue
+        try:
+            on_delete_automl_job(org_name, experiment_id, job_id)
+        except:
+            return Code(200, {"message": f"job {job_id} cancelled, and no pending recommendations"})
+
         return Code(200, {"message": f"job {job_id} cancelled"})
 
     @staticmethod
@@ -134,10 +133,11 @@ class AutoMLHandler:
         # Skipping this as automl pods are deleted upon completion and we can't use kubernetes api to fetch the status
         # The status is updated in controller.py
         # k8s_status = jobDriver.status(job_id)
-        # stateless_handlers.update_job_status(experiment_id,job_id,status=k8s_status)
+        # stateless_handlers.update_job_status(org_name,experiment_id,job_id,status=k8s_status)
 
         # Create a JobResult schema and update the jobs_metadata/<automl_job_id>.json
-        job_meta = get_job(job_id)
+        path = os.path.join(get_root(), org_name, "experiments", experiment_id, "jobs_metadata", job_id + ".json")
+        job_meta = safe_load_file(path)
         merge_normal_and_automl_job_meta(user_id, org_name, job_id, job_meta)
 
         return Code(200, job_meta, "Job retrieved")
@@ -167,11 +167,10 @@ class AutoMLHandler:
         override_automl_disabled_params = automl_settings.get("override_automl_disabled_params", False)
 
         workspace_id = handler_metadata.get("workspace")
-        workspace_metadata = get_handler_metadata(workspace_id, "workspaces")
+        workspace_metadata = get_handler_metadata(org_name, workspace_id, "workspaces")
         decrypted_workspace_metadata = deepcopy(workspace_metadata)
         decrypt_handler_metadata(decrypted_workspace_metadata)
-        decrypted_workspace_metadata.pop('_id', None)
 
         # Call the script
-        run_command = f"""/venv/bin/python3 automl_start.py --user_id={user_id} --org_name={org_name} --name='{name}' --root={root} --automl_job_id={job_id} --network={network} --experiment_id={experiment_id} --resume=True --automl_algorithm={automl_algorithm} --automl_max_recommendations={automl_max_recommendations} --automl_delete_intermediate_ckpt={automl_delete_intermediate_ckpt} --automl_R={automl_R} --automl_nu={automl_nu} --metric={metric} --epoch_multiplier={epoch_multiplier} --automl_add_hyperparameters="{automl_add_hyperparameters}" --automl_remove_hyperparameters="{automl_remove_hyperparameters}" --override_automl_disabled_params={override_automl_disabled_params} --decrypted_workspace_metadata='{json.dumps(decrypted_workspace_metadata, default=AutoMLHandler.serialize_metadata)}'"""
+        run_command = f"""/venv/bin/python3 automl_start.py --user_id={user_id} --org_name={org_name} --name='{name}' --root={root} --automl_job_id={job_id} --network={network} --experiment_id={experiment_id} --resume=True --automl_algorithm={automl_algorithm} --automl_max_recommendations={automl_max_recommendations} --automl_delete_intermediate_ckpt={automl_delete_intermediate_ckpt} --automl_R={automl_R} --automl_nu={automl_nu} --metric={metric} --epoch_multiplier={epoch_multiplier} --automl_add_hyperparameters="{automl_add_hyperparameters}" --automl_remove_hyperparameters="{automl_remove_hyperparameters}" --override_automl_disabled_params={override_automl_disabled_params} --decrypted_workspace_metadata='{json.dumps(decrypted_workspace_metadata)}'"""
         jobDriver.create(user_id, org_name, job_id, image, run_command, num_gpu=0, automl_brain=True)

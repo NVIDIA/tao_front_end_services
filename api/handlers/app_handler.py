@@ -15,7 +15,7 @@
 """API handler modules"""
 import re
 import copy
-from datetime import datetime, timezone
+import datetime
 import glob
 import json
 import os
@@ -28,50 +28,46 @@ import traceback
 import uuid
 
 from automl.utils import merge_normal_and_automl_job_meta
-from constants import (AUTOML_DISABLED_NETWORKS, TENSORBOARD_DISABLED_NETWORKS, TENSORBOARD_EXPERIMENT_LIMIT, VALID_DSTYPES, VALID_MODEL_DOWNLOAD_TYPE, VALID_NETWORKS, TAO_NETWORKS, _DATA_GENERATE_ACTIONS, MONAI_NETWORKS, MEDICAL_CUSTOM_ARCHITECT)
+from constants import (AUTOML_DISABLED_NETWORKS, VALID_DSTYPES, VALID_MODEL_DOWNLOAD_TYPE, VALID_NETWORKS, TAO_NETWORKS, _DATA_GENERATE_ACTIONS, MONAI_NETWORKS, MEDICAL_CUSTOM_ARCHITECT)
 from handlers import ngc_handler, stateless_handlers
 from handlers.automl_handler import AutoMLHandler
 from handlers.cloud_storage import create_cs_instance
 from handlers.ds_upload import DS_UPLOAD_TO_FUNCTIONS
 from handlers.encrypt import NVVaultEncryption
 # from handlers import nvcf_handler
-from handlers.monai.helpers import CapGpuUsage, download_from_url, validate_monai_bundle, CUSTOMIZED_BUNDLE_URL_FILE, CUSTOMIZED_BUNDLE_URL_KEY
-from handlers.monai_dataset_handler import MONAI_DATASET_ACTIONS, MonaiDatasetHandler
-from handlers.monai_model_handler import MonaiModelHandler
+from handlers.medical.helpers import CapGpuUsage, download_from_url, validate_medical_bundle, CUSTOMIZED_BUNDLE_URL_FILE, CUSTOMIZED_BUNDLE_URL_KEY
+from handlers.medical_dataset_handler import MONAI_DATASET_ACTIONS, MonaiDatasetHandler
+from handlers.medical_model_handler import MonaiModelHandler
 # TODO: force max length of code line to 120 chars
 from handlers.stateless_handlers import (check_read_access, check_write_access, get_handler_spec_root, get_root,
-                                         infer_action_from_job, is_valid_uuid4, printc,
+                                         infer_action_from_job, is_valid_uuid4, list_all_job_metadata, printc,
                                          resolve_existence, resolve_metadata, resolve_root, base_exp_uuid, get_handler_log_root,
-                                         get_handler_job_metadata, get_jobs_root, sanitize_handler_metadata, write_handler_metadata)
+                                         get_handler_job_metadata, get_jobs_root, sanitize_handler_metadata)
 from handlers.tis_handler import TISHandler
-from handlers.tensorboard_handler import TensorboardHandler
-from handlers.utilities import (Code, download_base_experiment, download_dataset, get_monai_bundle_path, search_for_base_experiment, get_files_from_cloud,
+from handlers.utilities import (Code, download_base_experiment, download_dataset, get_medical_bundle_path, search_for_base_experiment, get_files_from_cloud,
                                 prep_tis_model_repository, resolve_checkpoint_root_and_search, validate_and_update_experiment_metadata, validate_num_gpu)
-from handlers.mongo_handler import MongoHandler
 from job_utils import executor as jobDriver
 from job_utils.workflow_driver import create_job_context, on_delete_job, on_new_job
-from job_utils.automl_job_utils import on_delete_automl_job
 from specs_utils import csv_to_json_schema
-from utils import create_folder_with_permissions, get_admin_api_key, run_system_command, read_network_config, merge_nested_dicts, check_and_convert, safe_load_file, safe_dump_file, log_monitor, DataMonitorLogTypeEnum
+from utils import create_folder_with_permissions, get_admin_api_key, run_system_command, read_network_config, merge_nested_dicts, check_and_convert, safe_load_file, safe_dump_file, create_lock, log_monitor, DataMonitorLogTypeEnum
 
 # Identify if workflow is on NGC
 BACKEND = os.getenv("BACKEND", "local-k8s")
 
 
 # Helpers
-def resolve_job_existence(job_id):
-    """Return whether job exists or not"""
-    mongo_jobs = MongoHandler("tao", "jobs")
-    job = mongo_jobs.find_one({'id': job_id})
-    if job:
-        return True
+def resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
+    """Return whether job_id.json exists in jobs_metadata folder or not"""
+    if not user_id:
+        print("Can't resolve job existernce without user information", file=sys.stderr)
+        return False
+    if kind not in ["dataset", "experiment"]:
+        return False
+    metadata_path = os.path.join(stateless_handlers.get_root(), org_name, kind + "s", handler_id, "jobs_metadata", job_id + ".json")
+    user_jobs = f"{get_root()}/{org_name}/users/{user_id}/jobs/"
+    if os.path.exists(user_jobs) and job_id in os.listdir(user_jobs):
+        return os.path.exists(metadata_path)
     return False
-
-
-def delete_jobs_for_handler(handler_id, kind):
-    """Deletes job metadatas associated with handler_id"""
-    mongo_jobs = MongoHandler("tao", "jobs")
-    mongo_jobs.delete_many({f"{kind}_id": handler_id})
 
 
 def resolve_metadata_with_jobs(user_id, org_name, kind, handler_id, jobs_return_type="dictionary"):
@@ -80,108 +76,79 @@ def resolve_metadata_with_jobs(user_id, org_name, kind, handler_id, jobs_return_
         print("Can't resolve job metadata without user information", file=sys.stderr)
         return {}
     handler_id = "*" if handler_id in ("*", "all") else handler_id
-    metadata = {} if handler_id == "*" else resolve_metadata(kind, handler_id)
+    metadata = {} if handler_id == "*" else resolve_metadata(org_name, kind, handler_id)
     if metadata or handler_id == "*":
         metadata["jobs"] = {}
         if jobs_return_type == "list":
             metadata["jobs"] = []
-        jobs = stateless_handlers.get_jobs_for_handler(handler_id, kind)
-        for job_meta in jobs:
-            job_id = job_meta["id"]
+        job_metadatas_root = resolve_root(org_name, kind, handler_id) + "/jobs_metadata/"
+        for json_file in glob.glob(job_metadatas_root + "*.json"):
+            job_meta = stateless_handlers.safe_load_file(json_file)
+            job_id = os.path.splitext(os.path.basename(json_file))[0]
             if is_job_automl(user_id, org_name, job_id):
                 merge_normal_and_automl_job_meta(user_id, org_name, job_id, job_meta)
-            if jobs_return_type == "dictionary":
-                metadata["jobs"][job_id] = job_meta
-            if jobs_return_type == "list":
-                metadata["jobs"].append(job_meta)
+            user_jobs = f"{get_root()}/{org_name}/users/{user_id}/jobs/"
+            if os.path.exists(user_jobs) and job_id in os.listdir(user_jobs):
+                if jobs_return_type == "dictionary":
+                    metadata["jobs"][job_id] = job_meta
+                if jobs_return_type == "list":
+                    metadata["jobs"].append(job_meta)
         return metadata
     return {}
 
 
 def get_org_experiments(org_name):
-    """Returns a list of experiment IDs that are available for the given org_name"""
-    mongo_experiments = MongoHandler("tao", "experiments")
-    org_experiments = mongo_experiments.find({'org_name': org_name})
-    experiments = []
-    for experiment in org_experiments:
-        experiment_id = experiment.get('id')
-        experiments.append(experiment_id)
-    return experiments
+    """Returns a list of experiments that are available for the given org_name"""
+    user_root = stateless_handlers.get_root() + f"{org_name}/experiments/"
+    experiments, ret_lst = [], []
+    if os.path.isdir(user_root):
+        experiments = os.listdir(user_root)
+    for experiment in experiments:
+        if resolve_existence(org_name, "experiment", experiment):
+            ret_lst.append(experiment)
+    return ret_lst
 
 
 def get_org_datasets(org_name):
-    """Returns a list of dataset IDs that are available for the given org_name"""
-    mongo_datasets = MongoHandler("tao", "datasets")
-    org_datasets = mongo_datasets.find({'org_name': org_name})
-    datasets = []
-    for dataset in org_datasets:
-        dataset_id = dataset.get('id')
-        datasets.append(dataset_id)
-    return datasets
+    """Returns a list of datasets that are available for the given org_name"""
+    user_root = stateless_handlers.get_root() + f"{org_name}/datasets/"
+    datasets, ret_lst = [], []
+    if os.path.isdir(user_root):
+        datasets = os.listdir(user_root)
+    for dataset in datasets:
+        if resolve_existence(org_name, "dataset", dataset):
+            ret_lst.append(dataset)
+    return ret_lst
 
 
-def get_org_workspaces(org_name):
-    """Returns a list of workspace IDs that are available in given org_name"""
-    mongo_workspaces = MongoHandler("tao", "workspaces")
-    org_workspaces = mongo_workspaces.find({'org_name': org_name})
-    workspaces = []
-    for workspace in org_workspaces:
-        workspace_id = workspace.get('id')
-        workspaces.append(workspace_id)
-    return workspaces
+def get_user_experiments(user_id, org_name, existing_lock=None):
+    """Returns a list of experiments that are available for the user in given org_name"""
+    user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+    user_metadata = safe_load_file(user_metadata_file, existing_lock=existing_lock)
+    tao_experiment_info = user_metadata.get("tao", {}).get("experiments", [])
+    return tao_experiment_info
 
 
-def get_user_experiments(user_id, mongo_users=None):
-    """Returns a list of experiments that are available for the user"""
-    user = stateless_handlers.get_user(user_id, mongo_users)
-    experiments = user.get("experiments", [])
-    return experiments
-
-
-def get_user_datasets(user_id, mongo_users=None):
-    """Returns a list of datasets that are available for the user"""
-    user = stateless_handlers.get_user(user_id, mongo_users)
-    datasets = user.get("datasets", [])
-    return datasets
-
-
-def get_user_workspaces(user_id, mongo_users=None):
+def get_user_datasets(user_id, org_name, existing_lock=None):
     """Returns a list of datasets that are available for the user in given org_name"""
-    user = stateless_handlers.get_user(user_id, mongo_users)
-    workspaces = user.get("workspaces", [])
-    return workspaces
+    user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+    user_metadata = safe_load_file(user_metadata_file, existing_lock=existing_lock)
+    tao_dataset_info = user_metadata.get("tao", {}).get("datasets", [])
+    return tao_dataset_info
 
 
-def get_job(job_id):
-    """Returns job from DB"""
-    mongo_jobs = MongoHandler("tao", "jobs")
-    job_query = {'id': job_id}
-    job = mongo_jobs.find_one(job_query)
-    return job
+def get_user_workspaces(user_id, org_name, existing_lock=None):
+    """Returns a list of datasets that are available for the user in given org_name"""
+    user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+    user_metadata = safe_load_file(user_metadata_file, existing_lock=existing_lock)
+    tao_dataset_info = user_metadata.get("tao", {}).get("workspaces", [])
+    return tao_dataset_info
 
 
-def get_experiment(experiment_id):
-    """Returns experiment from DB"""
-    mongo_experiments = MongoHandler("tao", "experiments")
-    experiment_query = {'id': experiment_id}
-    experiment = mongo_experiments.find_one(experiment_query)
-    return experiment
-
-
-def get_dataset(dataset_id):
-    """Returns dataset from DB"""
-    mongo_datasets = MongoHandler("tao", "datasets")
-    dataset_query = {'id': dataset_id}
-    dataset = mongo_datasets.find_one(dataset_query)
-    return dataset
-
-
-def get_workspace(workspace_id):
-    """Returns workspace from DB"""
-    mongo_workspaces = MongoHandler("tao", "workspaces")
-    workspace_query = {'id': workspace_id}
-    workspace = mongo_workspaces.find_one(workspace_query)
-    return workspace
+def write_handler_metadata(org_name, kind, handler_id, metadata):
+    """Writes metadata.json with the contents of metadata variable passed"""
+    metadata_file = os.path.join(resolve_root(org_name, kind, handler_id), "metadata.json")
+    safe_dump_file(metadata_file, metadata)
 
 
 def create_blob_dataset(org_name, kind, handler_id):
@@ -235,9 +202,9 @@ def is_job_automl(user_id, org_name, job_id):
         return False
 
 
-def is_request_automl(handler_id, action, kind):
+def is_request_automl(org_name, handler_id, parent_job_id, action, kind):
     """Returns if the job requested is automl based train or not"""
-    handler_metadata = resolve_metadata(kind, handler_id)
+    handler_metadata = resolve_metadata(org_name, kind, handler_id)
     if handler_metadata.get("automl_settings", {}).get("automl_enabled", False) and action == "train":
         return True
     return False
@@ -270,16 +237,15 @@ class AppHandler:
         """
         # Collect all metadatas
         metadatas = []
-        for workspace_id in list(set(get_org_workspaces(org_name))):
-            handler_metadata = stateless_handlers.get_handler_metadata(workspace_id, 'workspaces')
-            shared_workspace = handler_metadata.get("shared", False)
+        for workspace_id in list(set(get_user_workspaces(user_id, org_name))):
+            handler_metadata = stateless_handlers.get_handler_metadata(org_name, workspace_id, 'workspaces')
             if handler_metadata:
-                if shared_workspace or handler_metadata.get("user_id") == user_id:
-                    metadatas.append(handler_metadata)
+                metadatas.append(handler_metadata)
             else:
-                # Something is wrong. The user metadata has a workspace that doesn't exist in the system.
+                # Something is wrong. The usesr metadata has a workspace that doesn't exist in the system.
                 contexts = {"user_id": user_id, "org_name": org_name, "handler_id": workspace_id}
-                printc("Workspace not found. Skipping.", contexts, file=sys.stderr)
+                keys = list(contexts.keys())
+                printc("Workspace not found. Skipping.", contexts=contexts, keys=keys, file=sys.stderr)
         return metadatas
 
     @staticmethod
@@ -292,59 +258,14 @@ class AppHandler:
         - 200 with metadata of retrieved workspace if successful
         - 404 if workspace not found / user cannot access
         """
-        handler_metadata = resolve_metadata("workspace", workspace_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, "workspace", workspace_id):
             return Code(404, {}, "Workspace not found")
 
-        if not check_read_access(org_name, workspace_id, kind="workspaces"):
+        if not check_read_access(org_name, workspace_id):
             return Code(404, {}, "Workspace not found")
 
+        handler_metadata = resolve_metadata(org_name, "workspace", workspace_id)
         return Code(200, handler_metadata, "Workspace retrieved")
-
-    @staticmethod
-    def retrieve_cloud_datasets(org_name, workspace_id, dataset_type, dataset_format, dataset_intention):
-        """
-        org_name: str
-        workspace_id: str, uuid
-        dataset_type: str
-        dataset_format: str
-        dataset_intention: str
-        Returns:
-        Code object
-        - 200 with path of cloud datasets if successfull
-        - 404 if workspace not found / user cannot access
-        """
-        handler_metadata = resolve_metadata("workspace", workspace_id)
-        if not handler_metadata:
-            return Code(404, {}, "Workspace not found")
-
-        if not check_read_access(org_name, workspace_id, kind="workspaces"):
-            return Code(404, {}, "Workspace not found")
-
-        cloud_instance, _ = create_cs_instance(handler_metadata)
-        cloud_files, _ = cloud_instance.list_files_in_folder("data")
-        suggestions = set([])
-        for cloud_file_path in cloud_files:
-            cloud_folder = os.path.dirname(cloud_file_path)
-            if dataset_type in ("semantic_segmentation", "pose_classification"):
-                cloud_folder = os.path.dirname(cloud_folder)
-            if dataset_type == "ml_recog":
-                index_of_folder = cloud_folder.find("metric_learning_recognition")
-                if index_of_folder != "-1":
-                    cloud_folder = cloud_folder[0:index_of_folder]
-            dataset_handler_metadata = {
-                "type": dataset_type,
-                "format": dataset_format,
-                "use_for": dataset_intention
-            }
-            is_cloud_dataset_present = DS_UPLOAD_TO_FUNCTIONS[dataset_type](org_name, dataset_handler_metadata, temp_dir=f"/{cloud_folder}", workspace_metadata=handler_metadata)
-            if is_cloud_dataset_present:
-                suggestions.add(f"/{cloud_folder}")
-        suggestions = list(suggestions)
-        return_response_data = {"dataset_paths": suggestions}
-        if suggestions:
-            return Code(200, return_response_data, "Dataset folder path suggestions retrieved")
-        return Code(200, return_response_data, "Dataset folder path suggestion couldn't be retrieved")
 
     @staticmethod
     def create_workspace(user_id, org_name, request_dict):
@@ -362,11 +283,9 @@ class AppHandler:
         # Create metadata dict and create some initial folders
         metadata = {"id": workspace_id,
                     "user_id": user_id,
-                    "org_name": org_name,
-                    "created_on": datetime.now(tz=timezone.utc),
-                    "last_modified": datetime.now(tz=timezone.utc),
+                    "created_on": datetime.datetime.now().isoformat(),
+                    "last_modified": datetime.datetime.now().isoformat(),
                     "name": request_dict.get("name", "My Workspace"),
-                    "shared": request_dict.get("shared", False),
                     "version": request_dict.get("version", "1.0.0"),
                     "cloud_type": request_dict.get("cloud_type", ""),
                     "cloud_specific_details": request_dict.get("cloud_specific_details", {}),
@@ -394,11 +313,19 @@ class AppHandler:
             print(traceback.format_exc, file=sys.stderr)
             return Code(400, {}, "Provided cloud credentials are invalid")
 
-        write_handler_metadata(workspace_id, encrypted_metadata, "workspace")
-        mongo_users = MongoHandler("tao", "users")
-        workspaces = get_user_workspaces(user_id, mongo_users)
-        workspaces.append(workspace_id)
-        mongo_users.upsert({'id': user_id}, {'id': user_id, 'workspaces': workspaces})
+        stateless_handlers.make_root_dirs(user_id, org_name, "workspaces", workspace_id)
+        write_handler_metadata(org_name, "workspace", workspace_id, encrypted_metadata)
+
+        user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+        lock = create_lock(user_metadata_file)
+        with lock:
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            if "tao" not in user_metadata:
+                user_metadata["tao"] = {}
+            tao_workspace_info = user_metadata.get("tao", {}).get("workspaces", [])
+            tao_workspace_info.append(workspace_id)
+            user_metadata["tao"]["workspaces"] = tao_workspace_info
+            safe_dump_file(user_metadata_file, user_metadata, existing_lock=lock)
 
         ret_Code = Code(201, metadata, "Workspace created")
         return ret_Code
@@ -417,20 +344,20 @@ class AppHandler:
         - 404 if workspace not found / user cannot access
         - 400 if invalid update
         """
-        metadata = resolve_metadata("workspace", workspace_id)
-        if not metadata:
+        if not resolve_existence(org_name, "workspace", workspace_id):
             return Code(404, {}, "Workspace not found")
 
-        if not check_write_access(org_name, workspace_id, kind="workspaces"):
+        if not check_write_access(org_name, workspace_id):
             return Code(404, {}, "Workspace not available")
 
+        metadata = resolve_metadata(org_name, "workspace", workspace_id)
         update_keys = request_dict.keys()
-        for key in ["name", "version", "cloud_type", "shared"]:
+        for key in ["name", "version", "cloud_type"]:
             if key in update_keys:
                 requested_value = request_dict[key]
                 if requested_value is not None:
                     metadata[key] = requested_value
-                    metadata["last_modified"] = datetime.now(tz=timezone.utc)
+                    metadata["last_modified"] = datetime.datetime.now().isoformat()
 
         encrypted_metadata = copy.deepcopy(metadata)
         if "cloud_specific_details" in request_dict.keys():
@@ -458,7 +385,7 @@ class AppHandler:
             except:
                 return Code(400, {}, "Provided cloud credentials are invalid")
 
-        write_handler_metadata(workspace_id, encrypted_metadata, "workspace")
+        write_handler_metadata(org_name, "workspace", workspace_id, encrypted_metadata)
         ret_Code = Code(200, metadata, "Workspace updated")
         return ret_Code
 
@@ -469,51 +396,78 @@ class AppHandler:
         workspace_id: str, uuid
         Returns:
         Code object
-        - 200 if successful
-        - 404 if user cannot access
+        - 200 with metadata of retrieved workspace if successful
+        - 404 if workspace not found / user cannot access
         """
-        handler_metadata = resolve_metadata("workspace", workspace_id)
-        if not handler_metadata:
-            return Code(200, {}, "Workspace deleted")
+        if not resolve_existence(org_name, "workspace", workspace_id):
+            return Code(404, {}, "Workspace not found")
+
+        handler_metadata = resolve_metadata(org_name, "workspace", workspace_id)
         user_id = handler_metadata.get("user_id")
 
-        if workspace_id not in get_user_workspaces(user_id):
-            return Code(404, {}, "Workspace cannot be deleted as it's doesn't belong to user")
-
         # If workspace is being used by user's experiments or datasets.
-        experiments = get_user_experiments(user_id)
+        user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+        lock = create_lock(user_metadata_file)
+        with lock:
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            tao_experiment_info = user_metadata.get("tao", {}).get("experiments", [])
+            for experiment_id in tao_experiment_info:
+                experiment_metadata_file = os.path.join(get_root(), org_name, "experiments", experiment_id, "metadata.json")
+                experiment_metadata = safe_load_file(experiment_metadata_file)
+                experiment_workspace = experiment_metadata.get("workspace", "")
+                if experiment_workspace and workspace_id in experiment_workspace:
+                    return Code(400, {}, f"Experiment {experiment_metadata['id']} ({experiment_metadata['id']}) in use; Delete experiment first")
+                for job in experiment_metadata.get("jobs", []):
+                    if experiment_metadata["jobs"][job]["status"] == "Running" or (experiment_metadata["jobs"][job]["status"] == "Canceled" and experiment_metadata["jobs"][job]["action"] in ("train", "retrain")):
+                        return Code(400, {}, f"Job {experiment_metadata['jobs'][job]['id']}({experiment_metadata['jobs'][job]['name']}) in Experiment {experiment_metadata['id']} ({experiment_metadata['id']}) is {experiment_metadata['jobs'][job]['status']}")
 
-        for experiment_id in experiments:
-            experiment_metadata = get_experiment(experiment_id)
-            experiment_workspace = experiment_metadata.get("workspace", "")
-            if experiment_workspace and workspace_id in experiment_workspace:
-                return Code(400, {}, f"Experiment {experiment_metadata['id']} ({experiment_metadata['id']}) in use; Delete experiment first")
-
-            train_datasets = experiment_metadata.get("train_datasets", [])
-            if not isinstance(train_datasets, list):
-                train_datasets = [train_datasets]
-            for dataset_id in train_datasets:
-                dataset_metadata = get_dataset(dataset_id)
-                dataset_workspace = dataset_metadata.get("workspace", "")
-                if workspace_id == dataset_workspace:
-                    return Code(400, {}, f"Dataset {dataset_metadata['id']} ({dataset_metadata['id']}) in use; Delete dataset first")
-
-            for key in ["eval_dataset", "inference_dataset", "calibration_dataset"]:
-                additional_dataset_id = experiment_metadata.get(key)
-                if additional_dataset_id:
-                    dataset_metadata = get_dataset(additional_dataset_id)
+                train_datasets = experiment_metadata.get("train_datasets", [])
+                if not isinstance(train_datasets, list):
+                    train_datasets = [train_datasets]
+                for train_ds in train_datasets:
+                    dataset_metadata_file = os.path.join(get_root(), org_name, "datasets", train_ds, "metadata.json")
+                    dataset_metadata = safe_load_file(dataset_metadata_file)
                     dataset_workspace = dataset_metadata.get("workspace", "")
                     if workspace_id == dataset_workspace:
-                        return Code(400, {}, f"Dataset {dataset_metadata['id']} ({dataset_metadata['id']}) in use; Delete dataset first")
+                        return Code(400, {}, f"Dataset {dataset_metadata['id']} ({dataset_metadata['id']}) in use; Delete delete first")
+                    for job in dataset_metadata.get("jobs", []):
+                        if dataset_metadata["jobs"][job]["status"] == "Running":
+                            return Code(400, {}, f"Job {dataset_metadata['jobs'][job]['id']}({dataset_metadata['jobs'][job]['name']}) in Dataset {dataset_metadata['id']} ({dataset_metadata['id']}) is Running")
 
-        mongo_users = MongoHandler("tao", "users")
-        user = stateless_handlers.get_user(user_id, mongo_users)
-        workspaces = user.get("workspaces", [])
-        if workspace_id in workspaces:
-            workspaces.remove(workspace_id)
-            mongo_users.upsert({'id': user_id}, {'id': user_id, 'workspaces': workspaces})
-        mongo_workspaces = MongoHandler("tao", "workspaces")
-        mongo_workspaces.delete_one({'id': workspace_id})
+                for key in ["eval_dataset", "inference_dataset", "calibration_dataset"]:
+                    additional_dataset_id = experiment_metadata.get(key)
+                    if additional_dataset_id:
+                        dataset_metadata_file = os.path.join(get_root(), org_name, "datasets", additional_dataset_id, "metadata.json")
+                        dataset_metadata = safe_load_file(dataset_metadata_file)
+                        dataset_workspace = dataset_metadata.get("workspace", "")
+                        if workspace_id == dataset_workspace:
+                            return Code(400, {}, f"Dataset {dataset_metadata['id']} ({dataset_metadata['id']}) in use; Delete delete first")
+                        for job in dataset_metadata.get("jobs", []):
+                            if dataset_metadata["jobs"][job]["status"] == "Running":
+                                return Code(400, {}, f"Job {dataset_metadata['jobs'][job]['id']}({dataset_metadata['jobs'][job]['name']}) in Dataset {dataset_metadata['id']} ({dataset_metadata['id']}) is Running")
+
+            if workspace_id not in get_user_workspaces(user_id, org_name, existing_lock=lock):
+                return Code(404, {}, "Workspace cannot be deleted as it's doesn't belong to user")
+
+            # Validate if workspace exists
+            meta_file = stateless_handlers.get_handler_metadata_file(org_name, workspace_id, "workspaces")
+            if not os.path.exists(meta_file):
+                return Code(404, {}, "Workspace is already deleted.")
+
+            user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            tao_workspace_info = user_metadata.get("tao", {}).get("workspaces", [])
+            if workspace_id in tao_workspace_info:
+                tao_workspace_info.remove(workspace_id)
+                user_metadata["tao"]["workspaces"] = tao_workspace_info
+                safe_dump_file(user_metadata_file, user_metadata, existing_lock=lock)
+
+        # Remove metadata file to signify deletion
+        os.remove(meta_file)
+        workspace_root = stateless_handlers.get_handler_root(org_name, 'workspaces', workspace_id, None)
+
+        deletion_command = f"rm -rf {workspace_root}"
+        run_system_command(deletion_command)
         return Code(200, {"message": "Workspace deleted"}, "")
 
     # Dataset API
@@ -527,17 +481,16 @@ class AppHandler:
         """
         # Collect all metadatas
         metadatas = []
-        for dataset_id in list(set(get_org_datasets(org_name) + stateless_handlers.get_public_datasets())):
-            handler_metadata = stateless_handlers.get_handler_metadata(dataset_id, 'datasets')
-            shared_dataset = handler_metadata.get("shared", False)
+        for dataset_id in list(set(get_user_datasets(user_id, org_name) + stateless_handlers.get_public_datasets())):
+            handler_metadata = stateless_handlers.get_handler_metadata(org_name, dataset_id, 'datasets')
             if handler_metadata:
-                if shared_dataset or handler_metadata.get("user_id") == user_id:
-                    handler_metadata = sanitize_handler_metadata(handler_metadata)
-                    metadatas.append(handler_metadata)
+                handler_metadata = sanitize_handler_metadata(handler_metadata)
+                metadatas.append(handler_metadata)
             else:
-                # Something is wrong. The user metadata has a dataset that doesn't exist in the system.
+                # Something is wrong. The usesr metadata has a dataset that doesn't exist in the system.
                 contexts = {"user_id": user_id, "org_name": org_name, "handler_id": dataset_id}
-                printc("Dataset not found. Skipping.", contexts, file=sys.stderr)
+                keys = list(contexts.keys())
+                printc("Dataset not found. Skipping.", contexts=contexts, keys=keys, file=sys.stderr)
         return metadatas
 
     @staticmethod
@@ -587,8 +540,8 @@ class AppHandler:
             msg = "Invalid dataset type"
             return Code(400, {}, msg)
 
-        # For monai dataset, don't check the dataset type.
-        if ds_format not in read_network_config(ds_type)["api_params"]["formats"] and ds_format != "monai":
+        # For medical dataset, don't check the dataset type.
+        if ds_format not in read_network_config(ds_type)["api_params"]["formats"] and ds_format != "medical":
             msg = "Incompatible dataset format and type"
             return Code(400, {}, msg)
 
@@ -607,16 +560,14 @@ class AppHandler:
         if request_dict.get("public", False):
             stateless_handlers.add_public_dataset(dataset_id)
 
-        dataset_actions = get_dataset_actions(ds_type, ds_format) if ds_format != "monai" else MONAI_DATASET_ACTIONS
+        dataset_actions = get_dataset_actions(ds_type, ds_format) if ds_format != "medical" else MONAI_DATASET_ACTIONS
 
         # Create metadata dict and create some initial folders
         metadata = {"id": dataset_id,
                     "user_id": user_id,
-                    "org_name": org_name,
-                    "created_on": datetime.now(tz=timezone.utc),
-                    "last_modified": datetime.now(tz=timezone.utc),
+                    "created_on": datetime.datetime.now().isoformat(),
+                    "last_modified": datetime.datetime.now().isoformat(),
                     "name": request_dict.get("name", "My Dataset"),
-                    "shared": request_dict.get("shared", False),
                     "description": request_dict.get("description", "My TAO Dataset"),
                     "version": request_dict.get("version", "1.0.0"),
                     "docker_env_vars": request_dict.get("docker_env_vars", {}),
@@ -628,7 +579,7 @@ class AppHandler:
                     "client_id": request_dict.get("client_id", None),
                     "client_secret": request_dict.get("client_secret", None),  # TODO:: Store Secrets in Vault
                     "filters": request_dict.get("filters", None),
-                    "status": request_dict.get("status", "starting") if ds_format != "monai" else "pull_complete",
+                    "status": request_dict.get("status", "starting") if ds_format != "medical" else "pull_complete",
                     "cloud_file_path": request_dict.get("cloud_file_path"),
                     "url": request_dict.get("url"),
                     "workspace": request_dict.get("workspace"),
@@ -649,8 +600,8 @@ class AppHandler:
                 elif not os.getenv("DEV_MODE", "False").lower() in ("true", "1"):
                     return Code(400, {}, "Vault service does not work, can't enable MLOPs services")
 
-        # Encrypt the client secret if the dataset is a monai dataset and the vault agent has been set.
-        if metadata["client_secret"] and ds_format == "monai":
+        # Encrypt the client secret if the dataset is a medical dataset and the vault agent has been set.
+        if metadata["client_secret"] and ds_format == "medical":
             config_path = os.getenv("VAULT_SECRET_PATH", None)
             encryption = NVVaultEncryption(config_path)
             if encryption.check_config()[0]:
@@ -659,7 +610,7 @@ class AppHandler:
                 return Code(400, {}, "Cannot create dataset because vault service does not work.")
 
         # For MONAI dataset only
-        if ds_format == "monai":
+        if ds_format == "medical":
             client_url = request_dict.get("client_url", None)
             log_content = f"user_id:{user_id}, org_name:{org_name}, from_ui:{from_ui}, dataset_url:{client_url}, action:creation"
             log_monitor(log_type=DataMonitorLogTypeEnum.medical_dataset, log_content=log_content)
@@ -672,12 +623,18 @@ class AppHandler:
                 return Code(400, {}, m)
 
         stateless_handlers.make_root_dirs(user_id, org_name, "datasets", dataset_id)
-        write_handler_metadata(dataset_id, metadata, "dataset")
-        mongo_users = MongoHandler("tao", "users")
-        user_query = {'id': user_id}
-        datasets = get_user_datasets(user_id, mongo_users)
-        datasets.append(dataset_id)
-        mongo_users.upsert(user_query, {'id': user_id, 'datasets': datasets})
+        write_handler_metadata(org_name, "dataset", dataset_id, metadata)
+
+        user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+        lock = create_lock(user_metadata_file)
+        with lock:
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            if "tao" not in user_metadata:
+                user_metadata["tao"] = {}
+            tao_dataset_info = user_metadata.get("tao", {}).get("datasets", [])
+            tao_dataset_info.append(dataset_id)
+            user_metadata["tao"]["datasets"] = tao_dataset_info
+            safe_dump_file(user_metadata_file, user_metadata, existing_lock=lock)
 
         # Pull dataset in background if known URL
         if pull:
@@ -695,7 +652,7 @@ class AppHandler:
         """Create a request dict for output dataset creation from input dataset's metadata"""
         infer_ds = handler_metadata.get("inference_dataset", None)
         if infer_ds:
-            dataset_metadata = stateless_handlers.get_handler_metadata(infer_ds, "datasets")
+            dataset_metadata = stateless_handlers.get_handler_metadata(org_name, infer_ds, "datasets")
         else:
             dataset_metadata = copy.deepcopy(handler_metadata)
         request_dict = {}
@@ -709,7 +666,6 @@ class AppHandler:
         request_dict["workspace"] = dataset_metadata.get("workspace")
         request_dict["cloud_file_path"] = os.path.join("/results/", dataset_id)
         request_dict["name"] = f"{dataset_metadata.get('name')} (created from Data services {action} action)"
-        request_dict["shared"] = dataset_metadata.get("shared", False)
         request_dict["use_for"] = dataset_metadata.get("use_for", [])
         request_dict["docker_env_vars"] = dataset_metadata.get("docker_env_vars", {})
         return request_dict
@@ -729,8 +685,7 @@ class AppHandler:
         - 404 if dataset not found / user cannot access
         - 400 if invalid update
         """
-        metadata = resolve_metadata("dataset", dataset_id)
-        if not metadata:
+        if not resolve_existence(org_name, "dataset", dataset_id):
             return Code(404, {}, "Dataset not found")
 
         if not check_write_access(org_name, dataset_id, kind="datasets"):
@@ -740,6 +695,7 @@ class AppHandler:
                 stateless_handlers.add_public_dataset(dataset_id)
             else:
                 stateless_handlers.remove_public_dataset(dataset_id)
+        metadata = resolve_metadata(org_name, "dataset", dataset_id)
         user_id = metadata.get("user_id")
         pull = False
         for key in request_dict.keys():
@@ -750,11 +706,11 @@ class AppHandler:
                     msg = f"Cannot change dataset {key}"
                     return Code(400, {}, msg)
 
-            if key in ["name", "description", "version", "logo", "shared"]:
+            if key in ["name", "description", "version", "logo"]:
                 requested_value = request_dict[key]
                 if requested_value is not None:
                     metadata[key] = requested_value
-                    metadata["last_modified"] = datetime.now(tz=timezone.utc)
+                    metadata["last_modified"] = datetime.datetime.now().isoformat()
 
             if key == "cloud_file_path":
                 if metadata["status"] not in ("pull_complete", "invalid_pull"):
@@ -782,7 +738,7 @@ class AppHandler:
             job_run_thread = threading.Thread(target=AppHandler.pull_dataset, args=(org_name, dataset_id,))
             job_run_thread.start()
 
-        write_handler_metadata(dataset_id, metadata, "dataset")
+        write_handler_metadata(org_name, "dataset", dataset_id, metadata)
         # Read this metadata from saved file...
         return_metadata = resolve_metadata_with_jobs(user_id, org_name, "dataset", dataset_id)
         return_metadata = sanitize_handler_metadata(return_metadata)
@@ -800,13 +756,13 @@ class AppHandler:
         - 200 with metadata of retrieved dataset if successful
         - 404 if dataset not found / user cannot access
         """
-        handler_metadata = resolve_metadata("dataset", dataset_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, "dataset", dataset_id):
             return Code(404, {}, "Dataset not found")
 
         if not check_read_access(org_name, dataset_id, kind="datasets"):
             return Code(404, {}, "Dataset not found")
 
+        handler_metadata = resolve_metadata(org_name, "dataset", dataset_id)
         user_id = handler_metadata.get("user_id")
         return_metadata = resolve_metadata_with_jobs(user_id, org_name, "dataset", dataset_id)
         return_metadata = sanitize_handler_metadata(return_metadata)
@@ -823,56 +779,76 @@ class AppHandler:
         Returns:
         Code object
         - 200 with metadata of deleted dataset if successful
-        - 404 if user cannot access
+        - 404 if dataset not found / user cannot access
         - 400 if dataset has running jobs / being used by a experiment and hence cannot be deleted
         """
-        handler_metadata = resolve_metadata("dataset", dataset_id)
-        if not handler_metadata:
-            return Code(200, {}, "Dataset deleted")
+        if not resolve_existence(org_name, "dataset", dataset_id):
+            return Code(404, {}, "Dataset not found")
 
-        if not check_write_access(org_name, dataset_id, kind="datasets"):
-            return Code(404, {}, "Dataset not available")
-
+        handler_metadata = resolve_metadata(org_name, "dataset", dataset_id)
         user_id = handler_metadata.get("user_id")
 
         # If dataset is being used by user's experiments.
-        experiments = get_user_experiments(user_id)
-        for experiment_id in experiments:
-            metadata = stateless_handlers.get_handler_metadata(experiment_id, "experiment")
-            datasets_in_use = set(metadata.get("train_datasets", []))
-            for key in ["eval_dataset", "inference_dataset", "calibration_dataset"]:
-                additional_dataset_id = metadata.get(key)
-                if additional_dataset_id:
-                    datasets_in_use.add(additional_dataset_id)
-            if dataset_id in datasets_in_use:
-                return Code(400, {}, "Dataset in use")
+        user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+        lock = create_lock(user_metadata_file)
+        with lock:
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            tao_experiment_info = user_metadata.get("tao", {}).get("experiments", [])
+            for experiment_id in tao_experiment_info:
+                metadata_file = os.path.join(get_root(), org_name, "experiments", experiment_id, "metadata.json")
+                metadata = safe_load_file(metadata_file)
+                datasets_in_use = set(metadata.get("train_datasets", []))
+                for key in ["eval_dataset", "inference_dataset", "calibration_dataset"]:
+                    additional_dataset_id = metadata.get(key)
+                    if additional_dataset_id:
+                        datasets_in_use.add(additional_dataset_id)
+                if dataset_id in datasets_in_use:
+                    return Code(400, {}, "Dataset in use")
 
-        # Check if any job running
-        return_metadata = resolve_metadata_with_jobs(user_id, org_name, "dataset", dataset_id)
-        for job in return_metadata["jobs"]:
-            if return_metadata["jobs"][job]["status"] == "Running":
-                return Code(400, {}, "Dataset in use")
+            if dataset_id not in get_user_datasets(user_id, org_name,  existing_lock=lock):
+                return Code(404, {}, "Dataset cannot be deleted")
 
-        # Check if dataset is public, then someone could be running it
-        if return_metadata.get("public", False):
-            return Code(400, {}, "Dataset is Public. Cannot delete")
+            # Check if any job running
+            return_metadata = resolve_metadata_with_jobs(user_id, org_name, "dataset", dataset_id)
+            for job in return_metadata["jobs"]:
+                if return_metadata["jobs"][job]["status"] == "Running":
+                    return Code(400, {}, "Dataset in use")
 
-        # Check if dataset is read only, if yes, cannot delete
-        if return_metadata.get("read_only", False):
-            return Code(400, {}, "Dataset is read only. Cannot delete")
+            # Check if dataset is public, then someone could be running it
+            if return_metadata.get("public", False):
+                return Code(400, {}, "Dataset is Public. Cannot delete")
 
-        mongo_users = MongoHandler("tao", "users")
-        datasets = get_user_datasets(user_id, mongo_users)
-        if dataset_id in datasets:
-            datasets.remove(dataset_id)
-        user_query = {'id': user_id}
-        mongo_users.upsert(user_query, {'id': user_id, 'datasets': datasets})
+            # Check if dataset is read only, if yes, cannot delete
+            if return_metadata.get("read_only", False):
+                return Code(400, {}, "Dataset is read only. Cannot delete")
 
-        mongo_datasets = MongoHandler("tao", "datasets")
-        dataset_query = {'id': dataset_id}
-        mongo_datasets.delete_one(dataset_query)
-        delete_jobs_for_handler(dataset_id, "dataset")
-        # TODO: Delete logs for dataset
+            # Validate if dataset exists
+            meta_file = stateless_handlers.get_handler_metadata_file(org_name, dataset_id, "datasets")
+            if not os.path.exists(meta_file):
+                return Code(404, {}, "Dataset is already deleted.")
+
+            user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            tao_dataset_info = user_metadata.get("tao", {}).get("datasets", [])
+            if dataset_id in tao_dataset_info:
+                tao_dataset_info.remove(dataset_id)
+                user_metadata["tao"]["datasets"] = tao_dataset_info
+                safe_dump_file(user_metadata_file, user_metadata, existing_lock=lock)
+
+        # Remove metadata file to signify deletion
+        os.remove(meta_file)
+        dataset_root = stateless_handlers.get_handler_root(org_name, 'datasets', dataset_id, None)
+
+        deletion_command = f"rm -rf {dataset_root}"
+        handler_jobs_meta_folder = os.path.join(dataset_root, "jobs_metadata")
+        if os.path.exists(handler_jobs_meta_folder):
+            for job_file in os.listdir(handler_jobs_meta_folder):
+                if job_file.endswith(".json"):
+                    job_id = os.path.splitext(os.path.basename(job_file))[0]
+                    deletion_command += f" {get_root()}/{org_name}/users/{user_id}/jobs/{job_id}* {get_root()}/{org_name}/users/{user_id}/logs/{job_id}* {get_root()}/{org_name}/users/{user_id}/specs/{job_id}* "
+
+        delete_thread = threading.Thread(target=run_system_command, args=(deletion_command,))
+        delete_thread.start()
         return_metadata = sanitize_handler_metadata(return_metadata)
         return Code(200, return_metadata, "Dataset deleted")
 
@@ -890,19 +866,19 @@ class AppHandler:
         - 400 if upload validation fails
 
         """
-        metadata = resolve_metadata("dataset", dataset_id)
-        if not metadata:
+        if not resolve_existence(org_name, "dataset", dataset_id):
             return Code(404, {}, "Dataset not found")
 
         if not check_write_access(org_name, dataset_id, kind="datasets"):
             return Code(404, {}, "Dataset not available")
 
-        if metadata.get("format") == "monai":
+        metadata = resolve_metadata(org_name, "dataset", dataset_id)
+        if metadata.get("format") == "medical":
             return Code(404, metadata, "Uploading external data is not supported for MONAI Dataset")
 
         try:
             metadata["status"] = "in_progress"
-            write_handler_metadata(dataset_id, metadata, "dataset")
+            write_handler_metadata(org_name, "dataset", dataset_id, metadata)
 
             def validate_dataset_thread():
                 try:
@@ -912,10 +888,10 @@ class AppHandler:
                     if not valid_datset_structure:
                         print("Dataset structure validation failed", metadata, file=sys.stderr)
                         metadata["status"] = "invalid_pull"
-                    write_handler_metadata(dataset_id, metadata, "dataset")
+                    write_handler_metadata(org_name, "dataset", dataset_id, metadata)
                 except:
                     metadata["status"] = "invalid_pull"
-                    write_handler_metadata(dataset_id, metadata, "dataset")
+                    write_handler_metadata(org_name, "dataset", dataset_id, metadata)
                     print(traceback.format_exc(), file=sys.stderr)
 
             thread = threading.Thread(target=validate_dataset_thread)
@@ -923,7 +899,7 @@ class AppHandler:
             return Code(201, {}, "Server recieved file and upload process started")
         except:
             metadata["status"] = "invalid_pull"
-            write_handler_metadata(dataset_id, metadata, "dataset")
+            write_handler_metadata(org_name, "dataset", dataset_id, metadata)
             print(traceback.format_exc(), file=sys.stderr)
             return Code(404, [], "Exception caught during upload")
 
@@ -934,12 +910,12 @@ class AppHandler:
         dataset_id: str, uuid
         """
         try:
-            temp_dir, file_path = download_dataset(dataset_id)
+            temp_dir, file_path = download_dataset(org_name, dataset_id)
             AppHandler.validate_dataset(org_name, dataset_id, temp_dir=temp_dir, file_path=file_path)
         except:
-            metadata = resolve_metadata("dataset", dataset_id)
+            metadata = resolve_metadata(org_name, "dataset", dataset_id)
             metadata["status"] = "invalid_pull"
-            write_handler_metadata(dataset_id, metadata, "dataset")
+            write_handler_metadata(org_name, "dataset", dataset_id, metadata)
             print(traceback.format_exc(), file=sys.stderr)
 
     # Spec API
@@ -956,13 +932,13 @@ class AppHandler:
         - 200 with spec in a json-schema format
         - 404 if experiment/dataset not found / user cannot access
         """
-        metadata = resolve_metadata(kind, handler_id)
-        if not metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, {}, "Spec schema not found")
 
         if not check_read_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, {}, "Spec schema not available")
 
+        metadata = resolve_metadata(org_name, kind, handler_id)
         # Action not available
         if action not in metadata.get("actions", []):
             return Code(404, {}, "Action not found")
@@ -985,7 +961,7 @@ class AppHandler:
         # Convert to json schema
         json_schema = {}
 
-        if kind == "dataset" and metadata.get("format") == "monai":
+        if kind == "dataset" and metadata.get("format") == "medical":
             json_schema = MonaiDatasetHandler.get_schema(action)
             return Code(200, json_schema, "Schema retrieved")
 
@@ -1032,7 +1008,7 @@ class AppHandler:
         # If class-wise config is applicable
         if network_config["api_params"]["classwise"] == "True":
             # For each train dataset for the experiment
-            metadata = resolve_metadata(kind, handler_id)
+            metadata = resolve_metadata(org_name, kind, handler_id)
             if network == "detectnet_v2" and action == "train":
                 if not metadata.get("train_datasets", []):
                     return Code(400, [], "Assign datasets before getting train specs")
@@ -1179,8 +1155,7 @@ class AppHandler:
         400 with [] if action was not executed successfully
         404 with [] if dataset/experiment/parent_job_id/actions not found/standards are not met
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{handler_id} {kind} doesn't exist")
 
         if not check_write_access(org_name, handler_id, kind=kind + "s"):
@@ -1189,6 +1164,7 @@ class AppHandler:
         if not action:
             return Code(404, [], "action not sent")
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         user_id = handler_metadata.get("user_id")
         if not user_id:
             return Code(404, [], "User ID couldn't be found in the experiment metadata. Try creating the experiment again")
@@ -1215,13 +1191,13 @@ class AppHandler:
 
             # regular async jobs
             if action == "annotation":
-                all_metadata = stateless_handlers.get_jobs_for_handler(handler_id, kind)
+                all_metadata = list_all_job_metadata(org_name, handler_id)
                 if [m for m in all_metadata if m["action"] == "annotation" and m["status"] in ("Running", "Pending")]:
                     return Code(400, [], "There is one running/pending annotation job. Please stop it first.")
                 if handler_metadata.get("eval_dataset", None) is None:
                     return Code(404, {}, "Annotation job requires eval dataset in the model metadata.")
 
-        if kind == "dataset" and handler_metadata.get("format") == "monai":
+        if kind == "dataset" and handler_metadata.get("format") == "medical":
             log_content = f"user_id:{user_id}, org_name:{org_name}, from_ui:{from_ui}, job_type:dataset, action:{action}"
             log_monitor(log_type=DataMonitorLogTypeEnum.medical_job, log_content=log_content)
             return MonaiDatasetHandler.run_job(org_name, handler_id, handler_metadata, action, specs)
@@ -1253,7 +1229,7 @@ class AppHandler:
                 spec_json_path = os.path.join(get_handler_spec_root(user_id, org_name, handler_id), f"{job_id}-{action}-spec.json")
                 safe_dump_file(spec_json_path, specs)
             msg = ""
-            if is_request_automl(handler_id, action, kind):
+            if is_request_automl(org_name, handler_id, parent_job_id, action, kind):
                 AutoMLHandler.start(user_id, org_name, handler_id, job_id, handler_metadata, name=name)
                 msg = "AutoML "
             else:
@@ -1273,22 +1249,20 @@ class AppHandler:
         200, list(str) - list of epoch numbers as strings
         404, [] if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if not check_write_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, [], f"{kind} not found")
 
-        handler_metadata = stateless_handlers.get_handler_metadata(handler_id, kind + "s")
-        if not handler_metadata or "user_id" not in handler_metadata:
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
+        user_id = handler_metadata.get("user_id")
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, [], "job trying to update not found")
 
-        job = get_job(job_id)
-        if not job:
-            return Code(404, [], "job trying to update not found")
         try:
-            job_files, _, _, _ = get_files_from_cloud(handler_metadata, job_id)
+            job_files, _, _, _ = get_files_from_cloud(user_id, org_name, handler_metadata, job_id)
             epoch_numbers = []
             for job_file in job_files:
                 # Extract numbers before the extension using regex
@@ -1310,16 +1284,16 @@ class AppHandler:
         200, list(dict) - each dict follows JobResultSchema if found
         404, [] if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if not check_write_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, [], f"{kind} not found")
 
-        user_id = handler_metadata.get("user_id", None)
-        job = get_job(job_id)
-        if not job or not user_id:
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
+        user_id = handler_metadata.get("user_id")
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, [], "job trying to update not found")
 
         job_root = os.path.join(stateless_handlers.get_jobs_root(user_id, org_name), job_id)
@@ -1344,16 +1318,16 @@ class AppHandler:
         200, list(dict) - each dict follows JobResultSchema if found
         404, [] if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if not check_write_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, [], f"{kind} not found")
 
-        user_id = handler_metadata.get("user_id", None)
-        job = get_job(job_id)
-        if not job or not user_id:
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
+        user_id = handler_metadata.get("user_id")
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, [], "job trying to update not found")
 
         log_file = os.path.join(stateless_handlers.get_handler_log_root(user_id, org_name, handler_id), job_id + ".txt")
@@ -1376,7 +1350,7 @@ class AppHandler:
         200, list(dict) - each dict follows JobResultSchema if found
         404, [] if not found
         """
-        if handler_id not in ("*", "all") and not resolve_existence(kind, handler_id):
+        if handler_id not in ("*", "all") and not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if handler_id not in ("*", "all") and not check_read_access(org_name, handler_id, kind=kind + "s"):
@@ -1397,39 +1371,35 @@ class AppHandler:
         200, [job_id] - if job can be cancelled
         404, [] if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if not check_write_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, [], f"{kind} not found")
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         user_id = handler_metadata.get("user_id")
-        job_metadata = stateless_handlers.get_handler_job_metadata(job_id)
-        if not job_metadata:
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, [], "job trying to cancel not found")
 
         if is_job_automl(user_id, org_name, job_id):
-            stateless_handlers.update_job_status(handler_id, job_id, status="Canceling", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Canceling", kind=kind + "s")
             automl_response = AutoMLHandler.stop(user_id, org_name, handler_id, job_id)
-            # Remove any pending jobs from Workflow queue
-            try:
-                on_delete_automl_job(org_name, handler_id, job_id)
-            except:
-                return Code(200, {"message": f"job {job_id} cancelled, and no pending recommendations"})
-            stateless_handlers.update_job_status(handler_id, job_id, status="Canceled", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Canceled", kind=kind + "s")
             return automl_response
 
         # If job is error / done, then cancel is NoOp
+        job_metadata = stateless_handlers.get_handler_job_metadata(org_name, handler_id, job_id, kind + "s")
         job_status = job_metadata.get("status", "Error")
 
         if job_status in ["Error", "Done", "Canceled", "Canceling", "Pausing", "Paused"]:
             return Code(201, {f"Job {job_id} with current status {job_status} can't be attemped to cancel. Current status should be one of Running, Pending, Resuming"})
 
         if job_status == "Pending":
-            stateless_handlers.update_job_status(handler_id, job_id, status="Canceling", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Canceling", kind=kind + "s")
             on_delete_job(org_name, handler_id, job_id, kind + "s")
-            stateless_handlers.update_job_status(handler_id, job_id, status="Canceled", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Canceled", kind=kind + "s")
             return Code(200, {"message": f"Pending job {job_id} cancelled"})
 
         if job_status == "Running":
@@ -1437,7 +1407,7 @@ class AppHandler:
                 # Delete K8s job
                 specs = job_metadata.get("specs", None)
                 use_ngc = not (specs and "cluster" in specs and specs["cluster"] == "local")
-                stateless_handlers.update_job_status(handler_id, job_id, status="Canceling", kind=kind + "s")
+                stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Canceling", kind=kind + "s")
                 jobDriver.delete(job_id, use_ngc=use_ngc)
                 k8s_status = jobDriver.status(org_name, handler_id, job_id, kind + "s", use_ngc=use_ngc)
                 while k8s_status in ("Done", "Error", "Running", "Pending"):
@@ -1445,7 +1415,7 @@ class AppHandler:
                         break
                     k8s_status = jobDriver.status(org_name, handler_id, job_id, kind + "s", use_ngc=use_ngc)
                     time.sleep(5)
-                stateless_handlers.update_job_status(handler_id, job_id, status="Canceled", kind=kind + "s")
+                stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Canceled", kind=kind + "s")
                 return Code(200, {"message": f"Running job {job_id} cancelled"})
             except:
                 print("Cancel traceback", traceback.format_exc(), file=sys.stderr)
@@ -1464,29 +1434,25 @@ class AppHandler:
         200, [job_id] - if job can be paused
         404, [] if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
-        if not check_write_access(org_name, handler_id, kind=kind + "s"):
+        if not check_write_access(org_name, handler_id):
             return Code(404, [], f"{kind} not found")
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         user_id = handler_metadata.get("user_id")
-        job_metadata = stateless_handlers.get_handler_job_metadata(job_id)
-        if not job_metadata:
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, [], "job trying to pause not found")
 
         if is_job_automl(user_id, org_name, job_id):
-            stateless_handlers.update_job_status(handler_id, job_id, status="Pausing", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Pausing", kind=kind + "s")
             automl_response = AutoMLHandler.stop(user_id, org_name, handler_id, job_id)
-            # Remove any pending jobs from Workflow queue
-            try:
-                on_delete_automl_job(org_name, handler_id, job_id)
-            except:
-                return Code(200, {"message": f"job {job_id} cancelled, and no pending recommendations"})
-            stateless_handlers.update_job_status(handler_id, job_id, status="Paused", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Paused", kind=kind + "s")
             return automl_response
 
+        job_metadata = stateless_handlers.get_handler_job_metadata(org_name, handler_id, job_id)
         job_action = job_metadata.get("action", "")
         if job_action not in ("train", "retrain"):
             return Code(404, [], f"Only train or retrain jobs can be paused. The current action is {job_action}")
@@ -1497,9 +1463,9 @@ class AppHandler:
             return Code(201, {"message": f"Job {job_id} with current status {job_status} can't be attemped to pause. Current status should be one of Running, Pending, Resuming"})
 
         if job_status == "Pending":
-            stateless_handlers.update_job_status(handler_id, job_id, status="Pausing", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Pausing", kind=kind + "s")
             on_delete_job(org_name, handler_id, job_id)
-            stateless_handlers.update_job_status(handler_id, job_id, status="Paused", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Paused", kind=kind + "s")
             return Code(200, {"message": f"Pending job {job_id} paused"})
 
         if job_status == "Running":
@@ -1507,7 +1473,7 @@ class AppHandler:
                 # Delete K8s job
                 specs = job_metadata.get("specs", None)
                 use_ngc = not (specs and "cluster" in specs and specs["cluster"] == "local")
-                stateless_handlers.update_job_status(handler_id, job_id, status="Pausing", kind=kind + "s")
+                stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Pausing", kind=kind + "s")
                 jobDriver.delete(job_id, use_ngc=use_ngc)
                 k8s_status = jobDriver.status(org_name, handler_id, job_id, kind + "s", use_ngc=use_ngc)
                 while k8s_status in ("Done", "Error", "Running", "Pending"):
@@ -1515,7 +1481,7 @@ class AppHandler:
                         break
                     k8s_status = jobDriver.status(org_name, handler_id, job_id, kind + "s", use_ngc=use_ngc)
                     time.sleep(5)
-                stateless_handlers.update_job_status(handler_id, job_id, status="Paused", kind=kind + "s")
+                stateless_handlers.update_job_status(org_name, handler_id, job_id, status="Paused", kind=kind + "s")
                 return Code(200, {"message": f"Running job {job_id} paused"})
             except:
                 print("Pause traceback", traceback.format_exc(), file=sys.stderr)
@@ -1534,64 +1500,71 @@ class AppHandler:
         200, if all jobs within experiment can be cancelled
         404, [] if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if not check_write_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, [], f"{kind} not found")
 
-        def cancel_jobs_within_handler(cancel_handler_id, cancel_kind):
-            cancel_success = True
+        def cancel_jobs_within_handler_folder(cancel_handler_id, cancel_kind, root):
+            cancel_sucess = True
             cancel_message = ""
-            jobs = stateless_handlers.get_jobs_for_handler(cancel_handler_id, cancel_kind)
-            for job_metadata in jobs:
-                job_id = job_metadata.get("id")
-                job_status = job_metadata.get("status", "Error")
-                if job_status not in ["Error", "Done", "Canceled", "Canceling", "Pausing", "Paused"] and job_id:
-                    cancel_response = AppHandler.job_cancel(org_name, cancel_handler_id, job_id, cancel_kind)
-                    if cancel_response.code != 200:
-                        if type(cancel_response.data) is dict and cancel_response.data.get("error_desc", "") != "incomplete job not found":
-                            cancel_success = False
-                            cancel_message += f"Cancelation for job {job_id} failed due to {str(cancel_response.data)} "
-            return cancel_success, cancel_message
+            handler_jobs_meta_folder = os.path.join(root, "jobs_metadata")
+            if os.path.exists(handler_jobs_meta_folder):
+                for job_file in os.listdir(handler_jobs_meta_folder):
+                    if job_file.endswith(".json"):
+                        job_id = os.path.splitext(os.path.basename(job_file))[0]
+                        job_metadata = stateless_handlers.get_handler_job_metadata(org_name, handler_id, job_id, kind + "s")
+                        job_status = job_metadata.get("status", "Error")
+                        if job_status not in ["Error", "Done", "Canceled", "Canceling", "Pausing", "Paused"]:
+                            cancel_response = AppHandler.job_cancel(org_name, cancel_handler_id, job_id, cancel_kind)
+                            if cancel_response.code != 200:
+                                if type(cancel_response.data) is dict and cancel_response.data.get("error_desc", "") != "incomplete job not found":
+                                    cancel_sucess = False
+                                    cancel_message += f"Cancelation for job {job_id} failed due to {str(cancel_response.data)} "
+            return cancel_sucess, cancel_message
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         if handler_metadata.get("all_jobs_cancel_status") == "Canceling":
             return Code(201, {"message": "Canceling all jobs is already triggered"})
 
         try:
             handler_metadata["all_jobs_cancel_status"] = "Canceling"
-            write_handler_metadata(handler_id, handler_metadata, kind)
+            write_handler_metadata(org_name, kind, handler_id, handler_metadata)
 
             appended_message = ""
             for train_dataset in handler_metadata.get("train_datasets", []):
-                jobs_cancel_sucess, message = cancel_jobs_within_handler(train_dataset, "dataset")
+                dataset_root = stateless_handlers.get_handler_root(org_name, "datasets", train_dataset, None)
+                jobs_cancel_sucess, message = cancel_jobs_within_handler_folder(train_dataset, "dataset", dataset_root)
                 appended_message += message
 
             eval_dataset = handler_metadata.get("eval_dataset", None)
             if eval_dataset:
-                jobs_cancel_sucess, message = cancel_jobs_within_handler(eval_dataset, "dataset")
+                dataset_root = stateless_handlers.get_handler_root(org_name, "datasets", eval_dataset, None)
+                jobs_cancel_sucess, message = cancel_jobs_within_handler_folder(eval_dataset, "dataset", dataset_root)
                 appended_message += message
 
             inference_dataset = handler_metadata.get("inference_dataset", None)
             if inference_dataset:
-                jobs_cancel_sucess, message = cancel_jobs_within_handler(inference_dataset, "dataset")
+                dataset_root = stateless_handlers.get_handler_root(org_name, "datasets", inference_dataset, None)
+                jobs_cancel_sucess, message = cancel_jobs_within_handler_folder(inference_dataset, "dataset", dataset_root)
                 appended_message += message
 
-            jobs_cancel_sucess, message = cancel_jobs_within_handler(handler_id, kind)
+            handler_root = stateless_handlers.get_handler_root(org_name, kind + "s", handler_id, None)
+            jobs_cancel_sucess, message = cancel_jobs_within_handler_folder(handler_id, kind, handler_root)
             appended_message += message
 
-            handler_metadata = resolve_metadata(kind, handler_id)
+            handler_metadata = resolve_metadata(org_name, kind, handler_id)
             if jobs_cancel_sucess:
                 handler_metadata["all_jobs_cancel_status"] = "Canceled"
-                write_handler_metadata(handler_id, handler_metadata, kind)
+                write_handler_metadata(org_name, kind, handler_id, handler_metadata)
                 return Code(200, {"message": "All jobs within experiment canceled"})
             handler_metadata["all_jobs_cancel_status"] = "Error"
-            write_handler_metadata(handler_id, handler_metadata, kind)
+            write_handler_metadata(org_name, kind, handler_id, handler_metadata)
             return Code(404, [], appended_message)
         except:
             handler_metadata["all_jobs_cancel_status"] = "Error"
-            write_handler_metadata(handler_id, handler_metadata, kind)
+            write_handler_metadata(org_name, kind, handler_id, handler_metadata)
             return Code(404, [], "Runtime exception caught during deleting a job")
 
     @staticmethod
@@ -1605,20 +1578,22 @@ class AppHandler:
         200, dict following JobResultSchema - if job found
         404, {} if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, {}, "Dataset not found")
 
         if not check_read_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, {}, "Dataset not found")
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         user_id = handler_metadata.get("user_id")
 
-        job_meta = get_job(job_id)
-        if not job_meta:
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, {}, "Job trying to retrieve not found")
+
         if is_job_automl(user_id, org_name, job_id):
             return AutoMLHandler.retrieve(user_id, org_name, handler_id, job_id)
+        path = os.path.join(stateless_handlers.get_root(), org_name, kind + "s", handler_id, "jobs_metadata", job_id + ".json")
+        job_meta = stateless_handlers.safe_load_file(path)
         return Code(200, job_meta, "Job retrieved")
 
     @staticmethod
@@ -1632,19 +1607,19 @@ class AppHandler:
         display_name: str, Display name for the model
         description: str, Description of the model
         """
-        handler_metadata = resolve_metadata("experiment", experiment_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, "experiment", experiment_id):
             return Code(404, {}, "Experiment not found")
 
         if not check_read_access(org_name, experiment_id, kind="experiments"):
             return Code(404, {}, "Experiment cant be read")
 
+        handler_metadata = resolve_metadata(org_name, "experiment", experiment_id)
         user_id = handler_metadata.get("user_id")
 
-        job_metadata = stateless_handlers.get_handler_job_metadata(job_id)
-        if not job_metadata:
+        if not resolve_job_existence(user_id, org_name, "experiment", experiment_id, job_id):
             return Code(404, {}, "Job trying to retrieve not found")
 
+        job_metadata = stateless_handlers.get_handler_job_metadata(org_name, experiment_id, job_id, "experiments")
         job_status = job_metadata.get("status", "Error")
         if job_status not in ("Success", "Done"):
             return Code(404, {}, "Job is not in success or Done state")
@@ -1653,19 +1628,19 @@ class AppHandler:
             return Code(404, {}, "Publish model is available only for train, prune, retrain, export, gen_trt_engine actions")
 
         try:
-            source_file = resolve_checkpoint_root_and_search(handler_metadata, job_id)
+            source_file = resolve_checkpoint_root_and_search(user_id, org_name, handler_metadata, job_id)
             if not source_file:
                 return Code(404, [], "Unable to find a model for the given job")
 
             # Create NGC model
-            ngc_api_key, use_cookie = ngc_handler.get_user_api_key(user_id)
-            code, message = ngc_handler.create_model(org_name, team_name, handler_metadata, source_file, ngc_api_key, use_cookie, display_name, description)
+            ngc_api_key, ngc_cookie = ngc_handler.get_user_api_key(user_id)
+            code, message = ngc_handler.create_model(org_name, team_name, handler_metadata, source_file, ngc_api_key, ngc_cookie, display_name, description)
             if code not in [200, 201]:
                 print("Error while creating NGC model")
                 return Code(code, {}, message)
 
             # Upload model version
-            if not ngc_api_key or use_cookie:
+            if not ngc_api_key or ngc_cookie:
                 ngc_api_key = get_admin_api_key()
             response_code, response_message = ngc_handler.upload_model(org_name, team_name, handler_metadata, source_file, ngc_api_key, job_id, job_action)
             if "already exists" in response_message:
@@ -1684,18 +1659,19 @@ class AppHandler:
         experiment_id: str, uuid, Experiment ID
         job_id: str, uuid, Job ID
         """
-        handler_metadata = resolve_metadata("experiment", experiment_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, "experiment", experiment_id):
             return Code(404, {}, "Experiment not found")
 
         if not check_read_access(org_name, experiment_id, kind="experiments"):
             return Code(404, {}, "Experiment cant be read")
 
+        handler_metadata = resolve_metadata(org_name, "experiment", experiment_id)
         user_id = handler_metadata.get("user_id")
-        job_metadata = stateless_handlers.get_handler_job_metadata(job_id)
-        if not job_metadata:
+
+        if not resolve_job_existence(user_id, org_name, "experiment", experiment_id, job_id):
             return Code(404, {}, "Job trying to retrieve not found")
 
+        job_metadata = stateless_handlers.get_handler_job_metadata(org_name, experiment_id, job_id, "experiments")
         job_status = job_metadata.get("status", "Error")
         if job_status not in ("Success", "Done"):
             return Code(404, {}, "Job is not in success or Done state")
@@ -1704,8 +1680,8 @@ class AppHandler:
             return Code(404, {}, "Delete published model is available only for train, prune, retrain, export, gen_trt_engine actions")
 
         try:
-            ngc_api_key, use_cookie = ngc_handler.get_user_api_key(user_id)
-            response = ngc_handler.delete_model(org_name, team_name, handler_metadata, ngc_api_key, use_cookie, job_id, job_action)
+            ngc_api_key, ngc_cookie = ngc_handler.get_user_api_key(user_id)
+            response = ngc_handler.delete_model(org_name, team_name, handler_metadata, ngc_api_key, ngc_cookie, job_id, job_action)
             if response.ok:
                 return Code(response.status_code, {}, "Sucessfully deleted model")
             return Code(response.status_code, {}, "Unable to delete published model")
@@ -1725,29 +1701,39 @@ class AppHandler:
         200, [job_id] - if job can be deleted
         404, [] if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if not check_write_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, [], f"{kind} not found")
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         user_id = handler_metadata.get("user_id")
-        job_metadata = stateless_handlers.get_handler_job_metadata(job_id)
-        if not job_metadata:
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, [], "job trying to delete not found")
 
         try:
             # If job is running, cannot delete
+            job_metadata = stateless_handlers.get_handler_job_metadata(org_name, handler_id, job_id, kind + "s")
             if job_metadata.get("status", "Error") in ["Running", "Pending"]:
                 return Code(400, [], "job cannot be deleted")
             # Delete job metadata
-            mongo_jobs = MongoHandler("tao", "jobs")
-            mongo_jobs.delete_one({'id': job_id})
+            job_metadata_path = os.path.join(stateless_handlers.get_handler_jobs_metadata_root(org_name, handler_id), job_id + ".json")
+            if os.path.exists(job_metadata_path):
+                os.remove(job_metadata_path)
             # Delete job logs
             job_log_path = os.path.join(stateless_handlers.get_handler_log_root(user_id, org_name, handler_id), job_id + ".txt")
             if os.path.exists(job_log_path):
                 os.remove(job_log_path)
+            # Delete the job directory in the background
+            job_handler_root = stateless_handlers.get_jobs_root(user_id, org_name)
+            deletion_command = f"rm -rf {os.path.join(job_handler_root, job_id)}"
+            targz_path = os.path.join(job_handler_root, job_id + ".tar.gz")
+            if os.path.exists(targz_path):
+                deletion_command += f"; rm -rf {job_handler_root}/{job_id}*tar.gz"
+            delete_thread = threading.Thread(target=run_system_command, args=(deletion_command,))
+            delete_thread.start()
             return Code(200, [job_id], "job deleted")
         except:
             print(traceback.format_exc(), file=sys.stderr)
@@ -1761,30 +1747,30 @@ class AppHandler:
         handler_id: str, uuid corresponding to experiment/dataset
         job_id: str, uuid corresponding to job to be downloaded
         kind: str, one of ["experiment","dataset"]
-        export_type: str, one of ["monai_bundle", "tao"]
+        export_type: str, one of ["medical_bundle", "tao"]
         Returns:
         200, Path to a tar.gz created from the job directory
         404, None if not found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, None, f"{kind} not found")
 
         if not check_read_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, None, f"{kind} not found")
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         user_id = handler_metadata.get("user_id")
-        handler_job_metadata = stateless_handlers.get_handler_job_metadata(job_id)
-        if not handler_job_metadata:
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, None, "job trying to download not found")
 
         try:
             if export_type not in VALID_MODEL_DOWNLOAD_TYPE:
                 return Code(404, None, f"Export format {export_type} not found.")
             root = stateless_handlers.get_jobs_root(user_id, org_name)
-            if export_type == "monai_bundle":
+            if export_type == "medical_bundle":
                 job_root = os.path.join(root, job_id)
-                path_status_code = get_monai_bundle_path(job_root)
+                path_status_code = get_medical_bundle_path(job_root)
                 if path_status_code.code != 201:
                     return path_status_code
                 bundle_path = path_status_code.data
@@ -1804,6 +1790,8 @@ class AppHandler:
                 for file in file_lists:
                     if os.path.exists(os.path.join(root, file)):
                         files.append(os.path.join(root, file))
+                handler_metadata = stateless_handlers.get_handler_metadata(org_name, handler_id)
+                handler_job_metadata = stateless_handlers.get_handler_job_metadata(org_name, handler_id, job_id, kind + "s")
                 action = handler_job_metadata.get("action", "")
                 epoch_number_dictionary = handler_metadata.get("checkpoint_epoch_number", {})
                 best_checkpoint_epoch_number = epoch_number_dictionary.get(f"best_model_{job_id}", 0)
@@ -1873,16 +1861,16 @@ class AppHandler:
         200, list(str) - list of file paths wtih respect to the job
         404, None if no files are found
         """
-        handler_metadata = resolve_metadata(kind, handler_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, kind, handler_id):
             return Code(404, [], f"{kind} not found")
 
         if not check_read_access(org_name, handler_id, kind=kind + "s"):
             return Code(404, [], f"{kind} not found")
 
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         user_id = handler_metadata.get("user_id")
-        job = get_job(job_id)
-        if not job:
+
+        if not resolve_job_existence(user_id, org_name, kind, handler_id, job_id):
             return Code(404, None, "job trying to view not found")
 
         files = stateless_handlers.get_job_files(user_id, org_name, handler_id, job_id, retrieve_logs, retrieve_specs)
@@ -1894,7 +1882,7 @@ class AppHandler:
     @staticmethod
     def get_job_logs(org_name, handler_id, job_id, kind, automl_experiment_index=None):
         """Returns real time job logs"""
-        handler_metadata = resolve_metadata(kind, handler_id)
+        handler_metadata = resolve_metadata(org_name, kind, handler_id)
         if not handler_metadata:
             return Code(404, {}, f"{kind} not found.")
 
@@ -1903,7 +1891,7 @@ class AppHandler:
         # AutoML train  log is saved at /orgs/<org_name>/users/<user_id>/jobs/<job_id>/experiment_<recommendation_index>/log.txt
         user_id = handler_metadata.get("user_id")
         log_file_path = os.path.join(get_handler_log_root(user_id, org_name, handler_id), str(job_id) + ".txt")
-        job_metadata = get_handler_job_metadata(job_id)
+        job_metadata = get_handler_job_metadata(org_name, handler_id, job_id, kind + "s")
         if handler_metadata.get("automl_settings", {}).get("automl_enabled", False) and job_metadata.get("action") == "train":
             root = os.path.join(get_jobs_root(user_id, org_name), job_id)
             automl_index = safe_load_file(root + "/current_rec.json")
@@ -1940,28 +1928,29 @@ class AppHandler:
         """
         # Collect all metadatas
         metadatas = []
-        for experiment_id in list(set(get_org_experiments(org_name))):
-            handler_metadata = stateless_handlers.get_handler_metadata(experiment_id, "experiments")
-            shared_experiment = handler_metadata.get("shared", False)
-            if handler_metadata:
-                if shared_experiment or handler_metadata.get("user_id") == user_id:
-                    handler_metadata = sanitize_handler_metadata(handler_metadata)
-                    metadatas.append(handler_metadata)
+        experiments = get_user_experiments(user_id, org_name)
+        for experiment_id in list(set(experiments)):
+            handler_metadata = stateless_handlers.get_handler_metadata(org_name, experiment_id)
+            if handler_metadata.get("user_id") == user_id:
+                handler_metadata = sanitize_handler_metadata(handler_metadata)
+                metadatas.append(handler_metadata)
         if not user_only:
             public_experiments_metadata = stateless_handlers.get_public_experiments()
             metadatas += public_experiments_metadata
         return metadatas
 
     @staticmethod
-    def list_base_experiments():
+    def list_base_experiments(user_only=False):
         """
+        user_only: str
         Returns:
         list(dict) - list of base experiments accessible by user where each element is metadata of a experiment
         """
         # Collect all metadatas
         metadatas = []
-        public_experiments_metadata = stateless_handlers.get_public_experiments()
-        metadatas += public_experiments_metadata
+        if not user_only:
+            public_experiments_metadata = stateless_handlers.get_public_experiments()
+            metadatas += public_experiments_metadata
         return metadatas
 
     @staticmethod
@@ -1990,18 +1979,16 @@ class AppHandler:
             stateless_handlers.add_public_experiment(experiment_id)
 
         mdl_type = request_dict.get("type", "vision")
-        if str(mdl_nw).startswith("monai_"):
+        if str(mdl_nw).startswith("medical_"):
             mdl_type = "medical"
 
         # Create metadata dict and create some initial folders
         # Initially make datasets, base_experiment None
         metadata = {"id": experiment_id,
                     "user_id": user_id,
-                    "org_name": org_name,
-                    "created_on": datetime.now(tz=timezone.utc),
-                    "last_modified": datetime.now(tz=timezone.utc),
+                    "created_on": datetime.datetime.now().isoformat(),
+                    "last_modified": datetime.datetime.now().isoformat(),
                     "name": request_dict.get("name", "My Experiment"),
-                    "shared": request_dict.get("shared", False),
                     "description": request_dict.get("description", "My Experiments"),
                     "version": request_dict.get("version", "1.0.0"),
                     "logo": request_dict.get("logo", "https://www.nvidia.com"),
@@ -2032,17 +2019,13 @@ class AppHandler:
                     "realtime_infer_model_name": None,
                     "realtime_infer_request_timeout": request_dict.get("realtime_infer_request_timeout", 60),
                     "model_params": request_dict.get("model_params", {}),
-                    "tensorboard_enabled": request_dict.get("tensorboard_enabled", False),
                     "workspace": request_dict.get("workspace", None),
-                    "experiment_actions": request_dict.get('experiment_actions', []),
                     "tags": list(set(map(lambda x: x.lower(), request_dict.get("tags", [])))),
                     }
 
         if metadata.get("automl_settings", {}).get("automl_enabled") and mdl_nw in AUTOML_DISABLED_NETWORKS:
             return Code(400, {}, "automl_enabled cannot be True for unsupported network")
 
-        if metadata.get("automl_settings", {}).get("automl_enabled") and metadata.get("tensorboard_enabled", False):
-            return Code(400, {}, "Tensorboard not yet supported for AutoML experiments")
         if mdl_nw in TAO_NETWORKS and (not metadata.get("workspace")):
             return Code(400, {}, "Workspace must be provided for experiment creation")
 
@@ -2069,7 +2052,7 @@ class AppHandler:
 
         if mdl_type == "medical":
             is_custom_bundle = metadata["network_arch"] in MEDICAL_CUSTOM_ARCHITECT
-            is_auto3seg_inference = metadata["network_arch"] == "monai_automl_generated"
+            is_auto3seg_inference = metadata["network_arch"] == "medical_automl_generated"
             no_ptm = (metadata["base_experiment"] is None) or (len(metadata["base_experiment"]) == 0)
             if no_ptm and is_custom_bundle:
                 # If base_experiment is not provided, then we will need to create a model to host the files downloaded from NGC.
@@ -2089,7 +2072,7 @@ class AppHandler:
                 ptm_metadata["realtime_infer"] = request_dict.get("realtime_infer", False)
                 ptm_metadata["realtime_infer_support"] = ptm_metadata["realtime_infer"]
                 stateless_handlers.make_root_dirs(user_id, org_name, "experiments", base_experiment_id)
-                write_handler_metadata(base_experiment_id, ptm_metadata, "experiment")
+                write_handler_metadata(org_name, "experiment", base_experiment_id, ptm_metadata)
                 # Download it from the provided url
                 download_from_url(bundle_url, base_experiment_id)
 
@@ -2097,13 +2080,13 @@ class AppHandler:
                 bundle_checks = []
                 if ptm_metadata["realtime_infer"]:
                     bundle_checks.append("infer")
-                ptm_file = validate_monai_bundle(base_experiment_id, checks=bundle_checks)
+                ptm_file = validate_medical_bundle(base_experiment_id, checks=bundle_checks)
                 if (ptm_file is None) or (not os.path.isdir(ptm_file)):
                     clean_on_error(experiment_id=base_experiment_id)
                     return Code(400, {}, "Failed to download base experiment, or the provided bundle does not follow MONAI bundle format.")
 
                 ptm_metadata["base_experiment_pull_complete"] = "pull_complete"
-                write_handler_metadata(base_experiment_id, ptm_metadata, "experiment")
+                write_handler_metadata(org_name, "experiment", base_experiment_id, ptm_metadata)
                 bundle_url_path = os.path.join(resolve_root(org_name, "experiment", base_experiment_id), CUSTOMIZED_BUNDLE_URL_FILE)
                 safe_dump_file(bundle_url_path, {CUSTOMIZED_BUNDLE_URL_KEY: bundle_url})
                 metadata["base_experiment"] = [base_experiment_id]
@@ -2168,134 +2151,31 @@ class AppHandler:
             metadata["realtime_infer_model_name"] = model_name
             metadata["realtime_infer_support"] = True
 
-        # Create Tensorboard deployment if enabled
-        if metadata.get("tensorboard_enabled", False):
-            if mdl_nw in TENSORBOARD_DISABLED_NETWORKS:
-                clean_on_error(experiment_id)
-                return Code(400, {}, f"Network {mdl_nw} not supported for Tensorboard")
-            if TensorboardHandler.check_user_metadata(user_id):
-                response = TensorboardHandler.start(org_name, experiment_id, user_id)
-                if response.code != 201:
-                    TensorboardHandler.stop(experiment_id, user_id)
-                    clean_on_error(experiment_id)
-                    return response
-            else:
-                clean_on_error(experiment_id)
-                return Code(400, {}, f"Maximum of {TENSORBOARD_EXPERIMENT_LIMIT} Tensorboard Experiments allowed per user. Disable or delete a Tensorboard Experiment and try again.")
-
         # Actual "creation" happens here...
         stateless_handlers.make_root_dirs(user_id, org_name, "experiments", experiment_id)
-        write_handler_metadata(experiment_id, metadata, "experiment")
+        write_handler_metadata(org_name, "experiment", experiment_id, metadata)
 
-        mongo_users = MongoHandler("tao", "users")
-        experiments = get_user_experiments(user_id, mongo_users)
-        experiments.append(experiment_id)
-        if mdl_type == 'medical':
-            for base_exp in metadata.get("base_experiment", []):
-                experiments.append(base_exp)
-        mongo_users.upsert({'id': user_id}, {'id': user_id, 'experiments': experiments})
-
-        experiment_actions = request_dict.get('experiment_actions', [])
-        retry_experiment_id = request_dict.get('retry_experiment_id', None)
-        error_response = None
-        if retry_experiment_id:
-            error_response = AppHandler.retry_experiment(org_name, user_id, retry_experiment_id, experiment_id, from_ui)
-        elif experiment_actions:
-            error_response = AppHandler.retry_experiment_actions(org_name, experiment_id, experiment_actions, from_ui)
-        if error_response:
-            clean_on_error(experiment_id)
-            return error_response
+        user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+        lock = create_lock(user_metadata_file)
+        with lock:
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            if "tao" not in user_metadata:
+                user_metadata["tao"] = {}
+            tao_experiment_info = user_metadata.get("tao", {}).get("experiments", [])
+            tao_experiment_info.append(experiment_id)
+            if mdl_type == "medical":
+                for base_exp in metadata.get("base_experiment", []):
+                    tao_experiment_info.append(base_exp)
+            user_metadata["tao"]["experiments"] = tao_experiment_info
+            safe_dump_file(user_metadata_file, user_metadata, existing_lock=lock)
 
         # Read this metadata from saved file...
         return_metadata = resolve_metadata_with_jobs(user_id, org_name, "experiment", experiment_id)
         return_metadata = sanitize_handler_metadata(return_metadata)
         ret_Code = Code(201, return_metadata, "Experiment created")
 
-        # TODO: may need to call "monai_triton_client" with dummy request to accelerate
+        # TODO: may need to call "medical_triton_client" with dummy request to accelerate
         return ret_Code
-
-    # Retry existing experiment
-    @staticmethod
-    def retry_experiment(org_name, user_id, retry_experiment_id, new_experiment_id, from_ui):
-        handler_metadata = stateless_handlers.get_handler_metadata_with_jobs(retry_experiment_id, "experiments")
-        handler_jobs = handler_metadata.get("jobs", [])
-        job_map = {}
-        for job in handler_jobs:
-            job_id = job.get('id')
-            job_action = job.get('action')
-            if job_id and job_action:
-                print(f"Loading existing specs from job {job_id}", file=sys.stderr)
-                spec_json_path = os.path.join(get_handler_spec_root(user_id, org_name, retry_experiment_id), f"{job_id}-{job_action}-spec.json")
-                specs = safe_load_file(spec_json_path)
-                name = job.get('name')
-                description = job.get('description')
-                retry_parent_job_id = job.get('parent_id', None)
-                parent_job_id = None
-                if retry_parent_job_id:
-                    retry_parent_job = get_job(retry_parent_job_id)
-                    parent_action = retry_parent_job.get('action')
-                    parent_job_id = job_map.get(parent_action, None)
-                response = AppHandler.job_run(org_name=org_name, handler_id=new_experiment_id, parent_job_id=parent_job_id, action=job_action, kind='experiment', specs=specs, name=name, description=description, from_ui=from_ui)
-                if response.code == 201:
-                    job_id = response.data
-                    job_map[job_action] = job_id
-                    print(f"Created {job_action} job with id {job_id} for experiment {new_experiment_id}", file=sys.stderr)
-                else:
-                    return response
-        return None
-
-    # Retry experiment actions
-    @staticmethod
-    def retry_experiment_actions(org_name, experiment_id, experiment_actions, from_ui):
-        raw_actions = []
-        action_lookup = {}
-        for action_dict in experiment_actions:
-            action = action_dict.get('action')
-            specs = action_dict.get('specs', {})
-            name = action_dict.get('name')
-            description = action_dict.get('description')
-            num_gpu = action_dict.get('num_gpu', -1)
-            platform = action_dict.get('platform', None)
-            action_data = {'specs': specs, 'name': name, 'description': description, 'num_gpu': num_gpu, 'platform': platform}
-            if action:
-                raw_actions.append(action)
-                action_lookup[action] = action_data
-
-        if raw_actions and action_lookup:
-            job_mapping = stateless_handlers.validate_chained_actions(raw_actions)
-            if not job_mapping:
-                return Code(400, {}, "Invalid workflow chaining")
-
-            job_action_to_id = {}
-            for mapping in job_mapping:
-                child_action = mapping.get('child')
-                parent_action = mapping.get('parent', None)
-                if child_action in action_lookup:
-                    lookup_data = action_lookup[child_action]
-                    specs = {}
-                    if not specs and not lookup_data.get('specs', {}):
-                        specs_response = AppHandler.get_spec_schema(org_name, experiment_id, child_action, 'experiment')
-                        if specs_response.code == 200:
-                            spec_schema = specs_response.data
-                            specs = spec_schema["default"]
-                            print("Retrieved specs from DNN: ", specs, file=sys.stderr)
-                        else:
-                            return specs_response
-                    else:
-                        specs = action_lookup[child_action].get('specs', {})
-                    name = lookup_data.get('name')
-                    description = lookup_data.get('description')
-                    num_gpu = lookup_data.get('num_gpu', -1)
-                    platform = lookup_data.get('platform', None)
-                    parent_job_id = job_action_to_id.get(parent_action, None)
-                    response = AppHandler.job_run(org_name=org_name, handler_id=experiment_id, parent_job_id=parent_job_id, action=child_action, kind='experiment', specs=specs, name=name, description=description, num_gpu=num_gpu, platform=platform, from_ui=from_ui)
-                    if response.code == 201:
-                        job_id = response.data
-                        print(f"Created {child_action} job with id {job_id} for experiment {experiment_id}", file=sys.stderr)
-                        job_action_to_id[child_action] = job_id
-                    else:
-                        return response
-        return None
 
     # Update existing experiment for user based on request dict
     @staticmethod
@@ -2309,8 +2189,7 @@ class AppHandler:
         - 404 if experiment not found / user cannot access
         - 400 if invalid update / experiment is read only
         """
-        metadata = resolve_metadata("experiment", experiment_id)
-        if not metadata:
+        if not resolve_existence(org_name, "experiment", experiment_id):
             return Code(400, {}, "Experiment does not exist")
 
         if not check_write_access(org_name, experiment_id, kind="experiments"):
@@ -2324,7 +2203,9 @@ class AppHandler:
             else:
                 stateless_handlers.remove_public_experiment(experiment_id)
 
+        metadata = resolve_metadata(org_name, "experiment", experiment_id)
         user_id = metadata.get("user_id")
+
         for key in request_dict.keys():
 
             # Cannot process the update, so return 400
@@ -2346,13 +2227,13 @@ class AppHandler:
 
             if key in ["name", "description", "version", "logo",
                        "ngc_path", "encryption_key", "read_only",
-                       "metric", "public", "shared", "tags"]:
+                       "metric", "public", "tags"]:
                 requested_value = request_dict[key]
                 if requested_value is not None:
                     metadata[key] = requested_value
-                    metadata["last_modified"] = datetime.now(tz=timezone.utc)
                     if key == "tags":
                         metadata[key] = list(set(map(lambda x: x.lower(), requested_value)))
+                    metadata["last_modified"] = datetime.datetime.now().isoformat()
 
             if key == "docker_env_vars":
                 # Encrypt the MLOPs keys
@@ -2372,45 +2253,18 @@ class AppHandler:
             if error_code:
                 return error_code
 
-            automl_enabled = metadata.get("automl_settings", {}).get("automl_enabled", False)
-            tensorboard_enabled = metadata.get("tensorboard_enabled", False)
             if key == "automl_settings":
                 value = request_dict[key]
-                automl_enabled = value.get('automl_enabled', False)
                 # If False, can set. If True, need to check if AutoML is supported
                 if value:
                     mdl_nw = metadata.get("network_arch", "")
-                    if tensorboard_enabled and automl_enabled:
-                        return Code(400, {}, "automl_enabled cannot be True for Tensorboard experiment")
                     if mdl_nw not in AUTOML_DISABLED_NETWORKS:
                         metadata[key] = request_dict.get(key, {})
                     else:
                         return Code(400, {}, "automl_enabled cannot be True for unsupported network")
                 else:
                     metadata[key] = value
-
-            if key == "tensorboard_enabled":
-                value = request_dict[key]
-                mdl_nw = metadata.get("network_arch", "")
-                if not tensorboard_enabled and value:  # Enable Tensorboard
-                    if mdl_nw in TENSORBOARD_DISABLED_NETWORKS:
-                        return Code(400, {}, f"Network {mdl_nw} not supported for Tensorboard")
-                    if automl_enabled:
-                        return Code(400, {}, "AutoML not supported yet for Tensorboard")
-                    if TensorboardHandler.check_user_metadata(user_id):
-                        response = TensorboardHandler.start(org_name, experiment_id, user_id)
-                        if response.code != 201:
-                            TensorboardHandler.stop(experiment_id, user_id)
-                            return response
-                    else:
-                        return Code(400, {}, f"Maximum of {TENSORBOARD_EXPERIMENT_LIMIT} Tensorboard Experiments allowed per user. Disable or delete a Tensorboard Experiment and try again.")
-                elif tensorboard_enabled and not value:  # Disable Tensorboard
-                    response = TensorboardHandler.stop(org_name, experiment_id, user_id)
-                    if response.code != 200:
-                        return response
-                metadata[key] = value
-
-        write_handler_metadata(experiment_id, metadata, "experiment")
+        write_handler_metadata(org_name, "experiment", experiment_id, metadata)
         # Read this metadata from saved file...
         return_metadata = resolve_metadata_with_jobs(user_id, org_name, "experiment", experiment_id)
         return_metadata = sanitize_handler_metadata(return_metadata)
@@ -2427,13 +2281,13 @@ class AppHandler:
         - 200 with metadata of retrieved experiment if successful
         - 404 if experiment not found / user cannot access
         """
-        handler_metadata = resolve_metadata("experiment", experiment_id)
-        if experiment_id not in ("*", "all") and not handler_metadata:
+        if experiment_id not in ("*", "all") and not resolve_existence(org_name, "experiment", experiment_id):
             return Code(404, {}, "Experiment not found")
 
         if experiment_id not in ("*", "all") and not check_read_access(org_name, experiment_id, kind="experiments"):
             return Code(404, {}, "Experiment not found")
 
+        handler_metadata = resolve_metadata(org_name, "experiment", experiment_id)
         user_id = handler_metadata.get("user_id")
         return_metadata = resolve_metadata_with_jobs(user_id, org_name, "experiment", experiment_id)
         return_metadata = sanitize_handler_metadata(return_metadata)
@@ -2447,61 +2301,76 @@ class AppHandler:
         Returns:
         Code object
         - 200 with metadata of deleted experiment if successful
-        - 404 if user cannot access
+        - 404 if experiment not found / user cannot access
         - 400 if experiment cannot be deleted b/c (1) pending/running jobs (2) public (3) read-only (4) TIS stop fails
         """
-        handler_metadata = resolve_metadata("experiment", experiment_id)
-        if not handler_metadata:
-            return Code(200, {}, "Experiment deleted")
-        if not check_write_access(org_name, experiment_id, kind="experiments"):
-            return Code(404, {}, "User doesn't have write access to experiment")
+        if not resolve_existence(org_name, "experiment", experiment_id):
+            return Code(404, {}, "Experiment not found")
 
+        handler_metadata = resolve_metadata(org_name, "experiment", experiment_id)
         user_id = handler_metadata.get("user_id")
         # If experiment is being used by user's experiments.
-        experiments = get_user_experiments(user_id)
+        user_metadata_file = os.path.join(get_root(), org_name, "users", user_id, "metadata.json")
+        lock = create_lock(user_metadata_file)
+        with lock:
+            user_metadata = safe_load_file(user_metadata_file, existing_lock=lock)
+            tao_experiment_info = user_metadata.get("tao", {}).get("experiments", [])
+            for user_experiment_id in tao_experiment_info:
+                metadata_file = os.path.join(get_root(), org_name, "experiments", user_experiment_id, "metadata.json")
+                metadata = safe_load_file(metadata_file)
+                if experiment_id == metadata.get("base_experiment", None):
+                    return Code(400, {}, "Experiment in use as a base_experiment")
+            # Check if any job running
+            if experiment_id not in get_user_experiments(user_id, org_name, existing_lock=lock):
+                return Code(404, {}, "Experiment cannot be deleted")
 
-        if experiment_id not in experiments:
-            return Code(404, {}, "Experiment cannot be deleted")
+            return_metadata = resolve_metadata_with_jobs(user_id, org_name, "experiment", experiment_id)
+            for job in return_metadata["jobs"]:
+                if return_metadata["jobs"][job]["status"] in ("Pending", "Running"):
+                    return Code(400, {}, "Experiment in use")
 
-        for handler_id in experiments:
-            metadata = get_experiment(handler_id)
-            if experiment_id == metadata.get("base_experiment", None):
-                return Code(400, {}, "Experiment in use as a base_experiment")
+            # Check if experiment is public, then someone could be running it
+            if return_metadata.get("public", False):
+                return Code(400, {}, "Experiment is Public. Cannot delete")
 
-        return_metadata = resolve_metadata_with_jobs(user_id, org_name, "experiment", experiment_id)
-        for job in return_metadata["jobs"]:
-            if return_metadata["jobs"][job]["status"] in ("Pending", "Running"):
-                return Code(400, {}, "Experiment in use")
+            # Check if experiment is read only, if yes, cannot delete
+            if return_metadata.get("read_only", False):
+                return Code(400, {}, "Experiment is read only. Cannot delete")
 
-        # Check if experiment is public, then someone could be running it
-        if return_metadata.get("public", False):
-            return Code(400, {}, "Experiment is Public. Cannot delete")
+            # Check if the experiment is being used by a realtime infer job
+            if return_metadata.get("realtime_infer", False):
+                response = TISHandler.stop(experiment_id, return_metadata)
+                replicas = metadata.get("model_params", {}).get("replicas", 1)
+                CapGpuUsage.release_used(org_name, replicas)
+                if response is not None and response.code != 201:
+                    return response
 
-        # Check if experiment is read only, if yes, cannot delete
-        if return_metadata.get("read_only", False):
-            return Code(400, {}, "Experiment is read only. Cannot delete")
+            experiment_root = stateless_handlers.get_handler_root(org_name, "experiments", experiment_id, None)
+            experiment_meta_file = stateless_handlers.get_handler_metadata_file(org_name, experiment_id, "experiments")
+            if not os.path.exists(experiment_meta_file):
+                return Code(404, {}, "Experiment is already deleted.")
 
-        # Check if the experiment is being used by a realtime infer job
-        if return_metadata.get("realtime_infer", False):
-            response = TISHandler.stop(experiment_id, return_metadata)
-            replicas = metadata.get("model_params", {}).get("replicas", 1)
-            CapGpuUsage.release_used(org_name, replicas)
-            if response is not None and response.code != 201:
-                return response
+            if experiment_id in tao_experiment_info:
+                tao_experiment_info.remove(experiment_id)
+                user_metadata["tao"]["experiments"] = tao_experiment_info
+                safe_dump_file(user_metadata_file, user_metadata, existing_lock=lock)
 
-        if handler_metadata.get("tensorboard_enabled", False):
-            response = TensorboardHandler.stop(org_name, experiment_id, user_id)
-            if response.code != 200:
-                return response
+        print(f"Removing experiment (meta): {experiment_meta_file}", file=sys.stderr)
+        os.unlink(experiment_meta_file)
 
-        if experiment_id in experiments:
-            experiments.remove(experiment_id)
-            mongo_users = MongoHandler("tao", "users")
-            mongo_users.upsert({'id': user_id}, {'id': user_id, 'experiments': experiments})
+        print(f"Removing experiment folder: {experiment_root}", file=sys.stderr)
+        deletion_command = f"rm -rf {experiment_root}"
 
-        delete_jobs_for_handler(experiment_id, "experiment")
-        mongo_experiments = MongoHandler("tao", "experiments")
-        mongo_experiments.delete_one({'id': experiment_id})
+        handler_jobs_meta_folder = os.path.join(experiment_root, "jobs_metadata")
+        if os.path.exists(handler_jobs_meta_folder):
+            for job_file in os.listdir(handler_jobs_meta_folder):
+                if job_file.endswith(".json"):
+                    job_id = os.path.splitext(os.path.basename(job_file))[0]
+                    deletion_command += f" {get_root()}/{org_name}/users/{user_id}/jobs/{job_id}* "
+                    deletion_command += f" {get_root()}/{org_name}/users/{user_id}/jobs/{job_id}* {get_root()}/{org_name}/users/{user_id}/logs/{job_id}* {get_root()}/{org_name}/users/{user_id}/specs/{job_id}* "
+
+        delete_thread = threading.Thread(target=run_system_command, args=(deletion_command,))
+        delete_thread.start()
         return_metadata = sanitize_handler_metadata(return_metadata)
         return Code(200, return_metadata, "Experiment deleted")
 
@@ -2516,31 +2385,32 @@ class AppHandler:
         400 with [] if job_id does not correspond to a train action or if it cannot be resumed
         404 with [] if experiment/job_id not found
         """
-        handler_metadata = resolve_metadata(kind, experiment_id)
-        if not handler_metadata:
+        if not resolve_existence(org_name, "experiment", experiment_id):
             return Code(404, [], "Experiment not found")
 
         if not check_write_access(org_name, experiment_id, kind="experiments"):
             return Code(404, [], "Experiment not found")
 
-        job_metadata = stateless_handlers.get_handler_job_metadata(job_id)
-        if not job_metadata:
-            return Code(404, None, "job trying to resume not found")
+        job_metadata = stateless_handlers.get_handler_job_metadata(org_name, experiment_id, job_id)
         action = job_metadata.get("action", "")
-        action = infer_action_from_job(experiment_id, job_id)
+        action = infer_action_from_job(org_name, experiment_id, job_id)
         status = job_metadata.get("status", "")
         if status != "Paused":
             return Code(400, [], f"Job status should be paused, not {status}")
         if action not in ("train", "retrain"):
             return Code(400, [], f"Action should be train, retrain, not {action}")
 
+        handler_metadata = resolve_metadata(org_name, kind, experiment_id)
         user_id = handler_metadata.get("user_id")
         if not user_id:
             return Code(404, [], "User ID couldn't be found in the experiment metadata. Try creating the experiment again")
 
+        if not resolve_job_existence(user_id, org_name, kind, experiment_id, job_id):
+            return Code(404, None, "job trying to resume not found")
+
         msg = ""
         try:
-            stateless_handlers.update_job_status(experiment_id, job_id, status="Resuming", kind=kind + "s")
+            stateless_handlers.update_job_status(org_name, experiment_id, job_id, status="Resuming", kind=kind + "s")
             if is_job_automl(user_id, org_name, job_id):
                 msg = "AutoML "
                 AutoMLHandler.resume(user_id, org_name, experiment_id, job_id, handler_metadata, name=name)
@@ -2564,7 +2434,7 @@ class AppHandler:
     def automl_details(org_name, experiment_id, job_id):
         """Compiles meaningful results of an AutoML run"""
         try:
-            handler_metadata = resolve_metadata("experiment", experiment_id)
+            handler_metadata = resolve_metadata(org_name, "experiment", experiment_id)
             user_id = handler_metadata.get("user_id")
             root = stateless_handlers.get_jobs_root(user_id, org_name)
             jobdir = os.path.join(root, job_id)

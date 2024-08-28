@@ -37,20 +37,6 @@ spec:
       labels:
         name: {{ .Release.Name }}-app-pod
     spec:
-      initContainers:
-      - name: {{ .Release.Name }}-mongodb-init
-        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-        imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
-        command: ["python3", "mongodb_start.py"]
-        env:
-        - name: MONGOSTORAGECLASS
-          value: {{ .Values.mongoStorageClassName | default "nfs-client" | quote }}
-        - name: MONGOSTORAGESIZE
-          value: {{ .Values.mongoStorageSize | default "100Gi" | quote }}
-        - name: MONGODESIREDREPLICAS
-          value: {{ .Values.mongoDesiredReplicas | default "3" | quote }}
-        - name: IMAGEPULLSECRET
-          value: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
       containers:
       - name: {{ .Release.Name }}-app
         image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
@@ -58,8 +44,6 @@ spec:
           privileged: true
         imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
         env:
-        - name: RELEASE_NAME
-          value: {{ .Release.Name | quote }}
         - name: NAMESPACE
           value: {{ .Release.Namespace | quote }}
         - name: CLAIMNAME
@@ -104,17 +88,8 @@ spec:
           value: utf-8
         - name: LC_ALL 
           value: C.UTF-8 
-        - name: VISION_EARLY_ACCESS
-          value: {{ .Values.visionEarlyAccess | default "ea-tlt/tao_ea" | quote }}
-        - name: MEDICAL_EARLY_ACCESS
-          value: {{ .Values.medicalEarlyAccess | default "iasixjqzw1hj/users-external" | quote }}
         - name: PROFILER
           value: {{ .Values.profiler | default "False" | quote }}
-        - name: MONGOSECRET
-          valueFrom:
-            secretKeyRef:
-              name: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
-              key: .dockerconfigjson
 {{- if .Values.httpsProxy }}
         - name: HTTPS_PROXY
           value: {{ .Values.httpsProxy | default "" | quote }}

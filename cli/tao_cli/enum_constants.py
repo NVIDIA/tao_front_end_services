@@ -56,7 +56,7 @@ class DatasetFormat(str, enum.Enum):
     classification_tf2 = 'classification_tf2'
     visual_changenet_segment = 'visual_changenet_segment'
     visual_changenet_classify = 'visual_changenet_classify'
-    monai = 'monai'
+    medical = 'medical'
 
 
 class ExperimentNetworkArch(str, enum.Enum):
@@ -87,17 +87,17 @@ class ExperimentNetworkArch(str, enum.Enum):
     auto_label = "auto_label"
     image = "image"
     # Monai Networks
-    monai_vista3d = "monai_vista3d"
-    monai_vista2d = "monai_vista2d"
-    monai_segmentation = "monai_segmentation"
-    monai_annotation = "monai_annotation"
-    monai_classification = "monai_classification"
-    monai_detection = "monai_detection"
-    monai_automl = "monai_automl"
-    monai_custom = "monai_custom"
-    monai_genai = "monai_genai"
-    monai_maisi = "monai_maisi"
-    monai_automl_generated = "monai_automl_generated"
+    medical_vista3d = "medical_vista3d"
+    medical_vista2d = "medical_vista2d"
+    medical_segmentation = "medical_segmentation"
+    medical_annotation = "medical_annotation"
+    medical_classification = "medical_classification"
+    medical_detection = "medical_detection"
+    medical_automl = "medical_automl"
+    medical_custom = "medical_custom"
+    medical_genai = "medical_genai"
+    medical_maisi = "medical_maisi"
+    medical_automl_generated = "medical_automl_generated"
 
 
 class Metrics(str, enum.Enum):
@@ -119,9 +119,7 @@ class Metrics(str, enum.Enum):
     Hmean = 'Hmean'
     Mean_IOU = 'Mean IOU'
     Precision = 'Precision'
-    ema_precision = 'ema_precision'
     Recall = 'Recall'
-    ema_recall = 'ema_recall'
     Thresh = 'Thresh'
     accuracy = 'accuracy'
     m_accuracy = 'm_accuracy'
@@ -134,7 +132,6 @@ class Metrics(str, enum.Enum):
     defect_acc = 'defect_acc'
     embedder_base_lr = 'embedder_base_lr'
     hmean = 'hmean'
-    ema_hmean = 'ema_hmean'
     learning_rate = 'learning_rate'
     loss = 'loss'
     lr = 'lr'
@@ -197,10 +194,4 @@ class Metrics(str, enum.Enum):
     val_mprecision = 'val_mprecision'
     val_mrecall = 'val_mrecall'
 
-    # Data Service Analytics KPI metrics
     num_objects = 'num_objects'
-    object_count_index = 'object_count_index'
-    object_count_num = 'object_count_num'
-    object_count_percent = 'object_count_percent'
-    bbox_area_type = 'bbox_area_type'
-    bbox_area_mean = 'bbox_area_mean'

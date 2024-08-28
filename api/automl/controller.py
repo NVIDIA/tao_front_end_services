@@ -24,7 +24,7 @@ from copy import deepcopy
 from datetime import timedelta
 
 from automl.utils import Recommendation, ResumeRecommendation, JobStates, report_healthy
-from constants import _ITER_MODELS, NO_VAL_METRICS_DURING_TRAINING_NETWORKS, NETWORK_METRIC_MAPPING, MISSING_EPOCH_FORMAT_NETWORKS
+from constants import _ITER_MODELS, NO_VAL_METRICS_DURING_TRAINING_NETWORKS, NETWORK_METRIC_MAPPING
 from dgx_controller import overwrite_job_logs_from_bcp
 from handlers.cloud_storage import CloudStorage
 from handlers.utilities import StatusParser, get_total_epochs, get_file_list_from_cloud_storage, filter_files, format_epoch
@@ -67,14 +67,11 @@ class Controller:
 
         self.root = root
         self.network = network
-        self.checkpoint_delimiter = ""
-        if self.network in MISSING_EPOCH_FORMAT_NETWORKS:
-            self.checkpoint_delimiter = "_"
         self.completed_recommendations = 0
         self.max_recommendations = int(max_recommendations)
         self.delete_intermediate_ckpt = bool(delete_intermediate_ckpt)
         self.automl_algorithm = automl_algorithm
-        self.handler_metadata = get_handler_metadata(self.automl_context.handler_id, "experiments")
+        self.handler_metadata = get_handler_metadata(self.automl_context.org_name, self.automl_context.handler_id)
         self.decrypted_workspace_metadata = decrypted_workspace_metadata
         self.metric = metric
         if self.automl_algorithm in ("hyperband", "h") and self.network in NO_VAL_METRICS_DURING_TRAINING_NETWORKS:
@@ -119,32 +116,6 @@ class Controller:
         with open(f"{self.root}/automl_metadata.json", 'a', encoding='utf-8'):  # Creating Controller json if it doesn't exist
             pass
 
-    def update_status_message(self):
-        """Update job detailed status to indicate the best model was not copied"""
-        if not self.best_model_copied:
-            metadata = get_handler_job_metadata(self.automl_context.id)
-            results = metadata.get("result", {})
-            if results:
-                detailed_status = results.get("detailed_status", {})
-                if not detailed_status:
-                    results["detailed_status"] = {}
-            else:
-                metadata["results"] = {}
-                results["detailed_status"] = {}
-            results["detailed_status"]["message"] = f"Checkpoint file doesn't exist in best model folder /results/{self.automl_context.id}"
-            update_job_metadata(self.automl_context.handler_id, self.automl_context.id, metadata_key="result", data=results, kind="experiments")
-
-    def cancel_recommendation_jobs(self):
-        """Cleanup recommendation jobs"""
-        for rec in self.recommendations:
-            job_name = rec.job_id
-            print("\nDeleting", job_name, file=sys.stderr)
-            if not job_name:
-                continue
-            if not os.getenv("CI_PROJECT_DIR", None):
-                on_cancel_automl_job(rec.job_id)
-        on_delete_automl_job(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, "experiments")
-
     def start(self):
         """Starts the automl controller"""
         try:
@@ -153,21 +124,26 @@ class Controller:
             status = "Error"
             if self.best_model_copied:
                 status = "Done"
-            self.update_status_message()
-            update_job_status(self.automl_context.handler_id, self.automl_context.id, status=status, kind="experiments")
-            self.cancel_recommendation_jobs()
+            update_job_status(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, status=status, kind="experiments")
 
+            for rec in self.recommendations:
+                job_name = rec.job_id
+                print("\nDeleting", job_name, file=sys.stderr)
+                if not job_name:
+                    continue
+                if not os.getenv("CI_PROJECT_DIR", None):
+                    on_cancel_automl_job(rec.job_id)
+
+            on_delete_automl_job(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, "experiments")
         except Exception:
-            self.update_status_message()
-            self.cancel_recommendation_jobs()
             print(f"AutoMLpipeline loop for network {self.network} failed due to exception {traceback.format_exc()}", file=sys.stderr)
-            update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Error", kind="experiments")
+            update_job_status(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, status="Error", kind="experiments")
 
     def save_state(self):
         """Save the self.recommendations into a controller.json"""
         recs_dict = [ele.__dict__ for ele in self.recommendations]
         file_path = self.root + "/controller.json"
-        metadata = get_handler_job_metadata(self.automl_context.id)
+        metadata = get_handler_job_metadata(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, "experiments")
         current_status = metadata.get("status", "")
         if current_status not in ("canceled", "canceling"):
             safe_dump_file(file_path, recs_dict)
@@ -194,8 +170,8 @@ class Controller:
         # Usually, if the controller is stopped before a recommendation is done, it might have to be started / resumed again
         file_path = root + "/current_rec.json"
         temp_rec = safe_load_file(file_path)
-        # if ctrl.recommendations[temp_rec].status != JobStates.canceled:
-        #     ctrl.recommendations[temp_rec].update_status(JobStates.success)
+        if ctrl.recommendations[temp_rec].status != JobStates.canceled:
+            ctrl.recommendations[temp_rec].update_status(JobStates.success)
         ctrl.save_state()
         if ctrl.recommendations[temp_rec].status == JobStates.canceled:
             print("Resuming stopped automl sub-experiment", temp_rec, file=sys.stderr)
@@ -211,10 +187,10 @@ class Controller:
         2.Reads results of newly done experiments
         3.Writes AutoML status into a file which can be shown to the end user
         """
-        update_job_status(self.automl_context.handler_id, self.automl_context.id, status="Running", kind="experiments")
+        update_job_status(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, status="Running", kind="experiments")
         while True:
             automl_status_file = self.root + "/controller.json"
-            metadata = get_handler_job_metadata(self.automl_context.id)
+            metadata = get_handler_job_metadata(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, "experiments")
             current_status = metadata.get("status", "")
             if current_status in ("canceled", "canceling"):
                 return
@@ -236,7 +212,7 @@ class Controller:
                             self.delete_not_best_model_checkpoints(expt_root, rec, True)
                             self.handler_metadata["checkpoint_epoch_number"][f"best_model_{self.automl_context.id}"] = self.best_epoch_number[rec.id]
                             self.handler_metadata["checkpoint_epoch_number"][f"latest_model_{self.automl_context.id}"] = self.best_epoch_number[rec.id]
-                            write_handler_metadata(self.automl_context.handler_id, self.handler_metadata, "experiments")
+                            write_handler_metadata(self.automl_context.org_name, self.automl_context.handler_id, self.handler_metadata, "experiments")
 
                     self.eta = 0.0
                     self.remaining_epochs_in_experiment = 0.0
@@ -347,7 +323,7 @@ class Controller:
             new_results = status_parser.update_results(self.total_epochs, self.eta, self.total_epochs - self.remaining_epochs_in_experiment, True)
             if status_parser.first_epoch_number != -1:
                 self.first_epoch_number = status_parser.first_epoch_number
-            update_job_metadata(self.automl_context.handler_id, self.automl_context.id, metadata_key="result", data=new_results, kind="experiments")
+            update_job_metadata(self.automl_context.org_name, self.automl_context.handler_id, self.automl_context.id, metadata_key="result", data=new_results, kind="experiments")
 
             validation_map_processed = False
             # Force termination of the case for hyperband training
@@ -368,7 +344,7 @@ class Controller:
                                         if validation_map != 0.0:
                                             format_epoch_number = format_epoch(self.network, self.best_epoch_number[rec.id])
                                             trained_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, cloud_expt_root)
-                                            regex_pattern = fr'^(?!.*lightning_logs).*{self.checkpoint_delimiter}{format_epoch_number}\.(pth|tlt|hdf5)$'
+                                            regex_pattern = fr'^(?!.*lightning_logs).*{format_epoch_number}\.(pth|tlt|hdf5)$'
                                             trained_files = filter_files(trained_files, regex_pattern)
                                             if trained_files:
                                                 rec.update_status(JobStates.success)
@@ -401,13 +377,13 @@ class Controller:
                 if validation_map != 0.0:
                     rec.update_result(validation_map)
                 self.save_state()
-                on_cancel_automl_job(rec.job_id)
             if old_status != status:
                 rec.update_status(status)
                 self.save_state()
                 if status == JobStates.success:
                     container_log_file = f"{self.root}/experiment_{rec.id}/log.txt"
                     if os.getenv("BACKEND") in ("BCP", "NVCF"):
+                        on_cancel_automl_job(rec.job_id)
                         overwrite_job_logs_from_bcp(container_log_file, rec.job_id)
                     if os.path.exists(container_log_file):
                         with open(container_log_file, "a", encoding='utf-8') as f:
@@ -548,22 +524,12 @@ class Controller:
                 self.cs_instance.upload_file(best_spec_path, os.path.join(cloud_best_model_folder, spec_path))
                 shutil.copy(best_spec_path, local_best_model_folder)
                 shutil.copy(best_log_path, local_best_model_folder)
-                find_trained_tlt, find_trained_hdf5, find_trained_pth, _ = self.get_checkpoint_paths_matching_epoch_number(cloud_best_model_folder, rec.id)
-                if find_trained_tlt or find_trained_hdf5 or find_trained_pth:
+                best_model_checkpoint_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, cloud_best_model_folder)
+                if best_model_checkpoint_files:
                     self.best_model_copied = True
                 else:
                     print("Best model checkpoints couldn't be moved", file=sys.stderr)
                 break
-
-    def get_checkpoint_paths_matching_epoch_number(self, path, rec_id):
-        """Get checkpoints from cloud_path and filter based on epoch number"""
-        checkpoint_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, path)
-        format_epoch_number = format_epoch(self.network, self.best_epoch_number[rec_id])
-        find_trained_tlt = filter_files(checkpoint_files, regex_pattern=fr'.*{self.checkpoint_delimiter}{format_epoch_number}\.tlt$')
-        find_trained_hdf5 = filter_files(checkpoint_files, regex_pattern=fr'.*{self.checkpoint_delimiter}{format_epoch_number}\.hdf5$')
-        find_trained_pth = filter_files(checkpoint_files, regex_pattern=fr'.*{self.checkpoint_delimiter}{format_epoch_number}\.pth$')
-        find_trained_ckzip = filter_files(checkpoint_files, regex_pattern=fr'.*{self.checkpoint_delimiter}{format_epoch_number}\.ckzip$')
-        return find_trained_tlt, find_trained_hdf5, find_trained_pth, find_trained_ckzip
 
     def get_best_checkpoint_path(self, path, recommendation):
         """Assign the checkpoint with the best metric value for supported models; for others call the 'find latest checkpoint method'"""
@@ -571,7 +537,11 @@ class Controller:
         format_epoch_number = format_epoch(self.network, self.best_epoch_number[recommendation.id])
         recommendation.best_epoch_number = format_epoch_number
         print("Best epoch number", recommendation.best_epoch_number, path, file=sys.stderr)
-        find_trained_tlt, find_trained_hdf5, find_trained_pth, find_trained_ckzip = self.get_checkpoint_paths_matching_epoch_number(path, recommendation.id)
+        checkpoint_files = get_file_list_from_cloud_storage(self.decrypted_workspace_metadata, path)
+        find_trained_tlt = filter_files(checkpoint_files, regex_pattern=fr'.*{format_epoch_number}\.tlt$')
+        find_trained_hdf5 = filter_files(checkpoint_files, regex_pattern=fr'.*{format_epoch_number}\.hdf5$')
+        find_trained_pth = filter_files(checkpoint_files, regex_pattern=fr'.*{format_epoch_number}\.pth$')
+        find_trained_ckzip = filter_files(checkpoint_files, regex_pattern=fr'.*{format_epoch_number}\.ckzip$')
         if find_trained_tlt:
             self.ckpt_path[path]["tlt"] = find_trained_tlt[0]
         if find_trained_hdf5:

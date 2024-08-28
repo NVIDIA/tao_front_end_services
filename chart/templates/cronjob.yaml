@@ -42,36 +42,7 @@ spec:
                 secretKeyRef:
                   name: bcpclustersecret
                   key: .dockerconfigjson
-            - name: MONGOSECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.imagePullSecret | default "imagepullsecret" | quote }}
-                  key: .dockerconfigjson
-            - name: ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: aws-secret
-                  key: aws-access-key
-                  optional: true
-            - name: SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: aws-secret
-                  key: aws-secret-key
-                  optional: true
-            - name: S3_BUCKET_NAME
-              valueFrom:
-                secretKeyRef:
-                  name: aws-secret
-                  key: s3-bucket-name
-                  optional: true
-            - name: S3_BUCKET_REGION
-              valueFrom:
-                secretKeyRef:
-                  name: aws-secret
-                  key: s3-bucket-region
-                  optional: true
-            command: ["/bin/bash", "cronjob_start.sh", "nvidia/tao,nvaie,iasixjqzw1hj/no-team,ea-tlt/tao_ea", "$(BCPCLUSTERSECRET)", "$(ACCESS_KEY)", "$(SECRET_KEY)", "$(S3_BUCKET_NAME)", $(S3_BUCKET_REGION)]
+            command: ["/bin/bash", "cronjob_start.sh", "nvidia/tao,nvaie", "$(BCPCLUSTERSECRET)"]
             volumeMounts:
             - name: shared-data
               mountPath: /shared
