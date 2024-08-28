@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MEDICAL Model Handler module."""
+"""MONAI Model Handler module."""
 import base64
 import os
 import sys
@@ -25,17 +25,17 @@ import validators
 from tritonclient.utils import InferenceServerException, np_to_triton_dtype
 
 from handlers.medical.dataset.cache import CacheInfo
-from handlers.medical_dataset_handler import MedicalDatasetHandler
+from handlers.medical_dataset_handler import MonaiDatasetHandler
 from handlers.utilities import Code
 from job_utils import executor as jobDriver
 
 
-class MedicalModelHandler:
-    """MEDICAL Model Handler class."""
+class MonaiModelHandler:
+    """MONAI Model Handler class."""
 
     @staticmethod
     def get_schema(action):
-        """Provide schema for each action in MEDICAL models/bundles."""
+        """Provide schema for each action in MONAI models/bundles."""
         if action == "inference":
             return {
                 "image": "",
@@ -45,12 +45,12 @@ class MedicalModelHandler:
         return {"default": {}}
 
     @staticmethod
-    def run_inference(user_id, handler_id, handler_metadata, spec):
+    def run_inference(org_name, handler_id, handler_metadata, spec):
         """
         Method for medical triton client.
 
         Args:
-            user_id: User ID
+            org_name: User ID
             handler_id: Handler ID, usually experiment_id.
             handler_metadata: Handler MetaData
             spec: Spec for Infer action which contains
@@ -84,32 +84,36 @@ class MedicalModelHandler:
             dataset_id = infer_ds if infer_ds else train_ds
 
         # Get the input path from cacheimage
-        response = MedicalDatasetHandler.from_cache(user_id, dataset_id, image)
+        response = MonaiDatasetHandler.from_cache(org_name, dataset_id, image)
         if response.code != 201:
             return response
         if response.data is None:
             return Code(400, [], "failed to fetch/determine image source")
 
         cache_info: CacheInfo = CacheInfo(c=response.data)
+        # input_path could be a list of paths or a single path
+        # if it is a list, all paths must belong to the same directory
         input_path = cache_info.image
 
         # Make the output_path in user cache dir
         tmp_job_id = str(uuid4())
-        output_dir = os.path.join(os.path.join(os.path.dirname(input_path), "labels"), tmp_job_id)
+        input_path_dir = os.path.dirname(input_path) if isinstance(input_path, str) else os.path.dirname(input_path[0])
+        output_dir = os.path.join(os.path.join(input_path_dir, "labels"), tmp_job_id)
         os.makedirs(output_dir, exist_ok=False)
         os.chmod(output_dir, 0o777)
 
         # TODO: make port number configurable
         url = f"{pod_ip}:8001"
         client = grpcclient.InferenceServerClient(url=url, verbose=False)
+        input_path_list = input_path if isinstance(input_path, list) else [input_path]
         inputs = [
-            grpcclient.InferInput("INPUT_PATH", [1], np_to_triton_dtype(np.object_)),
+            grpcclient.InferInput("INPUT_PATH", [len(input_path_list)], np_to_triton_dtype(np.object_)),
             grpcclient.InferInput("OUTPUT_DIR", [1], np_to_triton_dtype(np.object_)),
             grpcclient.InferInput("PROMPTS", [1], np_to_triton_dtype(np.object_)),
         ]
         outputs = [grpcclient.InferRequestedOutput("OUTPUT_PATH"), grpcclient.InferRequestedOutput("ERROR_MESSAGE")]
 
-        inputs[0].set_data_from_numpy(np.array([input_path], dtype=np.object_))
+        inputs[0].set_data_from_numpy(np.array(input_path_list, dtype=np.object_))
         inputs[1].set_data_from_numpy(np.array([output_dir], dtype=np.object_))
 
         # FIXME: please make use of the bundle_params in OHIF
@@ -121,10 +125,12 @@ class MedicalModelHandler:
             response = client.infer(model_name, inputs, request_id=str(uuid4().hex), outputs=outputs)
             output_path = response.as_numpy("OUTPUT_PATH")[0].decode()
             error_msg = response.as_numpy("ERROR_MESSAGE")[0].decode()
-            if not os.path.exists(output_path):
+            if error_msg != "" or not os.path.exists(output_path) or len(os.listdir(output_path)) == 0:
+                if error_msg == "":
+                    error_msg = "Cannot find output data"
                 print(f"Run inference on input {input_path} with model {model_name} got error: {error_msg}", file=sys.stderr)
                 return Code(400, [], f"Error: {error_msg}")
-            res = Code(201, {"pred": output_path}, "Triton Inference Success" if error_msg == "" else error_msg)
+            res = Code(201, {"pred": output_path}, "Triton Inference Success")
             res.attachment_key = "pred"
             return res
         except InferenceServerException as e:

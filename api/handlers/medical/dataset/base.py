@@ -20,7 +20,7 @@ class BaseEndpoint(ABC):
     """
     The is the basic class for an endpoint of a dataset. All methods contained in
     this class should be overrided or inherited to enable annotation and batch training
-    workflows. After that, the new endpoint can be used by the MedicalDatasetHandler.
+    workflows. After that, the new endpoint can be used by the MonaiDatasetHandler.
     """
 
     def __init__(self, url: str, client_id, client_secret, filters):

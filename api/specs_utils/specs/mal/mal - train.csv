@@ -1,6 +1,5 @@
 parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,popular,regex,automl_enabled,math_cond,parent_param,depends_on
 version,Schema Version,const,The version of this schema,1,,,,,,,,FALSE,,,
-gpu_ids,GPU indices,list,,[0],,,,,,,,FALSE,,,
 results_dir,,hidden,,,,,,,,,,FALSE,,,
 checkpoint,,string,,,,,,,,,,FALSE,,,
 dataset,,collection,,,,,,,,,,FALSE,,,
@@ -23,8 +22,9 @@ model.mask_head_out_channel,,int,,256,,1,inf,,,,,FALSE,,,
 model.teacher_momentum,,float,,0.996,,0,1,,,,,FALSE,,,
 train,,collection,,,,,,,,,,FALSE,,,
 train.num_epochs,,int,,10,,1,inf,,,,,FALSE,,,
-train.save_every_k_epoch,,int,,1,,1,inf,,,,,FALSE,,,<=train.num_epochs
-train.val_interval,,int,,1,,1,inf,,,,,FALSE,,,<=train.num_epochs
+train.num_gpus,,int,,1,,,,,,,,FALSE,,,
+train.checkpoint_interval,,int,,5,,1,inf,,,,,FALSE,,,<=train.num_epochs
+train.validation_interval,,int,,5,,1,inf,,,,,FALSE,,,<=train.num_epochs
 train.batch_size,,int,,1,,1,inf,,,,,FALSE,,,
 train.accum_grad_batches,,int,,1,,1,inf,,,,,FALSE,,,
 train.use_amp,,bool,,TRUE,,,,,,,,FALSE,,,

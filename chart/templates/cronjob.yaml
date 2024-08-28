@@ -35,8 +35,8 @@ spec:
               privileged: true
             imagePullPolicy: {{ .Values.imagePullPolicy | default "Always" }}
             env:
-            - name: NGC_RUNNER
-              value: {{ .Values.ngcRunner | default "False" | quote }}
+            - name: BACKEND
+              value: {{ .Values.backend | default "local-k8s" | quote }}
             - name: BCPCLUSTERSECRET
               valueFrom:
                 secretKeyRef:

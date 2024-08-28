@@ -13,8 +13,9 @@
 # limitations under the License.
 
 """AutoML read parameters modules"""
-from handlers.utilities import Code, get_flatten_specs, AUTOML_DISABLED_NETWORKS
-from handlers.stateless_handlers import safe_load_file, get_root
+from constants import AUTOML_DISABLED_NETWORKS
+from handlers.utilities import Code, get_flatten_specs
+from handlers.stateless_handlers import safe_load_file
 from specs_utils import csv_to_json_schema
 
 import os
@@ -32,7 +33,6 @@ def generate_hyperparams_to_search(job_context, automl_add_hyperparameters, auto
     Returns: a list of dict for AutoML supported networks
     """
     network_arch = job_context.network
-    handler_root = handler_root.replace(get_root(), get_root(ngc_runner_fetch=True))
     if network_arch not in AUTOML_DISABLED_NETWORKS:
         DIR_PATH = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         CSV_PATH = os.path.join(DIR_PATH, "specs_utils", "specs", network_arch, f"{network_arch} - train.csv")
@@ -52,18 +52,6 @@ def generate_hyperparams_to_search(job_context, automl_add_hyperparameters, auto
         data_frame = pd.read_csv(CSV_PATH)
 
         data_frame = data_frame[data_frame['value_type'].isin(_VALID_TYPES)]
-
-        if network_arch == "faster_rcnn":
-            automl_default_params = data_frame.loc[data_frame['automl_enabled'] == True]['parameter'].tolist()  # pylint: disable=C0121  # noqa: E712
-            if "model_config.input_image_config.size_height_width.height" in automl_default_params or "model_config.input_image_config.size_height_width.height" in automl_add_hyperparameters:
-                if "augmentation_config.preprocessing.output_image_height" in automl_remove_hyperparameters:
-                    automl_remove_hyperparameters.remove("augmentation_config.preprocessing.output_image_height")
-                data_frame.loc[data_frame.parameter.isin(['augmentation_config.preprocessing.output_image_height']), 'automl_enabled'] = True
-
-            if "model_config.input_image_config.size_height_width.width" in automl_default_params or "model_config.input_image_config.size_height_width.width" in automl_add_hyperparameters:
-                if "augmentation_config.preprocessing.output_image_width" in automl_remove_hyperparameters:
-                    automl_remove_hyperparameters.remove("augmentation_config.preprocessing.output_image_width")
-                data_frame.loc[data_frame.parameter.isin(['augmentation_config.preprocessing.output_image_width']), 'automl_enabled'] = True
 
         if not override_automl_disabled_params:
             data_frame = data_frame.loc[data_frame['automl_enabled'] != False]  # pylint: disable=C0121  # noqa: E712

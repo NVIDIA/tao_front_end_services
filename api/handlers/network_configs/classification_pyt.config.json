@@ -2,8 +2,9 @@
     "api_params": {
         "dataset_type":"image_classification",
         "actions": ["train","evaluate","export","gen_trt_engine","inference"],
-        "formats":["default"],
-        "image":"tlt-pytorch",
+        "formats":["classification_pyt"],
+        "accepted_ds_intents": ["training", "evaluation", "testing"],
+        "image":"PYTORCH",
         "spec_backend":"yaml",
         "classwise":"False",
         "actions_pipe":{
@@ -15,67 +16,43 @@
         }
     },
 
-    "cli_params": {
-        "train": {
-            "gpus": "from_csv",
-            "experiment_spec_file":"experiment_spec"
-        },
-        "evaluate": {
-            "experiment_spec_file":"experiment_spec"
-        },
-        "export": {
-            "experiment_spec_file":"experiment_spec"
-        },
-        "inference":{
-            "experiment_spec_file":"experiment_spec"
-        },
-        "gen_trt_engine": {
-            "experiment_spec_file":"experiment_spec"
-        }
-    },
-
     "spec_params":{
         "train": {
+            "results_dir":"output_dir",
             "train.num_gpus": "from_csv",
             "model.backbone.pretrained":"ptm_if_no_resume_model",
             "model.init_cfg.checkpoint":"ptm_if_no_resume_model",
-            "train.train_config.resume_training_checkpoint_path":"resume_model",
-            "results_dir":"output_dir"
+            "train.train_config.resume_training_checkpoint_path":"resume_model"
         },
         "evaluate":{
-            "evaluate.checkpoint":"parent_model",
-            "results_dir":"output_dir"
+            "results_dir":"output_dir",
+            "evaluate.checkpoint":"parent_model"
         },
         "export": {
+            "results_dir":"output_dir",
             "export.checkpoint":"parent_model",
-            "export.onnx_file":"create_onnx_file",
-            "results_dir":"output_dir"
+            "export.onnx_file":"create_onnx_file"
         },
         "inference": {
+            "results_dir":"output_dir",
             "inference.checkpoint":"parent_model",
-            "inference.trt_engine":"parent_model",
-            "results_dir":"output_dir"
+            "inference.trt_engine":"parent_model"
         },
         "gen_trt_engine": {
+            "results_dir":"output_dir",
             "gen_trt_engine.onnx_file":"parent_model",
-            "gen_trt_engine.trt_engine":"create_engine_file",
-            "results_dir":"output_dir"
+            "gen_trt_engine.trt_engine":"create_engine_file"
         }
     },
 
     "automl_spec_params":{
+        "results_dir":"automl_output_dir",
         "train.num_gpus":"from_csv",
         "model.backbone.pretrained":"automl_assign_ptm",
         "model.init_cfg.checkpoint":"automl_assign_ptm",
         "train.train_config.resume_training_checkpoint_path":"automl_resume_model",
         "train.train_config.checkpoint_config.interval":"assign_const_value,train.train_config.runner.max_epochs",
         "train.train_config.evaluation.interval":"assign_const_value,train.train_config.runner.max_epochs,train.train_config.checkpoint_config.interval",
-        "train.train_config.logging.interval":"assign_const_value",
-        "results_dir":"automl_output_dir"
-    },
-
-    "automl_cli_params":{
-        "gpus": "from_csv",
-        "experiment_spec_file":"automl_experiment_spec"
-    }
+        "train.train_config.logging.interval":"assign_const_value"
+    }    
 }

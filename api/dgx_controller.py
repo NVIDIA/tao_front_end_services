@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """DGX job's kubernetes controller"""
+import os
 import sys
 import json
 import time
@@ -22,8 +23,10 @@ from datetime import datetime
 from kubernetes import client, config
 
 from handlers.ngc_handler import send_ngc_api_request
+from job_utils.executor import _get_name_space
 
-config.load_incluster_config()
+if not os.getenv("CI_PROJECT_DIR", None) and os.getenv("DEV_MODE", "False").lower() not in ("true", "1"):
+    config.load_incluster_config()
 api_instance = client.CustomObjectsApi()
 job_tracker = {}
 logs_tracker = set([])
@@ -55,14 +58,12 @@ def create_dgx_job(dgx_cr):
     envs = dgx_cr["spec"].get("envs")
     runPolicy["totalRuntimeSeconds"] = 4 * 7 * 24 * 60 * 60
     resultContainerMountPoint = dgx_cr["spec"].get("resultContainerMountPoint")
-    workspaceMounts = dgx_cr["spec"].get("workspaceMounts")
 
     request_body = {"name": name,
                     "aceInstance": aceInstance,
                     "dockerImageName": dockerImageName.replace("nvcr.io/", ""),
                     "aceName": aceName,
                     "jobPriority": "HIGH",
-                    "workspaceMounts": workspaceMounts,
                     "command": command,
                     "runPolicy": runPolicy,
                     "envs": envs,
@@ -72,8 +73,11 @@ def create_dgx_job(dgx_cr):
     endpoint = f"https://api.ngc.nvidia.com/v2/org/{orgName}/team/{teamName}/jobs"
     job_create_response = send_ngc_api_request(user_id=user_id, endpoint=endpoint, requests_method="POST", request_body=json.dumps(request_body), refresh=False, json=True)
     if job_create_response.status_code not in [200, 415]:
-        print("Error while creating DGX job", job_create_response.json(), file=sys.stderr)
-        print("Custom resource values", request_body, file=sys.stderr)
+        print("Endpoint", endpoint, file=sys.stderr)
+        print("user_id", user_id, file=sys.stderr)
+        # print("Custom resource values", request_body, file=sys.stderr)
+        print("Response code", job_create_response.status_code, file=sys.stderr)
+        # print("Error while creating DGX job", job_create_response.text, file=sys.stderr)
         updated_cr_error = api_instance.patch_namespaced_custom_object(
             group="dgx-job-manager.nvidia.io",
             version="v1alpha1",
@@ -117,16 +121,48 @@ def delete_dgx_job(dgx_cr):
             print("job_delete_response", job_delete_response, job_delete_response.json(), file=sys.stderr)
 
 
-def print_job_logs(user_id, job_id, orgName, custom_resource_name):
-    """Print logs of DGX job on controller pod"""
+def get_job_logs(user_id, job_id, orgName):
+    """Get job logs from BCP"""
     job_logs_endpoint = f"https://api.ngc.nvidia.com/v2/org/{orgName}/resultsets/{job_id}/file/joblog.log"
     job_logs_response = send_ngc_api_request(user_id=user_id, endpoint=job_logs_endpoint, requests_method="GET", request_body={}, refresh=False)
-    job_logs = job_logs_response.text
-    current_time = datetime.utcnow()
-    formatted_time = current_time.strftime('%d/%b/%Y:%H:%M:%S')
-    for line in job_logs.split("\n"):
-        if line:
-            print(f"{formatted_time},{job_id},{custom_resource_name}: {line}", file=sys.stderr)
+    return job_logs_response
+
+
+def print_job_logs(user_id, job_id, orgName, custom_resource_name):
+    """Print logs of DGX job on controller pod"""
+    job_logs_response = get_job_logs(user_id, job_id, orgName)
+    if job_logs_response.status_code == 200:
+        job_logs = job_logs_response.text
+        current_time = datetime.utcnow()
+        formatted_time = current_time.strftime('%d/%b/%Y:%H:%M:%S')
+        for line in job_logs.split("\n"):
+            if line:
+                print(f"{formatted_time},{job_id},{custom_resource_name}: {line}", file=sys.stderr)
+
+
+def overwrite_job_logs_from_bcp(logfile, job_name):
+    """Get job logs from BCP and overwrite it with existing logs"""
+    print("Over-writing job logs from BCP to local", file=sys.stderr)
+    try:
+        name_space = _get_name_space()
+        crd_group = 'dgx-job-manager.nvidia.io'
+        crd_version = 'v1alpha1'
+        crd_plural = 'dgxjobs'
+        name = job_name + "-dgx"
+        dgxjob_api_response = api_instance.get_namespaced_custom_object(crd_group, crd_version, name_space, crd_plural, name)
+        user_id = dgxjob_api_response.get("spec", {}).get("user_id", "")
+        job_id = dgxjob_api_response.get("spec", {}).get("job_id", "")
+        orgName = dgxjob_api_response.get("spec", {}).get("orgName", "")
+        job_logs_response = get_job_logs(user_id, job_id, orgName)
+        if job_logs_response.status_code == 200:
+            print("Over-writing response successfull", file=sys.stderr)
+            job_logs = job_logs_response.text
+            with open(logfile, "w", encoding='utf-8') as f:
+                f.write(job_logs)
+        else:
+            print("Unable to over-write job logs", job_logs_response.status_code, file=sys.stderr)
+    except Exception as e:
+        print("Unable to over-write job logs", e, file=sys.stderr)
 
 
 def update_status(job_tracker, logs_tracker):

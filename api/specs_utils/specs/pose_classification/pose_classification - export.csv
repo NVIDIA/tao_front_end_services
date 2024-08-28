@@ -11,8 +11,6 @@ model.graph_strategy,Graph Strategy,ordered,"The strategy of the graph for model
 model.edge_importance_weighting,Edge Importance Weighting,bool,Specifies whether to enable edge importance weighting,TRUE,,,,,,,,FALSE,,,
 dataset,Dataset Config,collection,The configuration for the dataset,,,,,,,,,FALSE,,,
 dataset.num_classes,Number of Classes,int,The number of action classes,5,,0,,,,,,FALSE,,,
-dataset.label_map_kinetics,Label Map,collection,Map from labels to IDs,"{""front_raises"": 0,""pull_ups"": 1,""clean_and_jerk"": 2,""presenting_weather_forecast"": 3,""deadlifting"": 4}",,,,,,,,FALSE,,,
-dataset.label_map_nvidia,Label Map,collection,Map from labels to IDs,"{""sitting_down"": 0,""getting_up"": 1,""sitting"": 2,""standing"": 3,""walking"": 4,""jumping"": 5}",,,,,,,,FALSE,,,
 dataset.batch_size,Batch Size,int,The batch size for training and validation,16,,0,,,,,,FALSE,,,
 dataset.num_workers,Workers,int,The number of parallel workers processing data,1,,0,,,,,,FALSE,,,
 export,Exporting Config,collection,The configuration for the exporting process,,,,,,,,,FALSE,,,

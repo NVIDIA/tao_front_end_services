@@ -30,3 +30,5 @@ pydicom==2.4.3
 timeloop==1.0.2
 apache-libcloud==3.8.0
 pycryptodome==3.19.0
+pyarmor==8.5.8
+requests_toolbelt==1.0.0

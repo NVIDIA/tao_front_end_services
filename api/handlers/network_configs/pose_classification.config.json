@@ -3,7 +3,8 @@
         "dataset_type":"pose_classification",
         "actions": ["dataset_convert","train","evaluate","export","inference"],
         "formats":["default"],
-        "image":"tlt-pytorch",
+        "accepted_ds_intents": ["training"],
+        "image":"PYTORCH",
         "spec_backend":"yaml",
         "classwise":"False",
         "actions_pipe":{
@@ -15,28 +16,10 @@
         }
     },
 
-    "cli_params": {
-        "dataset_convert": {
-            "experiment_spec_file":"experiment_spec"
-        },
-        "train": {
-            "experiment_spec_file":"experiment_spec"
-        },
-        "evaluate": {
-            "experiment_spec_file":"experiment_spec"
-        },
-        "inference":{
-            "experiment_spec_file":"experiment_spec"
-        },
-        "export": {
-            "experiment_spec_file":"experiment_spec"
-        }
-    },
-
     "spec_params":{
         "dataset_convert":{
-            "encryption_key":"key",
-            "results_dir":"pose_classification_ds_convert_op_dir"
+            "results_dir":"output_dir",
+            "encryption_key":"key"
         },
         "train":{
             "results_dir":"output_dir",
@@ -58,24 +41,20 @@
             "inference.output_file":"create_inference_result_file_pose"
         },
         "export":{
+            "results_dir":"output_dir",
             "export.checkpoint":"parent_model",
             "export.onnx_file":"create_onnx_file",
-            "encryption_key":"key",
-            "results_dir":"output_dir"
+            "encryption_key":"key"
         }
     },
 
     "automl_spec_params":{
+        "results_dir":"automl_output_dir",
         "model.pretrained_model_path":"automl_assign_ptm",
         "train.resume_training_checkpoint_path":"automl_resume_model",
         "train.checkpoint_interval":"assign_const_value,train.num_epochs",
         "train.gpu_ids": "from_csv",
         "train.num_gpus": "from_csv",
-        "encryption_key":"key",
-        "results_dir":"automl_output_dir"
-    },
-
-    "automl_cli_params":{
-        "experiment_spec_file":"automl_experiment_spec"
+        "encryption_key":"key"
     }
 }

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Triton Inference Service handler modules"""
+import os
 import sys
 
 from handlers.docker_images import DOCKER_IMAGE_MAPPER
@@ -33,13 +34,15 @@ class TISHandler:
     """
 
     @staticmethod
-    def start(user_id, model_id, handler_metadata, replicas=1):
+    def start(org_name, model_id, handler_metadata, model_name, replicas=1):
         """Starts a Triton Inference Service job by running tis_start.py file"""
         print(f"Starting deploy triton inference server {model_id}", file=sys.stderr)
-        model_repo = get_model_bundle_root(user_id, model_id, ngc_runner_fetch=False)
+        model_repo = get_model_bundle_root(org_name, model_id)
+        bundle_requirements_file = os.path.join(model_repo, model_name, "requirements.txt")
         # TODO: can leverage the shared pv to print logs inside the triton server.
         # https://gitlab-master.nvidia.com/dlmed/medical-service/-/merge_requests/71#note_17855255
-        run_command = f"umask 0 && tritonserver --model-repository={model_repo} --model-control-mode=explicit --load-model=*"
+        pre_command = f"umask 0 && pip install -r {bundle_requirements_file}" if os.path.exists(bundle_requirements_file) else "umask 0"
+        run_command = f"{pre_command} && /opt/tritonserver/bin/tritonserver --model-repository={model_repo} --model-control-mode=explicit --load-model=*"
         # ports for http, grpc and metrics
         ports = (8000, 8001, 8002)
         jobDriver.create_triton_deployment(model_id, image, run_command, replicas=replicas, num_gpu=1, ports=ports)

@@ -17,8 +17,11 @@ import os
 import math
 import glob
 import datetime
-from kubernetes import client, config
 import time
+from kubernetes import client, config
+
+from utils import safe_load_file
+from handlers.stateless_handlers import get_jobs_root
 
 
 def fix_input_dimension(dimension_value, factor=32):
@@ -92,7 +95,7 @@ def wait_for_job_completion(job_id):
     config.load_incluster_config()
     while True:
         dgx_active_jobs = []
-        if os.getenv("NGC_RUNNER", "") == "True":
+        if os.getenv("BACKEND", "") in ("BCP", "NVCF"):
             custom_api = client.CustomObjectsApi()
             crd_group = 'dgx-job-manager.nvidia.io'
             crd_version = 'v1alpha1'
@@ -118,10 +121,32 @@ def delete_lingering_checkpoints(epoch_number, path):
                 os.remove(file_name)
 
 
+def merge_normal_and_automl_job_meta(user_id, org_name, job_id, job_meta):
+    """Merge jobs_metadata.json and automl_metadata.json"""
+    root = os.path.join(get_jobs_root(user_id, org_name), job_id)
+    json_file = os.path.join(root, "automl_metadata.json")
+
+    stats = safe_load_file(json_file)
+    if not stats:
+        stats["message"] = "Stats will be updated in a few seconds"
+
+    if "result" not in job_meta:
+        job_meta["result"] = {}
+    if "stats" not in job_meta["result"]:
+        job_meta["result"]["stats"] = []
+    if "automl_result" not in job_meta["result"]:
+        job_meta["result"]["automl_result"] = []
+    for key, value in stats.items():
+        if "best_" in key:
+            job_meta["result"]["automl_result"].append({"metric": key, "value": value})
+        else:
+            job_meta["result"]["stats"].append({"metric": key, "value": str(value)})
+
+
 class Recommendation:
     """Recommendation class for AutoML recommendations"""
 
-    def __init__(self, identifier, specs):
+    def __init__(self, identifier, specs, metric):
         """Initialize the Recommendation class
         Args:
             identity: the id of the recommendation
@@ -137,6 +162,7 @@ class Recommendation:
         self.status = JobStates.pending
         self.result = 0.0
         self.best_epoch_number = ""
+        self.metric = metric
 
     def items(self):
         """Returns specs.items"""
@@ -185,8 +211,11 @@ class JobStates():
     """Various states of an automl job"""
 
     pending = "pending"
+    started = "started"
     running = "running"
     success = "success"
     failure = "failure"
     error = "error"  # alias for failure
     done = "done"  # alias for success
+    canceled = "canceled"
+    canceling = "canceling"

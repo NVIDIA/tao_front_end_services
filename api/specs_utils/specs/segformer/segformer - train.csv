@@ -1,5 +1,4 @@
 parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,regex,popular,automl_enabled,math_cond,parent_param,depends_on
-gpus,number of gpus,integer,,1,,,,,,,,FALSE,,,
 version,Schema Version,const,The version of this schema,1,,,,,,,,FALSE,,,
 results_dir,,hidden,,,,,,,,,,FALSE,,,
 encryption_key,,hidden,,,,,,,,,,FALSE,,,
@@ -44,10 +43,10 @@ train.lr_config,,,,,,,,,,,,FALSE,,,
 train.lr_config.power,poly_power,,,,,0,,,,,,,,,
 train.lr_config.min_lr,poly_min_lr,,,,,0,1,,,,,,,,
 train.num_gpus,number of gpus,integer,,1,,,,,,,,FALSE,,,
-train.checkpoint_interval,checkpoint interval,integer,,50,,,,,,,,FALSE,,,
+train.checkpoint_interval,checkpoint interval,integer,,500,,,,,,,,FALSE,,,
 train.validate,validate,bool,,TRUE,,,,,,,,FALSE,,,
-train.validation_interval,validation interval,integer,,50,,50,,,,,,FALSE,,,< max_iters
-train.logging_interval,logging interval,integer,,50,,,,,,,,FALSE,,,
+train.validation_interval,validation interval,integer,,500,,,,,,,,FALSE,,,< max_iters
+train.logging_interval,logging interval,integer,,500,,,,,,,,FALSE,,,
 train.max_iters,runner max_iters,integer,,1000,,1000,inf,,,,,FALSE,,,
 train.resume_training_checkpoint_path,resume_training_checkpoint_path,hidden,,,,,,,,,,FALSE,,,
 train.trainer.find_unused_parameters,,bool,,TRUE,,,,,,,,FALSE,,,

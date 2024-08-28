@@ -1,5 +1,4 @@
 parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,regex,popular,automl_enabled,math_cond,parent_param,depends_on
-gpus,,int,,1,,,,,,,,FALSE,,,
 results_dir,,hidden,,,,,,,,,,FALSE,,,
 encryption_key,Encode key,hidden,,,,,,,,,,FALSE,,,
 train,,collection,,,,,,,,,,FALSE,,,
@@ -15,7 +14,7 @@ train.lr_schedule.learning_rate,maximum learning rate,float,The maximum learning
 train.lr_schedule.annealing_epoch,,int,,5,,,,,,,,FALSE,,,<= train.num_epochs
 train.num_examples_per_epoch,number of images per epoch per gpu,integer,Total number of images in the training set divided by the number of GPUs,120000,,1,inf,,,,,FALSE,,,
 train.batch_size,training batch size,integer,"The batch size for each GPU,so the effective batch size is batch_size_per_gpu * num_gpus.",8,,1,inf,,,,,,,,
-train.num_epochs,number of epochs,integer,The number of epochs to train the network,20,,1,inf,,,,,FALSE,,,
+train.num_epochs,number of epochs,integer,The number of epochs to train the network,80,,1,inf,,,,,FALSE,,,
 train.checkpoint,path to pretrained model,hidden,"The path to the pretrained model,if any",,,,,,,,,FALSE,,,
 train.random_seed,random seed,integer,The random seed,42,,1,inf,,,,,FALSE,,,
 train.l1_weight_decay,L1 weight decay,float,L1 weight decay,0,,0,1,,,,,,,,
@@ -25,7 +24,7 @@ train.pruned_model_path,path to pruned model,hidden,"The path to a TAO pruned mo
 train.moving_average_decay,moving average decay,float,Moving average decay,0.9999,,0,1,,,,,TRUE,,,
 train.clip_gradients_norm,clip gradient by norm,float,Clip gradients by the norm value,10,,0,inf,,,,,,,,
 train.skip_checkpoint_variables,skip checkpoint variables,string,"If specified,the weights of the layers with matching regular expressions will not be loaded. This is especially helpful for transfer learning.",-predict*,,,,,,,,,,,
-train.checkpoint_interval,checkpoint period,integer,The number of training epochs that should run per model checkpoint/validation,5,,1,inf,,,,,FALSE,,,<= train.num_epochs
+train.checkpoint_interval,checkpoint period,integer,The number of training epochs that should run per model checkpoint/validation,10,,1,inf,,,,,FALSE,,,<= train.num_epochs
 train.image_preview,,bool,,FALSE,,,,,,,,FALSE,,,
 train.qat,,bool,,FALSE,,,,,,,,FALSE,,,
 train.label_smoothing,,float,,0,,0,1,,,,,,,,

@@ -20,7 +20,7 @@ import math
 from automl.utils import ResumeRecommendation, JobStates, get_valid_range, clamp_value, report_healthy
 from automl.automl_algorithm_base import AutoMLAlgorithmBase
 from handlers.utilities import get_train_spec, get_flatten_specs
-from handlers.stateless_handlers import safe_load_file, safe_dump_file
+from utils import safe_load_file, safe_dump_file
 
 np.random.seed(95051)
 
@@ -71,7 +71,7 @@ class HyperBand(AutoMLAlgorithmBase):
 
     def override_num_epochs(self, num_epochs):
         """Override num epochs parameter in train spec file"""
-        spec = get_train_spec(self.job_context, self.handler_root)
+        spec = get_train_spec(self.job_context, os.path.join(self.handler_root, "specs"))
         for key1 in spec:
             if key1 in ("training_config", "train_config", "train"):
                 for key2 in spec[key1]:

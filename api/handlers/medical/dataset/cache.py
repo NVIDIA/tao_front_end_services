@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MEDICAL Cache API module"""
+"""MONAI Cache API module"""
 import json
 import logging
 import os
@@ -20,7 +20,7 @@ import sys
 import shutil
 import tempfile
 import time
-from typing import Dict
+from typing import Dict, List
 from filelock import FileLock
 
 logger = logging.getLogger(__name__)
@@ -122,11 +122,12 @@ class LocalCache(dict):
                     except json.JSONDecodeError as e:
                         # Handle invalid JSON
                         print(f"Error parsing JSON: {e}", file=sys.stderr)
-
-        if cache_info and not os.path.exists(cache_info.image):
-            logger.info(f"Dangling session-id: {cache_id} (will be removed)")
-            self.remove_cache(cache_id)
-            cache_info = None
+        if cache_info:
+            cache_info_image_path = cache_info.image[0] if isinstance(cache_info.image, list) else cache_info.image
+            if not os.path.exists(cache_info_image_path):
+                logger.info(f"Dangling session-id: {cache_id} (will be removed)")
+                self.remove_cache(cache_id)
+                cache_info = None
 
         if cache_info and update_ts:
             cache_info.last_access_ts = int(time.time())
@@ -141,23 +142,29 @@ class LocalCache(dict):
         path = os.path.join(self.store_path, cache_id)
         shutil.rmtree(path, ignore_errors=True)
 
-    def add_cache(self, cache_id, data_file: str, expiry: int = 0, uncompress: bool = False):
+    def add_cache(self, cache_id, data_file: str | List, expiry: int = 0, uncompress: bool = False):
         """Add cached item"""
         start = time.time()
         logger.debug(f"Load Data from: {data_file}")
+        if isinstance(data_file, str):
+            if os.path.isdir(data_file):
+                image_path = data_file
+                logger.debug(f"Input Dir (Multiple Input): {image_path}")
+            else:
+                image_path = data_file
+                logger.debug(f"Input File (Single): {image_path}")
 
-        if os.path.isdir(data_file):
-            image_path = data_file
-            logger.debug(f"Input Dir (Multiple Input): {image_path}")
+                if uncompress:
+                    with tempfile.TemporaryDirectory() as tmp_folder:
+                        logger.debug(f"UnArchive: {image_path} to {tmp_folder}")
+                        shutil.unpack_archive(data_file, tmp_folder)
+                        image_path = tmp_folder
+
         else:
-            image_path = data_file
-            logger.debug(f"Input File (Single): {image_path}")
-
-            if uncompress:
-                with tempfile.TemporaryDirectory() as tmp_folder:
-                    logger.debug(f"UnArchive: {image_path} to {tmp_folder}")
-                    shutil.unpack_archive(data_file, tmp_folder)
-                    image_path = tmp_folder
+            # example:
+            # data_file = ['/image_path/image1.nii', '/image_path/image2.nii', ...]
+            image_path = os.path.dirname(data_file[0])
+            logger.debug(f"Input List: {data_file}")
 
         path = os.path.join(self.store_path, cache_id)
         expiry = expiry if expiry > 0 else self.expiry
@@ -175,7 +182,7 @@ class LocalCache(dict):
         cache_info = CacheInfo()
         cache_info.name = cache_id
         cache_info.path = path
-        cache_info.image = image_file
+        cache_info.image = image_file if isinstance(data_file, str) else data_file
         cache_info.meta = meta
         cache_info.create_ts = int(time.time())
         cache_info.last_access_ts = int(time.time())

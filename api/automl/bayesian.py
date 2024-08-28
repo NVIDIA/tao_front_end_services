@@ -23,7 +23,7 @@ from scipy.optimize import minimize
 from automl.utils import JobStates, get_valid_range, clamp_value, report_healthy
 from automl.automl_algorithm_base import AutoMLAlgorithmBase
 from handlers.utilities import get_total_epochs, get_flatten_specs
-from handlers.stateless_handlers import safe_load_file, safe_dump_file
+from utils import safe_load_file, safe_dump_file
 
 np.random.seed(95051)
 
@@ -57,7 +57,7 @@ class Bayesian(AutoMLAlgorithmBase):
         self.xi = 0.01
         self.num_restarts = 5
 
-        self.num_epochs_per_experiment = get_total_epochs(job_context, self.handler_root)
+        self.num_epochs_per_experiment = get_total_epochs(job_context, os.path.join(self.handler_root, "specs"))
 
     def generate_automl_param_rec_value(self, parameter_config, suggestion):
         """Convert 0 to 1 GP prediction into a possible value"""
@@ -112,7 +112,8 @@ class Bayesian(AutoMLAlgorithmBase):
         bayesian.ys = ys
 
         len_y = len(ys)
-        bayesian.gp.fit(np.array(Xs[:len_y]), np.array(ys))
+        if Xs and ys:
+            bayesian.gp.fit(np.array(Xs[:len_y]), np.array(ys))
 
         return bayesian
 

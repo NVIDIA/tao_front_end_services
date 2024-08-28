@@ -9,7 +9,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit 1
 fi
 
-export NV_NVTL_API_TOP="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+export NV_TAO_API_TOP="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 
 # Checks if 'i' is included in $-, if yes -> interactive
 function _check_shell_is_interactive() {
@@ -28,7 +28,7 @@ TAO api build environment set up.
 
 The following environment variables have been set:
 
-  NV_NVTL_API_TOP       $NV_NVTL_API_TOP
+  NV_TAO_API_TOP       $NV_TAO_API_TOP
 
 EOF
     fi

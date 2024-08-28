@@ -3,7 +3,8 @@
         "dataset_type":"pointpillars",
         "actions": ["dataset_convert","train","prune","evaluate","retrain","export","inference"],
         "formats":["default"],
-        "image":"tlt-pytorch",
+        "accepted_ds_intents": ["training"],
+        "image":"PYTORCH",
         "spec_backend":"yaml",
         "classwise":"False",
         "actions_pipe":{
@@ -19,80 +20,68 @@
 
     "cli_params": {
         "dataset_convert": {
-            "experiment_spec_file":"experiment_spec"
         },
         "train": {
-            "experiment_spec_file":"experiment_spec",
-            "gpus":"from_csv",
-            "key":"key"
         },
         "evaluate": {
-            "experiment_spec_file":"experiment_spec",
-            "key":"key"
         },
         "prune": {
-            "experiment_spec_file":"experiment_spec",
-            "key":"key",
-            "pruning_thresh":"from_csv"
         },
         "retrain": {
-            "experiment_spec_file":"experiment_spec",
-            "gpus":"from_csv",
-            "key":"key"
         },
         "inference":{
-            "experiment_spec_file":"experiment_spec",
-            "key":"key"
         },
         "export": {
-            "experiment_spec_file":"experiment_spec",
-            "key":"key",
-            "save_engine":"create_engine_file"
         }
     },
 
     "spec_params":{
-        "dataset_convert":{
+        "dataset_convert": {
             "results_dir":"output_dir"
         },
         "train":{
+            "key":"key",
+            "train.num_gpus":"from_csv",
             "results_dir":"output_dir",
             "train.resume_training_checkpoint_path":"resume_model",
             "model.pretrained_model_path":"ptm_if_no_resume_model"
         },
         "evaluate":{
+            "key":"key",
             "results_dir":"output_dir",
             "evaluate.checkpoint":"parent_model"
         },
         "prune":{
-            "prune.model":"parent_model",
-            "results_dir":"output_dir"
+            "key":"key",
+            "results_dir":"output_dir",
+            "prune.model":"parent_model"
         },
         "inference":{
+            "key":"key",
             "results_dir":"output_dir",
             "inference.checkpoint":"parent_model"
         },
         "retrain":{
+            "train.num_gpus":"from_csv",
+            "key":"key",
             "results_dir":"output_dir",
             "train.pruned_model_path":"parent_model"
         },
         "export":{
+            "key":"key",
+            "results_dir":"output_dir",
+            "export.save_engine":"create_engine_file",
             "export.checkpoint":"parent_model",
-            "export.onnx_file":"create_onnx_file",
-            "results_dir":"output_dir"
+            "export.onnx_file":"create_onnx_file"
         }
     },
 
     "automl_spec_params":{
-        "model.pretrained_model_path":"automl_assign_ptm",
+        "key":"key",
+        "train.num_gpus":"from_csv",
+        "results_dir":"automl_output_dir",
         "train.resume_training_checkpoint_path":"automl_resume_model",
-        "train.checkpoint_interval":"assign_const_value,train.num_epochs",
-        "results_dir":"automl_output_dir"
-    },
-    
-    "automl_cli_params":{
-        "experiment_spec_file":"automl_experiment_spec",
-        "gpus":"from_csv",
-        "key":"key"
+        "model.pretrained_model_path":"automl_assign_ptm",
+        "train.checkpoint_interval":"assign_const_value,train.num_epochs"
     }
 }

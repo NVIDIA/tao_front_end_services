@@ -23,6 +23,7 @@ def apply(args, data):
     filter_arch = args.get('network_arch')
     filter_read_only = args.get('read_only')
     filter_format = args.get('format')
+    filter_tag = args.get('tag')
 
     if filter_name is not None:
         if filter_name.startswith('!'):
@@ -52,6 +53,13 @@ def apply(args, data):
             data = list(filter(lambda d: d.get('format') != filter_format, data))
         else:
             data = list(filter(lambda d: d.get('format') == filter_format, data))
+
+    if filter_tag is not None:
+        if filter_tag.startswith('!'):
+            filter_tag = filter_tag[1:]
+            data = list(filter(lambda d: filter_tag not in d.get('tags', []), data))
+        else:
+            data = list(filter(lambda d: filter_tag in d.get('tags', []), data))
 
     if filter_sort == 'name-ascending':
         data = sorted(data, key=lambda d: '' + d.get('name') + ':' + d.get('version'), reverse=False)

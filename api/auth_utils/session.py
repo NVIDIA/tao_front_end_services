@@ -14,11 +14,12 @@
 
 """Authentication utils session modules"""
 import os
-import json
 import glob
 import functools
 import threading
 from datetime import datetime
+
+from utils import load_file, safe_dump_file
 
 __SESSION_EXPIRY_HOURS__ = 24
 
@@ -35,18 +36,20 @@ def synchronized(wrapped):
 
 
 @synchronized
-def set(user_id, token, extra_user_metadata):
+def set(user_id, org_name, token, extra_user_metadata):
     """Save session in file"""
     session = {'id': user_id}
     if extra_user_metadata:
         session.update(extra_user_metadata)
-    filename = os.path.join(os.path.sep, 'shared', 'users', user_id, "metadata.json")
+    user_folder = os.path.join(os.path.sep, 'shared', 'orgs', org_name, 'users', user_id)
+    if not os.path.exists(user_folder):
+        os.makedirs(user_folder)
+    filename = os.path.join(user_folder, "metadata_token.json")
     if os.path.exists(filename):
-        with open(filename, "r", encoding='utf-8') as infile:
-            tmp_session = json.load(infile)
-            if tmp_session:
-                tmp_session.update(session)
-                session = tmp_session
+        tmp_session = load_file(filename)
+        if tmp_session:
+            tmp_session.update(session)
+            session = tmp_session
 
     token_present = False
     for idx, token_info in enumerate(session.get("token_info", [])):
@@ -61,25 +64,25 @@ def set(user_id, token, extra_user_metadata):
                                       "created_on": datetime.now().isoformat(),
                                       "last_modified": datetime.now().isoformat(),
                                       "timestamp": datetime.timestamp(datetime.now())})
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, "w+", encoding='utf-8') as outfile:
-        session['last_modified'] = datetime.now().isoformat()
-        session['timestamp'] = datetime.timestamp(datetime.now())
-        json.dump(session, outfile, indent=4)
+    session['org_name'] = org_name
+    session['last_modified'] = datetime.now().isoformat()
+    session['timestamp'] = datetime.timestamp(datetime.now())
+    safe_dump_file(filename, session)
     return session
 
 
 @synchronized
-def get(token):
+def get(token, org_name):
     """Load session from file"""
     session = {}
-    users_root = os.path.join(os.path.sep, 'shared', 'users')
-    user_roots = glob.glob(users_root + os.path.sep + "**" + os.path.sep)
+    users_root = os.path.join(os.path.sep, 'shared', 'orgs', org_name)
+    # Only metadata_token.json under users/<user_id>/, instead of sub-directories
+    user_roots = glob.glob(os.path.join(users_root, "users", "**"), recursive=False)
     for user_root in user_roots:
         try:
-            filepath = os.path.join(user_root, "metadata.json")
-            with open(filepath, "r", encoding='utf-8') as infile:
-                tmp_session = json.load(infile)
+            filepath = os.path.join(user_root, "metadata_token.json")
+            if os.path.exists(filepath):
+                tmp_session = load_file(filepath)
                 for token_info in tmp_session.get('token_info', []):
                     if token_info.get('token', 'invalid') == token:
                         dt_session = datetime.fromtimestamp(tmp_session.get('timestamp', 0))

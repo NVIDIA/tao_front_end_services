@@ -60,6 +60,10 @@ def on_new_automl_job(automl_context, recommendation):
 
     job = {
         'user_id': automl_context.user_id,
+        'org_name': automl_context.org_name,
+        'num_gpu': automl_context.num_gpu,
+        'platform': automl_context.platform,
+        'kind': "experiment",
         'id': automl_context.id,
         'parent_id': None,
         'priority': 2,
@@ -75,11 +79,11 @@ def on_new_automl_job(automl_context, recommendation):
     print("Recommendation submitted to workflow", file=sys.stderr)
 
 
-def on_delete_automl_job(user_id, handler_id, job_id):
+def on_delete_automl_job(org_name, handler_id, job_id, kind=""):
     """Dequeue the automl job"""
     # AutoML handler stop would handle this
     # automl_context is same as JobContext that was created for AutoML job
-    Workflow.dequeue(user_id, handler_id, job_id)
+    Workflow.dequeue(org_name, handler_id, job_id, kind)
 
 
 def on_cancel_automl_job(job_id):

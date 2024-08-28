@@ -13,10 +13,10 @@
 # limitations under the License.
 
 """Launcher ."""
-"""NVTL-Client SDK version"""
+"""TAO-Client SDK version"""
 
 MAJOR = "5"
-MINOR = "2.0"
+MINOR = "5"
 PATCH = "1"
 PRE_RELEASE = ''
 
@@ -51,9 +51,9 @@ __version__ = '.'.join(map(str, VERSION[:3])) + ''.join(VERSION[3:])
 __format_version__ = 2
 
 # Other package info.
-__package_name__ = "nvidia-transfer-learning-client"
-__description__ = "NVIDIA's package for using NVTL-REST-API via NVTL-Client."
-__keywords__ = "nvidia, nvtl, api"
+__package_name__ = "nvidia-tao-client"
+__description__ = "NVIDIA's package for using TAO-REST-API via TAO-Client."
+__keywords__ = "nvidia, tao, api"
 
 __contact_names__ = "Varun Praveen"
 __contact_emails__ = "vpraveen@nvidia.com"

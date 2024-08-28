@@ -106,6 +106,21 @@ Where:
 - ngc-email is the email one used to sign in above
 - namespace is the Kubernetes namespace one uses for deployment, or “default”
 
+
+### BCP Cluster Secret to Submit job in BCP Cluster
+When ngcRunner is set to True, jobs are running in the Nvidia BCP cluster. In this example, one must set his ngc-api-key that can submit job to BCP cluster.
+```
+kubectl create secret docker-registry 'bcpclustersecret' --docker-server='nvcr.io' --docker-username='$oauthtoken' --docker-password='ngc-api-key' --docker-email='ngc-email' --namespace='default'
+```
+
+
+### Admin secret to update job status and logs
+In this example, one must set admin ngc-api-key that can callback from job containers to update status and logs.
+```
+kubectl create secret docker-registry 'adminclustersecret' --docker-server='nvcr.io' --docker-username='$oauthtoken' --docker-password='ngc-api-key' --docker-email='ngc-email' --namespace='default'
+```
+
+
 ### TLS Secret/certificate
 To create your certificate, please refer to: [tls-certificates](https://kubernetes.github.io/ingress-nginx/examples/PREREQUISITES/#tls-certificates)
 
@@ -119,8 +134,9 @@ One must update the chart's values.yaml before deployment.
 If your cluster has no default Storage Provisioner, you would have to set StorageClassName to [for example] local-path.
 For HTTPS, you would have to set your host and tlsSecret.
 ```
-helm install nvtl-api chart/ --namespace default
+helm install tao-api chart/ --namespace default
 ```
 
 ## <a name='License'></a>License
 This project is licensed under the [Apache-2.0](./LICENSE) License.
+

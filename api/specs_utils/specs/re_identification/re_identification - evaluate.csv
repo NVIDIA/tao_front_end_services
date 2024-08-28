@@ -26,4 +26,4 @@ evaluate.output_sampled_matches_plot,Output Sampled Matches Plot,hidden,The path
 evaluate.output_cmc_curve_plot,Output CMC Curve Plot,hidden,The path to the plotted file of the CMC curve,,,,,,,,,FALSE,,,
 evaluate.test_dataset,Test Dataset,hidden,The path to the test data,,,,,,,,,FALSE,,,
 evaluate.query_dataset,Query Dataset,hidden,The path to the query data,,,,,,,,,FALSE,,,
-evaluate.gpu_id,GPU ID,int,The GPU ID,0,,,,,,,,FALSE,,,
+evaluate.gpu_ids,GPU ID,list,The GPU ID,"[0]",,,,,,,,FALSE,,,

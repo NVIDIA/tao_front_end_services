@@ -14,22 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Download metadata info for all base experiments supported"""
+"""Create metadata info for all base experiments supported"""
 import argparse
 import ast
 import csv
 import datetime
-import itertools
 import json
 import operator
 import os
 import uuid
-
 import requests
-from handlers import ngc_handler
-from handlers.utilities import read_network_config
-from handlers.stateless_handlers import safe_load_file, safe_dump_file, admin_uuid
+import traceback
+import io
+import zipfile
 from packaging import version
+
+from utils import read_network_config, get_admin_api_key, get_ngc_artifact_base_url, send_get_request_with_retry, safe_load_file, safe_dump_file
+from constants import TAO_NETWORKS
+
+base_exp_uuid = "00000000-0000-0000-0000-000000000000"
+
+DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "PROD")
+
+ngc_api_base_url = "https://api.ngc.nvidia.com/v2" if DEPLOYMENT_MODE == "PROD" else "https://api.stg.ngc.nvidia.com/v2"
 
 
 class BaseExperimentMetadata:
@@ -52,7 +59,7 @@ class BaseExperimentMetadata:
             override (bool, optional): Override existing base experiments. Defaults to False.
         """
         self.shared_folder_path = shared_folder_path
-        self.ngc_api_key = ngc_api_key or ngc_handler.get_admin_api_key()
+        self.ngc_api_key = ngc_api_key or get_admin_api_key()
         self.org_team_list = self.prepare_org_team(org_teams)
         self.override = override
         self.metadata: dict = {}
@@ -62,18 +69,14 @@ class BaseExperimentMetadata:
             raise ValueError("Cannot use both `--override` and `--dry-run` flags together!")
 
         # set default uuids
-        self.admin_uuid = uuid.UUID(admin_uuid)
-        self.ptm_uuid = uuid.UUID(admin_uuid)
+        self.base_exp_uuid = uuid.UUID(base_exp_uuid)
+        self.ptm_uuid = uuid.UUID(base_exp_uuid)
 
         # create rootdir and metadata file path
         self.rootdir = os.path.abspath(
-            os.path.join(self.shared_folder_path, "users", str(self.admin_uuid), "experiments", str(self.ptm_uuid))
+            os.path.join(self.shared_folder_path, "orgs", str(self.base_exp_uuid), "experiments", str(self.ptm_uuid))
         )
         self.metadata_file = os.path.join(self.rootdir, "ptm_metadatas.json")
-
-        # if on NGC workspace
-        if "shared" not in self.shared_folder_path:
-            ngc_handler.create_workspace(str(self.admin_uuid), "experiments", str(self.ptm_uuid))
 
         # create rootdir if it doesn't exist
         os.makedirs(self.rootdir, exist_ok=True)
@@ -93,7 +96,7 @@ class BaseExperimentMetadata:
         }
 
     def get_tao_version(self):
-        """Return current version of Nvidia Transfer Learning API."""
+        """Return current version of Nvidia TAO API."""
         version_locals = {}
         with open("version.py", "r", encoding="utf-8") as version_file:
             exec(version_file.read(), {}, version_locals)  # pylint: disable=W0122
@@ -121,7 +124,9 @@ class BaseExperimentMetadata:
     def get_ngc_token(self, org: str = "", team: str = ""):
         """Authenticate to NGC"""
         # Get the NGC login token
-        url = "https://authn.nvidia.com/token"
+        url = "https://stg.authn.nvidia.com/token"
+        if DEPLOYMENT_MODE == "PROD":
+            url = "https://authn.nvidia.com/token"
         params = {"service": "ngc", "scope": "group/ngc"}
         if org:
             params["scope"] = f"group/ngc:{org}"
@@ -130,7 +135,6 @@ class BaseExperimentMetadata:
         headers = {"Accept": "application/json"}
         auth = ("$oauthtoken", self.ngc_api_key)
         response = requests.get(url, headers=headers, auth=auth, params=params)
-
         return response.json()["token"]
 
     def prepare_org_team(self, org_teams: str):
@@ -156,7 +160,7 @@ class BaseExperimentMetadata:
         print("--------------------------------------------------------")
         ngc_token = self.get_ngc_token()
         headers = {"Accept": "application/json", "Authorization": f"Bearer {ngc_token}"}
-        url = "https://api.ngc.nvidia.com/v2/orgs"
+        url = f"{ngc_api_base_url}/orgs"
         response = requests.get(url, headers=headers, params={"page-size": 1000})
         if response.status_code != 200:
             raise ValueError(response.json())
@@ -164,7 +168,7 @@ class BaseExperimentMetadata:
         org_teams = []
         # get team for each org
         for org in orgs:
-            url = f"https://api.ngc.nvidia.com/v2/org/{org}/teams"
+            url = f"{ngc_api_base_url}/org/{org}/teams"
             response = requests.get(url, headers=headers, params={"page-size": 1000})
             if response.status_code != 200:
                 print(response.json())
@@ -210,12 +214,13 @@ class BaseExperimentMetadata:
         ngc_token: str, org: str, team: str, model_name: str, model_version: str, file: str = ""
     ):
         """Get model info from NGC"""
+        url = ngc_api_base_url
         if team:
-            url = f"https://api.ngc.nvidia.com/v2/org/{org}/team/{team}/models/{model_name}/versions/{model_version}"
+            url += f"/org/{org}/team/{team}/models/{model_name}/versions/{model_version}"
         else:
-            url = f"https://api.ngc.nvidia.com/v2/org/{org}/models/{model_name}/versions/{model_version}"
+            url += f"/org/{org}/models/{model_name}/versions/{model_version}"
         if file:
-            url = f"{url}/files/{file}"
+            url += f"/files/{file}"
         headers = {"Accept": "application/json", "Authorization": f"Bearer {ngc_token}"}
         response = requests.get(url, headers=headers, params={"page-size": 1000})
         if response.status_code != 200:
@@ -223,17 +228,6 @@ class BaseExperimentMetadata:
                 f"Failed to get model info for {model_name}:{model_version} ({response.status_code} {response.reason})"
             )
         return response.json()
-
-    def get_additional_id_info(self, ngc_path: str, network_arch: str):
-        """Get additional id info for base experiments"""
-        if network_arch in "lprnet":
-            return ("us", "ch")
-        if network_arch in "action_recognition":
-            if ngc_path == "nvidia/tao/actionrecognitionnet:trainable_v1.0":
-                return ("3d", "2d")
-            if ngc_path == "nvidia/tao/actionrecognitionnet:trainable_v2.0":
-                return tuple(",".join(a) for a in itertools.product(("3d", "2d"), ("a100", "xavier")))
-        return [None]
 
     def load_base_experiments_from_csv(self) -> dict:
         """Get base experiments from CSV file"""
@@ -243,23 +237,24 @@ class BaseExperimentMetadata:
             next(reader)  # skip header
             for row in reader:
                 display_name, ngc_path, network_arch = row
-                self.add_experiment(base_experiments, display_name, ngc_path, network_arch)
+                org, team, _, _ = self.split_ngc_path(ngc_path)
+                ngc_token = self.get_ngc_token(org, team)
+                self.add_experiment(base_experiments, display_name, ngc_path, network_arch, ngc_token)
         return base_experiments
 
-    def add_experiment(self, base_experiments, display_name, ngc_path, network_arch):
+    def add_experiment(self, base_experiments, display_name, ngc_path, network_arch, ngc_token):
         """Add experiment to the base experiments lis with unique id"""
-        for additional_id_info in self.get_additional_id_info(ngc_path, network_arch):
-            hash_str = f"{ngc_path}:{network_arch}"
-            if additional_id_info:
-                hash_str += f":{additional_id_info}"
-            exp_id = str(uuid.uuid5(self.admin_uuid, hash_str))
-            base_experiments[exp_id] = {
-                "id": exp_id,
-                "name": display_name,
-                "ngc_path": ngc_path,
-                "network_arch": network_arch,
-                "additional_id_info": additional_id_info,
+        hash_str = f"{ngc_path}:{network_arch}"
+        exp_id = str(uuid.uuid5(self.base_exp_uuid, hash_str))
+        base_experiments[exp_id] = {
+            "id": exp_id,
+            "name": display_name,
+            "ngc_path": ngc_path,
+            "network_arch": network_arch,
+            "base_experiment_metadata": {
+                "spec_file_present": self.is_base_spec_file_present(ngc_path, exp_id, ngc_token)
             }
+        }
 
     def load_base_experiments_from_ngc(self, page_size: int = 1000) -> dict:
         """Get base experiments from NGC"""
@@ -268,7 +263,7 @@ class BaseExperimentMetadata:
             print(f"Querying base experiments from '{org}{'/' + team if team else ''}'")
             ngc_token = self.get_ngc_token(org, team)
             headers = {"Accept": "application/json", "Authorization": f"Bearer {ngc_token}"}
-            url = "https://api.ngc.nvidia.com/v2/search/resources/MODEL"
+            url = f"{ngc_api_base_url}/search/resources/MODEL"
 
             # Create the query to filter models and the required return fields
             query = f"resourceId:{org}/{team + '/' if team else ''}*"
@@ -317,11 +312,24 @@ class BaseExperimentMetadata:
                                                     print(f"{key_value} not loadable by `ast.literal_eval`.")
                                         for network_arch in endpoints:
                                             self.add_experiment(
-                                                base_experiments, model.get("displayName"), ngc_path, network_arch
+                                                base_experiments, model.get("displayName"), ngc_path, network_arch, ngc_token
                                             )
         return base_experiments
 
-    def extract_metadata(self, model_info, experiment_info, additional_metadata):
+    def is_base_spec_file_present(self, ngc_path, exp_id, ngc_token):
+        """Checks if base experiment has experiment.yaml file"""
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {ngc_token}"}
+        endpoint, model, version = get_ngc_artifact_base_url(ngc_path)
+        download_endpoint = f"{endpoint}/files/experiment.yaml/zip/download"
+        response = send_get_request_with_retry(download_endpoint, headers=headers)
+        if response.ok:
+            dest_path = f"{self.rootdir}/{exp_id}/{model}_v{version}"
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                z.extractall(dest_path)
+            return True
+        return False
+
+    def extract_metadata(self, model_info, experiment_info, additional_metadata, model_name):
         """Create metadata for the model"""
         if model_info is None:
             raise ValueError(f"Failed to get model info for {experiment_info['ngc_path']}")
@@ -361,6 +369,12 @@ class BaseExperimentMetadata:
                     # raise ValueError(f"Network architecture of `{endpoint}` is not supported by API!")
 
         api_params = read_network_config(network_arch)["api_params"]
+        accepted_ds_intents = api_params.get("accepted_ds_intents", [])
+        if "visual_changenet" in experiment_info["ngc_path"] and "segment" in experiment_info["ngc_path"]:
+            accepted_ds_intents = ["training"]
+        base_experiment_pull_complete = "starting"
+        if network_arch in TAO_NETWORKS:
+            base_experiment_pull_complete = "pull_complete"
         metadata = {
             "id": experiment_info["id"],
             "public": True,
@@ -370,24 +384,36 @@ class BaseExperimentMetadata:
             "eval_dataset": None,
             "calibration_dataset": None,
             "inference_dataset": None,
-            "additional_id_info": experiment_info.get("additional_id_info", None),
             "checkpoint_choose_method": "best_model",
             "checkpoint_epoch_number": {"id": 0},
             "logo": "https://www.nvidia.com",
             "network_arch": network_arch,
             "dataset_type": api_params["dataset_type"],
+            "dataset_formats": api_params.get("formats", read_network_config(api_params["dataset_type"]).get("api_params", {}).get("formats", None)),
+            "accepted_dataset_intents": accepted_ds_intents,
             "actions": api_params["actions"],
             "name": experiment_info["name"],
             "description": model_info["modelVersion"].get("description", "") or
                     model_info["model"].get("shortDescription", f"Base Experiment for {network_arch}"),
+            "model_description": model_info["model"].get("shortDescription", f"Base Experiment for {network_arch}"),
             "version": model_info["modelVersion"].get("versionId", ""),
             "created_on": model_info["modelVersion"].get("createdDate", datetime.datetime.now().isoformat()),
             "last_modified": model_info["model"].get("updatedDate", datetime.datetime.now().isoformat()),
             "ngc_path": experiment_info["ngc_path"],
             "realtime_infer_support": api_params.get("realtime_infer_support", False),
             "sha256_digest": attr.get("sha256_digest", {}),
-            "is_ptm_backbone": attr.get("is_backbone", True),
-            "base_experiment_pull_complete": "not_present",
+            "base_experiment_metadata": {
+                "is_backbone":  attr.get("is_backbone", True),
+                "is_trainable": attr.get("trainable", False),
+                "spec_file_present": experiment_info["base_experiment_metadata"]["spec_file_present"],
+                "task": attr.get("task", None),
+                "domain": attr.get("domain", None),
+                "backbone_type": attr.get("backbone_type", None),
+                "backbone_class": attr.get("backbone_class", None),
+                "license": attr.get("license", None),
+                "model_card_link": f"https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tao/models/{model_name}",
+            },
+            "base_experiment_pull_complete": base_experiment_pull_complete,
             "type": "medical" if network_arch.startswith("medical_") else "vision",
         }
         # some additional specific metadata
@@ -404,20 +430,21 @@ class BaseExperimentMetadata:
 
     def get_ngc_hosted_base_experiments(self):
         """Get base experiments hosted on NGC"""
-        ngc_token = self.get_ngc_token()
         model_info = {}
         valid_base_experiments = {}
+        ngc_base_experiments = self.load_base_experiments_from_ngc()
+        print("Loaded base experiments from NGC:", len(ngc_base_experiments))
         print("--------------------------------------------------------")
-        experiments_form_csv = self.load_base_experiments_from_csv()
-        print("Loaded base experiments from CSV", len(experiments_form_csv))
-        experiments_form_ngc = self.load_base_experiments_from_ngc()
-        print("Loaded base experiments from NGC:", len(experiments_form_ngc))
-        print("--------------------------------------------------------")
-        ngc_base_experiments = {**experiments_form_ngc, **experiments_form_csv}
+        if DEPLOYMENT_MODE == "PROD":
+            print("--------------------------------------------------------")
+            experiments_form_csv = self.load_base_experiments_from_csv()
+            print("Loaded base experiments from CSV", len(experiments_form_csv))
+            ngc_base_experiments = {**ngc_base_experiments, **experiments_form_csv}
 
         for exp_id, base_experiment in ngc_base_experiments.items():
             ngc_path = base_experiment["ngc_path"]
             org, team, model_name, model_version = self.split_ngc_path(ngc_path)
+            ngc_token = self.get_ngc_token(org, team)
             if (org, team) in self.org_team_list:
                 # Get ngc model metadata and cache it
                 try:
@@ -434,10 +461,11 @@ class BaseExperimentMetadata:
 
                     # Update metadata for each experiment
                     valid_base_experiments[exp_id] = self.extract_metadata(
-                        model_info[ngc_path], base_experiment, medical_metadata
+                        model_info[ngc_path], base_experiment, medical_metadata, model_name
                     )
                     print(f"Successfully created a base experiment for {ngc_path},{base_experiment['network_arch']}")
                 except ValueError as e:
+                    print(traceback.format_exc())
                     print(f"Failed to create a base experiment for for {ngc_path} >>> {e}")
                     continue
         return valid_base_experiments

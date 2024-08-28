@@ -13,16 +13,23 @@
 # limitations under the License.
 
 """Object storage client"""
+import json
 import os
 import sys
-import time
-import json
 import tempfile
-
-from libcloud.storage.types import Provider
-from libcloud.storage.providers import get_driver
+import time
 from urllib.parse import urlparse
+
+from libcloud.storage.providers import get_driver
+from libcloud.storage.types import Provider
+
 from .base import BaseEndpoint
+
+
+def get_manifest_name(url):
+    """Get the manifest name from a url."""
+    url_filename = os.path.basename(url)
+    return url_filename if url_filename.endswith(".json") else "manifest.json"
 
 
 class ObjectStorageClient:
@@ -30,11 +37,16 @@ class ObjectStorageClient:
     A client to get information from the object storage.
     """
 
-    def __init__(self, manifest_content):
+    def __init__(self, manifest_content, root_path_default=""):
         """
         Init the client with the content from manifest file.
+
+        Args:
+            manifest_content: the content of the manifest file.
+            root_path_default: the default root path of the object storage.
         """
         self.manifest_content = manifest_content
+        self.root_path_default = root_path_default
 
     def _retrieve_image(self, image_id):
         """
@@ -44,7 +56,7 @@ class ObjectStorageClient:
             if sample["image"].get("id") and image_id == sample["image"]["id"]:
                 return sample["image"]
 
-            if sample.get("label") and sample["label"].get("id") and image_id == sample["label"]["id"]:
+            if sample.get("label") and isinstance(sample["label"], dict) and sample["label"].get("id") and image_id == sample["label"]["id"]:
                 return sample["label"]
         return None
 
@@ -52,22 +64,79 @@ class ObjectStorageClient:
         """
         Get all valid samples from the manifest content."
         """
-        sample_list = self.manifest_content["data"]
+        sample_list = self.manifest_content.get("data", [])
         sample_list = [x for x in sample_list if x.get("image") and x["image"].get("path") and x["image"].get("id")]
         return sample_list
+
+    @staticmethod
+    def _retrieve_path(sample, key):
+        """
+        Retrieve the path of given key from a sample.
+
+        A sample is like:
+        {
+            "image": {
+                "path": [
+                    "imagesTr/spleen_19.nii.gz"
+                ],
+                "id": "722782b1-a9af-4c3c-8aa8-c88d3b34d934"
+            },
+            "label": {
+                "path": [
+                    "labelsTr/spleen_19.nii.gz"
+                ],
+                "id": "8fcd2cdf-c7f8-41e3-a5ba-57e2f8744298"
+            }
+        }
+        """
+        if not isinstance(sample, dict) or not sample.get(key, None):
+            return ""
+
+        key_dict = sample.get(key)
+        if not isinstance(key_dict, dict) or not key_dict.get("path", None):
+            return ""
+
+        path_value = key_dict.get("path")
+        if not isinstance(path_value, list) and not isinstance(path_value, str):
+            return ""
+
+        if path_value and isinstance(path_value, list):
+            return path_value[0]
+
+        if path_value and isinstance(path_value, str):
+            return path_value
+
+        return ""
+
+    def get_sample_paths(self, image_key="image", label_key="label"):
+        """
+        Get all image and label paths in the manifest file.
+        """
+        sample_list = self.manifest_content.get("data", None)
+        path_list = []
+        for sample in sample_list:
+            image_path = self._retrieve_path(sample, image_key)
+            label_path = self._retrieve_path(sample, label_key)
+            if image_path:
+                path_list.append(image_path)
+
+            if label_path:
+                path_list.append(label_path)
+
+        return path_list
 
     def get_root_path(self):
         """
         Get the url root path from manifest content.
         """
-        return self.manifest_content["root_path"]
+        return self.manifest_content.get("root_path", self.root_path_default)
 
     def get_image_path(self, image_id):
         """
         Get the path list of an image with given image_id.
         """
         sample_info = self._retrieve_image(image_id)
-        return sample_info["path"]
+        return sample_info.get("path", None)
 
 
 class ObjectStorageEndpoint(BaseEndpoint):
@@ -99,19 +168,25 @@ class ObjectStorageEndpoint(BaseEndpoint):
         # which is the link to manifest file.
         super().__init__(url, client_id, client_secret, filters)
         self.driver = None
-        self.container_name, self.prefix = self._parse_container_name(self.url)
+        self.container_name, self.prefix = self._parse_container_name(self.url)  # NOTE: prefix is the subfolder(s) in the container.
         self.download_retry_times = 3
-        # If the input url is https://myaccount.blob.core.windows.net/containername/mydataset/manifest.json,
-        # the manifest.json need to be removed to get the right prefix.
+        # The input url is one of these:
+        # - https://myaccount.blob.core.windows.net/containername/mydataset/manifest.json
+        # - https://myaccount.blob.core.windows.net/containername/mydataset/train_datalist.json
+        # - https://myaccount.blob.core.windows.net/containername/mydataset/
+        # the manifest JSON need to be removed to get the right prefix.
         if self.prefix is not None and self.prefix.endswith(".json"):
             self.prefix = os.path.dirname(self.prefix)
+        self.root_path_default = self.url if not self.url.endswith(".json") else os.path.dirname(self.url)
 
     def _check_connection(self, provider):
         """Check if a connection can be set with given provider."""
         try:
             Driver = get_driver(provider)
             driver = Driver(key=self.client_id, secret=self.client_secret)
-            driver.list_containers()
+            # The AWS S3 bucket has a more specific roles and the secret may not be able to list all containers.
+            container = driver.get_container(self.container_name)
+            container.list_objects()
         except Exception:
             return False
 
@@ -162,14 +237,59 @@ class ObjectStorageEndpoint(BaseEndpoint):
         Get a client to process the object storage info.
         """
         # Download the manifest file if there is no manifest client.
-        url_filename = os.path.basename(self.url)
-        manifest_url = os.path.join(self.url, "manifest.json") if not url_filename.endswith(".json") else self.url
+        _manifest_name = get_manifest_name(self.url)
+        manifest_url = (
+            os.path.join(self.url, _manifest_name)
+            if not self.url.endswith(".json")
+            else self.url
+        )
         with tempfile.TemporaryDirectory() as filepath:
-            manifest_name = os.path.join(filepath, "manifest.json")
+            manifest_name = os.path.join(filepath, _manifest_name)
             self._download_by_url(manifest_url, manifest_name)
             with open(manifest_name, "r", encoding="utf8") as fp:
                 manifest_content = json.load(fp)
-            return ObjectStorageClient(manifest_content)
+            return ObjectStorageClient(manifest_content, root_path_default=self.root_path_default)
+
+    def _get_all_objects(self):
+        """Get all objects in the cloud storage."""
+        object_set = {}
+        driver = self._get_driver()
+        if not driver:
+            return object_set
+
+        url = self.url if not self.url.endswith(".json") else os.path.dirname(self.url)
+        container = driver.get_container(self.container_name)
+        objs = container.list_objects(prefix=self.prefix)
+        object_set = {os.path.join(url, x.name.removeprefix(self.prefix).lstrip("/")) for x in objs}
+        return object_set
+
+    def _check_url(self):
+        """
+        Check if the url attribute is valild.
+        """
+        try:
+            self._get_client()
+        except:
+            return False
+        return True
+
+    def _check_manifest(self):
+        """
+        Check if the manifest content is correct.
+        """
+        manifest_client = self._get_client()
+        manifest_url_root = manifest_client.get_root_path()
+        sample_list = manifest_client.get_sample_list()
+        if not sample_list:
+            return False, "Must provide samples in the data dict of the manifest file."
+
+        paths_list = [os.path.join(manifest_url_root, x) for x in manifest_client.get_sample_paths()]
+        object_set = self._get_all_objects()
+        paths_exist = [x in object_set for x in paths_list]
+        if not all(paths_exist):
+            return False, "Some samples don't exist in the given object storage. Please check path correctness of the manifest file."
+
+        return True, None
 
     def _download_by_url(self, url, filename):
         """
@@ -193,12 +313,13 @@ class ObjectStorageEndpoint(BaseEndpoint):
         client = self._get_client()
         # Could be a list of dcm files or one file.
         image_path = client.get_image_path(id)
+        image_path = image_path if isinstance(image_path, list) else [image_path]
         root_path = client.get_root_path()
         image_urls = [os.path.join(root_path, x) for x in image_path]
         filenames = [os.path.join(filepath, os.path.basename(x)) for x in image_path]
         for image_url, filename in zip(image_urls, filenames):
             self._download_by_url(image_url, filename)
-        return filepath if len(filenames) > 1 else filenames[0]
+        return filenames if len(filenames) > 1 else filenames[0]
 
     def list_all(self):
         """
@@ -254,5 +375,14 @@ class ObjectStorageEndpoint(BaseEndpoint):
         """Check if this endpoint is valid."""
         driver = self._get_driver()
         if driver is None:
-            return False, f"Cannot get access to container {self.url}"
+            return False, f"Failed to connect to URL {self.url}. Please check the given url, id and secret."
+
+        url_valid = self._check_url()
+        if not url_valid:
+            return True, f"Please check if the url {self.url} is correct."
+
+        manifest_valid, msg = self._check_manifest()
+        if not manifest_valid:
+            return True, msg
+
         return True, None

@@ -24,7 +24,12 @@ from urllib.parse import urlparse
 
 import requests
 from filelock import FileLock
-from handlers.stateless_handlers import get_default_lock_file_path, get_handler_root, get_root
+from handlers.stateless_handlers import get_handler_root, get_root
+from utils import get_default_lock_file_path
+
+CUSTOMIZED_BUNDLE_URL_FILE = "url.json"
+CUSTOMIZED_BUNDLE_URL_KEY = "bundle_url"
+MEDICAL_SERVICE_SCRIPTS = "/medical_service_scripts"
 
 
 class DynamicSorter:
@@ -202,17 +207,17 @@ class CapGpuUsage:
     MAX_GPU_PER_USER_REALTIME_INFER = int(os.environ.get("MAX_GPU_PER_USER_REALTIME_INFER", 2))
 
     @staticmethod
-    def schedule(user_id, num_gpus):
+    def schedule(org_name, num_gpus):
         """
         Schedule the GPU usage for a user.
         Args:
-            user_id: the user id
+            org_name: name of the user/org
             num_gpus: the number of GPUs to be used
         """
         if CapGpuUsage.MAX_GPU_PER_USER_REALTIME_INFER <= 0:
             return True, ""
 
-        user_config_file = get_root() + f"{user_id}/user_config.json"
+        user_config_file = get_root() + f"{org_name}/user_config.json"
 
         lock_file = get_default_lock_file_path(user_config_file)
         if not os.path.exists(lock_file):
@@ -231,52 +236,52 @@ class CapGpuUsage:
                 with open(user_config_file, "w", encoding="utf-8") as fp:
                     json.dump(user_config, fp, indent=4)
 
-            print(f"User {user_id} config (pre-schedule) is {user_config}", file=sys.stderr)
+            print(f"Organization User {org_name} config (pre-schedule) is {user_config}", file=sys.stderr)
             if user_config["current_used"] + num_gpus > user_config["max_gpu_realtime_infer"]:
                 used = user_config["current_used"]
                 max_allowed = user_config["max_gpu_realtime_infer"]
-                msg = f"User request {num_gpus} GPU(s), But with {num_gpus} + {used} (GPUs in used) will exceed the maximum number of GPUs allowed ({max_allowed}). Please consider list the models and remove some of them."
+                msg = f"Organization User request {num_gpus} GPU(s), But with {num_gpus} + {used} (GPUs in used) will exceed the maximum number of GPUs allowed ({max_allowed}). Please consider list the models and remove some of them."
                 print(msg, file=sys.stderr)
                 return False, msg
 
             user_config["current_used"] += num_gpus
             with open(user_config_file, "w", encoding="utf-8") as fp:
                 json.dump(user_config, fp, indent=4)
-            print(f"User {user_id} config (post-schedule) is {user_config}", file=sys.stderr)
+            print(f"Organization User {org_name} config (post-schedule) is {user_config}", file=sys.stderr)
             return True, ""
 
     @staticmethod
-    def release_used(user_id, num_gpus):
+    def release_used(org_name, num_gpus):
         """
         Release the GPU usage for a user on record.
         Args:
-            user_id: the user id
+            org_name: the name of the user/org
             num_gpus: the number of GPUs to be released
         """
         if CapGpuUsage.MAX_GPU_PER_USER_REALTIME_INFER <= 0:
             return True, ""
 
-        user_config_file = get_root() + f"{user_id}/user_config.json"
+        user_config_file = get_root() + f"{org_name}/user_config.json"
         if not os.path.exists(user_config_file):
-            print(f"User config file does not exist when release_used is call for user {user_id}", file=sys.stderr)
+            print(f"Organization User config file does not exist when release_used is call for {org_name}", file=sys.stderr)
             return False, "Internal Error"
 
         lock_file = get_default_lock_file_path(user_config_file)
         if not os.path.exists(lock_file):
-            print(f"Lock file does not exist when release_used is call for user {user_id}", file=sys.stderr)
+            print(f"Lock file does not exist when release_used is call for {org_name}", file=sys.stderr)
             return False, "Internal Error"
 
         with FileLock(lock_file, mode=0o666):
             with open(user_config_file, "r", encoding="utf-8") as f:
                 user_config = json.load(f)
-            print(f"User {user_id} config (pre-released) is {user_config}", file=sys.stderr)
+            print(f"Organization User {org_name} config (pre-released) is {user_config}", file=sys.stderr)
             user_config["current_used"] -= num_gpus
             if user_config["current_used"] < 0:
-                print(f"User {user_id} current_used GPU is less than 0. Resetting to 0", file=sys.stderr)
+                print(f"Organization User {org_name} current_used GPU is less than 0. Resetting to 0", file=sys.stderr)
                 user_config["current_used"] = 0
             with open(user_config_file, "w", encoding="utf-8") as fp:
                 json.dump(user_config, fp, indent=4)
-            print(f"User {user_id} config (post-released) is {user_config}", file=sys.stderr)
+            print(f"Organization User {org_name} config (post-released) is {user_config}", file=sys.stderr)
             return True, ""
 
 
@@ -299,9 +304,56 @@ def download_from_url(url, handler_ptm):
     return None
 
 
-def has_correct_medical_bundle_structure(folder):
-    """Function to check if 'configs/metadata.json' exists at the right level"""
-    return os.path.exists(os.path.join(folder, 'configs', 'metadata.json'))
+def find_config_file(config_name, path, ext):
+    """Find the config file with the given name and extension in the given path."""
+    for e in ext:
+        name = f"{config_name}{e}"
+        if os.path.exists(os.path.join(path, name)):
+            return name
+    return None
+
+
+def check_necessary_arg(config_file, necessary_args_list):
+    """
+    Check if the necessary arguments are present in the given config file.
+    The config file may be in JSON or YAML format.
+    """
+    with open(config_file, "r", encoding="utf-8") as f:
+        if config_file.endswith(("yaml", "yml")):
+            import yaml
+            infer_config_content = yaml.safe_load(f)
+        else:
+            infer_config_content = json.load(f)
+        for arg in necessary_args_list:
+            if arg not in infer_config_content:
+                return False
+            if arg == "dataset" and "data" not in infer_config_content[arg]:
+                return False
+    return True
+
+
+def has_correct_medical_bundle_structure(folder, checks=[]):
+    """
+    Function to check if the folder is a valid MONAI bundle.
+    """
+    is_bundle_dir = os.path.exists(os.path.join(folder, "configs", "metadata.json"))
+    if is_bundle_dir:
+        if "infer" in checks:
+            # 1. necessary files checks
+            infer_config = find_config_file("inference", os.path.join(folder, "configs"), [".json", ".yaml", ".yml"])
+            if infer_config is None:
+                return False
+            other_necessary_files_list = ["configs/logging.conf"]
+            for file in other_necessary_files_list:
+                if not os.path.exists(os.path.join(folder, file)):
+                    return False
+            # 2. required args checks
+            # we must call self.workflow.evaluator.run(), and input data via override "dataset#data"
+            necessary_args_list = ["evaluator", "dataset"]
+            if not check_necessary_arg(os.path.join(folder, "configs", infer_config), necessary_args_list):
+                return False
+        return True
+    return False
 
 
 def check_and_extract_all(filepath, output_dir):
@@ -343,15 +395,15 @@ def list_folders(directory):
     return paths
 
 
-def validate_medical_bundle(handler_id, ngc_runner_fetch=False):
-    """Function to validate if the source folder is a valid MEDICAL bundle"""
+def validate_medical_bundle(handler_id, checks=[]):
+    """Function to validate if the source folder is a valid MONAI bundle"""
     # Should contain one folder in the source folder
-    source_folder = get_handler_root(handler_id=handler_id, ngc_runner_fetch=ngc_runner_fetch)
+    source_folder = get_handler_root(handler_id=handler_id)
     for root, dirs, files in os.walk(source_folder):
         for dir in dirs:
             # Downloaded from NGC
             subfolder_path = os.path.join(root, dir)
-            if has_correct_medical_bundle_structure(subfolder_path):
+            if has_correct_medical_bundle_structure(subfolder_path, checks=checks):
                 return subfolder_path
         for file in files:
             # Downloaded as zip file
@@ -361,7 +413,7 @@ def validate_medical_bundle(handler_id, ngc_runner_fetch=False):
                 new_folders = list_folders(root)
                 extracted_folders = new_folders - existing_folders
                 for extracted_folder in list(extracted_folders):
-                    if has_correct_medical_bundle_structure(extracted_folder):
+                    if has_correct_medical_bundle_structure(extracted_folder, checks=checks):
                         return extracted_folder
     return None
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MEDICAL annotation job utils module"""
+"""MONAI annotation job utils module"""
 import os
 import sys
 
@@ -20,25 +20,25 @@ import numpy as np
 from handlers.app_handler import AppHandler
 from handlers.medical.helpers import ImageLabelRecord
 from handlers.stateless_handlers import (get_handler_metadata,
-                                         get_handler_user,
                                          list_all_job_metadata,
                                          printc,
-                                         safe_get_file_modified_time,
                                          safe_load_file)
 from handlers.tis_handler import TISHandler
 from handlers.utilities import prep_tis_model_repository
+from utils import safe_get_file_modified_time
 
 
 def update_inference_model(job_context_dict, job_id):
     """Trigger inference job for the current model."""
     model_id = job_context_dict.get("handler_id")
+    user_id = job_context_dict.get("user_id")
+    org_name = job_context_dict.get("org_name")
     # Read handler metadata
-    handler_metadata = get_handler_metadata(job_context_dict.get("user_id"), model_id)
-    user_id = get_handler_user(model_id)
+    handler_metadata = get_handler_metadata(org_name, model_id)
     if not handler_metadata["realtime_infer"]:
-        raise ValueError(f"User {user_id} model {model_id} is not enabled for Realtime Inference")
+        raise ValueError(f"User {org_name} model {model_id} is not enabled for Realtime Inference")
     model_params = handler_metadata["model_params"]
-    success, tis_model, msg, _ = prep_tis_model_repository(model_params, model_id, user_id, model_id, job_id=job_id, update_model=True)
+    success, tis_model, msg, _ = prep_tis_model_repository(model_params, model_id, org_name, user_id, model_id, job_id=job_id, update_model=True)
     if not success:
         raise RuntimeError(f"Inference job failed with message {msg}")
 
@@ -59,7 +59,7 @@ def trigger_train(train_spec, job_context_dict, current_record, latest_record):
         latest_record: latest record generated from the previous `notify`. Not used with the current implementation.
     """
     model_id = job_context_dict.get("handler_id")
-    user_id = get_handler_user(model_id)
+    org_name = job_context_dict.get("org_name")
     job_id = job_context_dict.get("id")
 
     print("Starting training with all the labeled image from DICOM endpoint", file=sys.stderr)
@@ -70,7 +70,7 @@ def trigger_train(train_spec, job_context_dict, current_record, latest_record):
     train_spec_copy["cluster"] = "local"  # For the CL train job to use local cluster resource
     # Start training for all the labeled images
     description = f"Train Job for CL {job_id} with experiment {model_id}"
-    response = AppHandler.job_run(user_id, model_id, job_id, "train", "experiment", specs=train_spec_copy, name="Train Job for CL", description=description)
+    response = AppHandler.job_run(org_name, model_id, job_id, "train", "experiment", specs=train_spec_copy, name="Train Job for CL", description=description)
     if response.code != 201:
         raise RuntimeError(f"Training job failed with status code {response.code}")
     return response.data  # job_id
@@ -79,7 +79,7 @@ def trigger_train(train_spec, job_context_dict, current_record, latest_record):
 def load_initial_state(job_context_dict, handler_root, notify_record):
     """Load Initial State for the Continual Learning Job."""
     printc("Continual Learning started", context=job_context_dict, keys="handler_id", file=sys.stderr)
-    user_id = job_context_dict.get("user_id")
+    org_name = job_context_dict.get("org_name")
     experiment_id = job_context_dict.get("handler_id")
     cl_job_id = job_context_dict.get("id")
     specs = job_context_dict.get("specs")
@@ -95,7 +95,7 @@ def load_initial_state(job_context_dict, handler_root, notify_record):
 
     printc(f"Initial record: {latest_record}", context=job_context_dict, keys="handler_id", file=sys.stderr)
 
-    return (user_id, experiment_id, cl_job_id, train_spec, round_size, stop_criteria,
+    return (org_name, experiment_id, cl_job_id, train_spec, round_size, stop_criteria,
             job_metadata_file, latest_mod_time, latest_record)
 
 
@@ -108,23 +108,23 @@ def initialize_cl_tracker(stop_criteria):
     return cl_tracker, cl_state
 
 
-def cancel_trigger_jobs(user_id, experiment_id, jobs_trigger, jobs_done):
+def cancel_trigger_jobs(org_name, experiment_id, jobs_trigger, jobs_done):
     """Cancel all the triggered jobs for the current model."""
-    job_metadatas = list_all_job_metadata(user_id, experiment_id)
+    job_metadatas = list_all_job_metadata(org_name, experiment_id)
     for job_metadata in job_metadatas:
         if job_metadata.get("id", "") in jobs_trigger and job_metadata["id"] not in jobs_done:
-            response = AppHandler.job_cancel(user_id, experiment_id, job_metadata.get("id"), "experiment")
+            response = AppHandler.job_cancel(org_name, experiment_id, job_metadata.get("id"), "experiment")
             if response.code != 200:
                 raise RuntimeError(f"Cancel job failed with status code {response.code} with {response.data}")
 
 
 def check_for_cancelation(metadata, jobs_trigger, jobs_done, job_context_dict):
     """Check for the cancelation of the Continual Learning job."""
-    user_id = job_context_dict.get("user_id")
+    org_name = job_context_dict.get("org_name")
     experiment_id = job_context_dict.get("handler_id")
     metadata_status = metadata.get("status", "Error")
     if metadata_status == "Canceled":
-        cancel_trigger_jobs(user_id, experiment_id, jobs_trigger, jobs_done)
+        cancel_trigger_jobs(org_name, experiment_id, jobs_trigger, jobs_done)
         printc("Continual Learning job cancelled", context=job_context_dict, keys="handler_id", file=sys.stderr)
         sys.exit(0)
 
@@ -167,9 +167,9 @@ def process_notification_record(notify_record, latest_mod_time, latest_record, t
 
 def handle_job_updates(cl_state, jobs_trigger, jobs_done, metric_sorter, job_context_dict):
     """Handle the job updates for the Continual Learning Job."""
-    user_id = job_context_dict.get("user_id")
+    org_name = job_context_dict.get("org_name")
     handler_id = job_context_dict.get("handler_id")
-    job_metadatas = list_all_job_metadata(user_id, handler_id)
+    job_metadatas = list_all_job_metadata(org_name, handler_id)
     for job_metadata in job_metadatas:
         job_id = job_metadata.get("id", "")
         if job_id in jobs_trigger and job_id not in jobs_done:

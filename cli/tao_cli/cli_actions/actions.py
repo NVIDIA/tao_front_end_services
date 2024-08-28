@@ -1,4 +1,4 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,137 +31,171 @@ class Actions:
         config = ConfigParser()
         config_file_path = os.path.join(os.path.expanduser('~'), '.tao', 'config')
         config.read(config_file_path)
-        default_user = os.getenv('USER', 'nobody')
+        default_org = os.getenv('ORG', 'noorg')
         default_token = os.getenv('TOKEN', 'invalid')
         default_base_url = os.getenv('BASE_URL', 'https://sqa-tao.metropolis.nvidia.com:32443/api/v1')
-        self.user = config.get('main', 'USER', fallback=default_user)
+        self.org_name = config.get('main', 'ORG', fallback=default_org)
         self.token = config.get('main', 'TOKEN', fallback=default_token)
-        self.base_url = config.get('main', 'BASE_URL', fallback=default_base_url) + f"/user/{self.user}"
+        self.base_url = config.get('main', 'BASE_URL', fallback=default_base_url) + f"/orgs/{self.org_name}"
         self.headers = {"Authorization": f"Bearer {self.token}"}
 
-    # Dataset specific actions
-    def dataset_create(self, dataset_type, dataset_format, dataset_pull=None):
+    # Workspace specific actions
+    def workspace_create(self, name, cloud_type, cloud_details):
         """Create a dataset and return the id"""
-        request_dict = {"type": dataset_type, "format": dataset_format}
-        if dataset_pull:
-            request_dict["pull"] = str(dataset_pull)
+        request_dict = {"name": name, "cloud_type": cloud_type}
+        if cloud_details:
+            request_dict["cloud_specific_details"] = json.loads(cloud_details)
         data = json.dumps(request_dict)
-        endpoint = self.base_url + "/dataset"
+        endpoint = self.base_url + "/workspaces"
         response = requests.post(endpoint, data=data, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
         assert "id" in response.json().keys()
         id = response.json()["id"]
         return id
 
-    def dataset_upload(self, dataset_id, dataset_path):
-        """Upload a dataset and return the response message"""
-        with open(dataset_path, "rb") as data_file:
-            files = [("file", data_file)]
-            endpoint = f"{self.base_url}/dataset/{dataset_id}/upload"
-            response = requests.post(endpoint, files=files, headers=self.headers, timeout=timeout)
-            assert response.status_code in (200, 201)
-            assert "message" in response.json().keys() and response.json()["message"] == "Data successfully uploaded"
-            return response.json()["message"]
-
-    def dataset_delete(self, dataset_id):
-        """Delete a dataset"""
-        endpoint = f"{self.base_url}/dataset/{dataset_id}"
-        response = requests.delete(endpoint, headers=self.headers, timeout=timeout)
-        assert response.status_code in (200, 201)
-
-    # Model specific actions
-    def model_create(self, network_arch, encryption_key):
-        """Create a model and return the id"""
-        data = json.dumps({"network_arch": network_arch, "encryption_key": encryption_key})
-        endpoint = self.base_url + "/model"
+    # Dataset specific actions
+    def dataset_create(self, dataset_type, dataset_format, workspace, cloud_file_path, use_for):
+        """Create a dataset and return the id"""
+        request_dict = {"type": dataset_type, "format": dataset_format, "workspace": workspace, "cloud_file_path": cloud_file_path}
+        if use_for:
+            request_dict["use_for"] = json.loads(use_for)
+        data = json.dumps(request_dict)
+        endpoint = self.base_url + "/datasets"
         response = requests.post(endpoint, data=data, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
         assert "id" in response.json().keys()
         id = response.json()["id"]
         return id
 
-    def model_delete(self, model_id):
-        """Delete a model"""
-        endpoint = f"{self.base_url}/model/{model_id}"
-        response = requests.delete(endpoint, headers=self.headers, timeout=timeout)
+    # Experiment specific actions
+    def experiment_create(self, network_arch, encryption_key, workspace):
+        """Create an experiment and return the id"""
+        request_dict = {"network_arch": network_arch, "encryption_key": encryption_key, "workspace": workspace}
+        data = json.dumps(request_dict)
+        endpoint = self.base_url + "/experiments"
+        response = requests.post(endpoint, data=data, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
+        assert "id" in response.json().keys()
+        id = response.json()["id"]
+        return id
+
+    def list_base_experiments(self, params=""):
+        """List the available datasets/experiments"""
+        endpoint = self.base_url + "/experiments:base"
+        if params:
+            params = json.loads(params)
+        response = requests.get(endpoint, params=params, headers=self.headers, timeout=timeout)
+        assert response.status_code in (200, 201)
+        return response.json()["experiments"]
 
     # Common actions
-    def list_artifacts(self, artifact_type):
-        """List the available datasets/models"""
-        endpoint = self.base_url + f"/{artifact_type}"
-        response = requests.get(endpoint, headers=self.headers, timeout=timeout)
+    def list_artifacts(self, artifact_type, params=""):
+        """List the available datasets/experiments"""
+        endpoint = self.base_url + f"/{artifact_type}s"
+        if params:
+            params = json.loads(params)
+        response = requests.get(endpoint, params=params, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
-        return response.json()
+        return response.json()[f"{artifact_type}s"]
+
+    def artifact_delete(self, artifact_type, artifact_id):
+        """Delete a dataset/experiment"""
+        endpoint = f"{self.base_url}/{artifact_type}s/{artifact_id}"
+        response = requests.delete(endpoint, headers=self.headers, timeout=timeout)
+        assert response.status_code in (200, 201)
 
     def get_artifact_metadata(self, id, artifact_type):
-        """Get metadata of model/dataset"""
-        endpoint = f"{self.base_url}/{artifact_type}/{id}"
+        """Get metadata of experiment/dataset"""
+        endpoint = f"{self.base_url}/{artifact_type}s/{id}"
         response = requests.get(endpoint, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
         return response.json()
 
     def patch_artifact_metadata(self, id, artifact_type, update_info):
-        """Update metadata of a model/dataset"""
-        endpoint = f"{self.base_url}/{artifact_type}/{id}"
+        """Update metadata of a experiment/dataset"""
+        endpoint = f"{self.base_url}/{artifact_type}s/{id}"
         response = requests.patch(endpoint, data=update_info, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
         return response.json()
 
     def get_action_spec(self, id, action, artifact_type):
         """Return spec dictionary for the action passed"""
-        endpoint = self.base_url + f"/{artifact_type}/{id}/specs/{action}/schema"
-        response = requests.get(endpoint, headers=self.headers, timeout=timeout)
+        endpoint = self.base_url + f"/{artifact_type}s/{id}/specs/{action}/schema"
+        while True:
+            response = requests.get(endpoint, headers=self.headers, timeout=timeout)
+            if response.status_code == 404:
+                if "Base spec file download state is " in response.json()["error_desc"]:
+                    print("Base experiment spec file is being downloaded")
+                    time.sleep(2)
+                    continue
+                break
+            break
         assert response.status_code in (200, 201)
         data = response.json()["default"]
         return data
 
-    def post_action_spec(self, id, action, data, artifact_type):
-        """Upload the spec dictionary for the action passed"""
-        endpoint = self.base_url + f"/{artifact_type}/{id}/specs/{action}"
-        response = requests.post(endpoint, data=data, headers=self.headers, timeout=timeout)
-        return response.json()
-
     def get_automl_defaults(self, id, action):
         """Return automl parameters enabled for a network"""
-        endpoint = self.base_url + f"/model/{id}/specs/{action}/schema"
+        endpoint = self.base_url + f"/experiments/{id}/specs/{action}/schema"
         response = requests.get(endpoint, headers=self.headers, timeout=timeout)
         data = response.json()["automl_default_parameters"]
         return data
 
-    def run_action(self, id, parent_job, action, artifact_type, parent_job_type=None, parent_id=None):
+    def run_action(self, id, parent_job, action, artifact_type, specs):
         """Submit post request for an action"""
-        request_dict = {"job": parent_job, "actions": action}
-        if parent_job_type:
-            request_dict["parent_job_type"] = parent_job_type
-        if parent_id:
-            request_dict["parent_id"] = parent_id
+        request_dict = {"parent_job_id": parent_job, "action": action, "specs": json.loads(specs)}
         data = json.dumps(request_dict)
-        endpoint = self.base_url + f"/{artifact_type}/{id}/job"
+        endpoint = self.base_url + f"/{artifact_type}s/{id}/jobs"
         response = requests.post(endpoint, data=data, headers=self.headers, timeout=timeout)
-        job_id = response.json()[0]
+        assert response.status_code in (200, 201)
+        job_id = response.json()
         return job_id
 
     def get_action_status(self, id, job, artifact_type):
         """Get status for an action"""
-        endpoint = self.base_url + f"/{artifact_type}/{id}/job/{job}"
+        endpoint = self.base_url + f"/{artifact_type}s/{id}/jobs/{job}"
         response = requests.get(endpoint, headers=self.headers, timeout=timeout)
+        return response.json()
+
+    def publish_model(self, id, job, artifact_type, display_name, description, team_name):
+        """Publish model to ngc registry"""
+        endpoint = self.base_url + f"/{artifact_type}s/{id}/jobs/{job}:publish_model"
+        request_dict = {"display_name": display_name,
+                        "description": description,
+                        "team_name": team_name}
+        data = json.dumps(request_dict)
+        response = requests.post(endpoint, data=data, headers=self.headers, timeout=timeout)
+        return response.json()
+
+    def remove_published_model(self, id, job, artifact_type, team_name):
+        """Remove published model from ngc registry"""
+        endpoint = self.base_url + f"/{artifact_type}s/{id}/jobs/{job}:remove_published_model"
+        params = {"team_name": team_name}
+        response = requests.delete(endpoint, params=params, headers=self.headers, timeout=timeout)
         return response.json()
 
     def job_cancel(self, id, job, artifact_type):
         """Cancel a running job"""
-        endpoint = self.base_url + f"/{artifact_type}/{id}/job/{job}/cancel"
+        endpoint = self.base_url + f"/{artifact_type}s/{id}/jobs/{job}:cancel"
         response = requests.post(endpoint, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
 
-    def job_resume(self, id, job, artifact_type):
-        """Resume a paused job"""
-        endpoint = self.base_url + f"/{artifact_type}/{id}/job/{job}/resume"
+    def job_pause(self, id, job, artifact_type):
+        """Pause a running job"""
+        endpoint = self.base_url + f"/{artifact_type}s/{id}/jobs/{job}:pause"
         response = requests.post(endpoint, headers=self.headers, timeout=timeout)
+        assert response.status_code in (200, 201)
+
+    def job_resume(self, id, job_id, parent_job, specs):
+        """Resume a paused job"""
+        request_dict = {"parent_job_id": parent_job, "specs": json.loads(specs)}
+        data = json.dumps(request_dict)
+        endpoint = self.base_url + f"/experiments/{id}/jobs/{job_id}:resume"
+        response = requests.post(endpoint, data=data, headers=self.headers, timeout=timeout)
         assert response.status_code in (200, 201)
 
     def list_files_of_job(self, id, job, job_type, retrieve_logs, retrieve_specs):
-        endpoint = f'{self.base_url}/{job_type}/{id}/job/{job}/list_files'
+        endpoint = f'{self.base_url}/{job_type}s/{id}/jobs/{job}:list_files'
         params = {"retrieve_logs": retrieve_logs, "retrieve_specs": retrieve_specs}
         response = requests.get(endpoint, headers=self.headers, params=params, timeout=timeout)
         assert response.status_code in (200, 201)
@@ -169,7 +203,7 @@ class Actions:
 
     def job_download_selective_files(self, id, job, job_type, workdir, file_lists=[], best_model=False, latest_model=False, tar_files=True):
         """Download a job with the files passed"""
-        endpoint = f'{self.base_url}/{job_type}/{id}/job/{job}/download_selective_files'
+        endpoint = f'{self.base_url}/{job_type}s/{id}/jobs/{job}:download_selective_files'
         params = {"file_lists": file_lists, "best_model": best_model, "latest_model": latest_model, "tar_files": tar_files}
 
         # Save
@@ -186,20 +220,16 @@ class Actions:
 
     def entire_job_download(self, id, job, job_type, workdir):
         """Download a job"""
-        endpoint = f'{self.base_url}/{job_type}/{id}/job/{job}/download'
+        endpoint = f"{self.base_url}/{job_type}s/{id}/jobs/{job}"
+        response = requests.get(endpoint, headers=self.headers, timeout=timeout)
+        assert response.status_code in (200, 201)
+        expected_file_size = response.json().get("job_tar_stats", {}).get("file_size")
+
+        endpoint = f'{self.base_url}/{job_type}s/{id}/jobs/{job}:download'
 
         # Save
         temptar = f'{workdir}/{job}.tar.gz'
         os.makedirs(os.path.dirname(temptar), exist_ok=True)
-
-        # Perform a HEAD request to get the file size without downloading the content
-        response = requests.head(endpoint, headers=self.headers, timeout=timeout)
-
-        # Check if the request was successful and the 'Content-Length' header is present
-        if response.status_code == 200 and 'Content-Length' in response.headers:
-            expected_file_size = int(response.headers['Content-Length'])
-        else:
-            expected_file_size = None  # Set to None if the size couldn't be determined
 
         while True:
             # Check if the file already exists
@@ -242,7 +272,7 @@ class Actions:
         while True:
             time.sleep(10)
             files = self.list_files_of_job(id, job, job_type, retrieve_logs=True, retrieve_specs=False)
-            if files and f"logs/{job}.txt" in files:
+            if files and f"../logs/{job}.txt" in files:
                 break
-        log_file = self.job_download_selective_files(id, job, job_type, workdir, file_lists=[f"logs/{job}.txt"], best_model=False, latest_model=False, tar_files=False)
+        log_file = self.job_download_selective_files(id, job, job_type, workdir, file_lists=[f"../logs/{job}.txt"], best_model=False, latest_model=False, tar_files=False)
         return log_file

@@ -1,5 +1,4 @@
 parameter,display_name,value_type,description,default_value,examples,valid_min,valid_max,valid_options,required,regex,popular,automl_enabled,math_cond,parent_param,depends_on
-gpus,,int,,1,,,,,,,,FALSE,,,
 results_dir,,hidden,,,,,,,,,,FALSE,,,
 encryption_key,Encode key,hidden,,,,,,,,,,FALSE,,,
 data_format,,ordered,,channels_first,,,,"channels_first,channels_last",,,,FALSE,,,
