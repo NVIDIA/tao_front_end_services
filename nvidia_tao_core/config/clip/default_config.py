@@ -584,18 +584,51 @@ class CLIPTrainConfig(TrainConfig):
     siglip_loss_mask_mode: str = STR_FIELD(
         value="none",
         default_value="none",
-        valid_options="none,attribute_match_ignore,attribute_plus_accessory_match_ignore",
+        valid_options=(
+            "none,attribute_match_ignore,"
+            "attribute_plus_accessory_match_ignore,"
+            "attribute_match_positive,"
+            "attribute_plus_accessory_match_positive"
+        ),
         description=(
             "Optional metadata-based masking mode for SigLIP loss. "
             "'none' keeps existing behavior; 'attribute_match_ignore' ignores "
             "off-diagonal negatives whose attributes match the text query; "
             "'attribute_plus_accessory_match_ignore' additionally requires "
-            "all query accessories to be present in the image. "
+            "all query accessories to be present in the image. The positive "
+            "variants promote compatible off-diagonal pairs to positives and "
+            "currently require exactly one custom source dataset. Queries with "
+            "neither specified attributes nor required accessories retain only "
+            "their paired positive and ignore compatible off-diagonals. "
             "Metadata masking supports local and gather. Non-'none' modes require "
             "dataset.train.type='custom', dataset.train.include_attribute_metadata=True, "
             "and train.siglip_loss_dist_impl to be 'local' or 'gather'."
         ),
         display_name="SigLIP Loss Mask Mode",
+    )
+    compatible_positive_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0.0,
+        description=(
+            "Per-pair weight for promoted metadata-compatible off-diagonal "
+            "terms with per_pair normalization, or total weight divided "
+            "among each text query's promoted images with per_query "
+            "normalization. Set to 0 to give promoted pairs no loss weight."
+        ),
+        display_name="Compatible Positive Weight",
+    )
+    compatible_positive_normalization: str = STR_FIELD(
+        value="per_query",
+        default_value="per_query",
+        valid_options="per_pair,per_query",
+        description=(
+            "Apply compatible_positive_weight to every promoted pair with "
+            "per_pair, or divide it among all promoted images for each text "
+            "query with per_query. Counts are global across ranks in gather "
+            "mode and limited to the local batch in local mode."
+        ),
+        display_name="Compatible Positive Normalization",
     )
     triplet_loss_weight: float = FLOAT_FIELD(
         value=0.0,

@@ -118,10 +118,30 @@ def test_clip_train_metadata_masking_schema():
         "none",
         "attribute_match_ignore",
         "attribute_plus_accessory_match_ignore",
+        "attribute_match_positive",
+        "attribute_plus_accessory_match_positive",
     ]
     assert train_default["siglip_loss_mask_mode"] == "none"
     assert "Metadata masking supports local and gather." in mask_mode["description"]
+    assert "exactly one custom source dataset" in mask_mode["description"]
+    assert "neither specified attributes nor required accessories" in (
+        mask_mode["description"]
+    )
     assert "train.siglip_loss_dist_impl to be 'local' or 'gather'" in mask_mode["description"]
+
+    positive_weight = train["properties"]["compatible_positive_weight"]
+    assert positive_weight["type"] == "float"
+    assert positive_weight["default"] == 1.0
+    assert positive_weight["minimum"] == 0.0
+    assert train_default["compatible_positive_weight"] == 1.0
+    assert "Set to 0 to give promoted pairs no loss weight" in positive_weight["description"]
+
+    normalization = train["properties"]["compatible_positive_normalization"]
+    assert normalization["type"] == "categorical"
+    assert normalization["default"] == "per_query"
+    assert normalization["enum"] == ["per_pair", "per_query"]
+    assert train_default["compatible_positive_normalization"] == "per_query"
+    assert "global across ranks in gather mode" in normalization["description"]
 
 
 def test_clip_peft_and_regularization_schema():
