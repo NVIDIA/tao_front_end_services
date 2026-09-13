@@ -5,7 +5,9 @@
 
 import re
 
+import pytest
 from omegaconf import OmegaConf
+from omegaconf.errors import ConfigKeyError, ValidationError
 
 from nvidia_tao_core.config.sparse4d.default_config import ExperimentConfig
 from nvidia_tao_core.microservices.utils.core_utils import (
@@ -102,10 +104,129 @@ COTRAIN_METRIC_PATTERNS = {
     r"^loss_param_touch$",
 }
 
+COTRAIN_NUMERIC_CONSTRAINTS = {
+    ("dataset", "ltt_2dgt_cache_size"): ("int", 1, float("inf")),
+    ("dataset", "rtdetr_2d_score_thr"): ("float", 0.0, 1.0),
+    ("dataset", "rtdetr_2d_cache_size"): ("int", 1, float("inf")),
+    ("dataset", "canonical_2d_height"): ("int", 1, float("inf")),
+    ("dataset", "canonical_2d_width"): ("int", 1, float("inf")),
+    ("dataset", "real_block_prob"): ("float", -1.0, 1.0),
+    ("dataset", "scene_switch_iters"): ("int", 0, float("inf")),
+    ("model", "head", "loose_to_tight", "loss_weight"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "num_classes"): (
+        "int",
+        0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "tight_l1_weight"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "containment_weight"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "min_gt_area"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "eps"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "giou_thr"): ("float", -1.0, 1.0),
+    ("model", "head", "loose_to_tight", "cost_giou"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "cost_l1"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "cost_cls"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "det_score_thr"): (
+        "float",
+        0.0,
+        1.0,
+    ),
+    ("model", "head", "loose_to_tight", "min_cams"): (
+        "int",
+        1,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "dedup_dist"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "pseudo_box_weight"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "pseudo_cls_weight"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "head", "loose_to_tight", "sv_depth_weight"): (
+        "float",
+        0.0,
+        1.0,
+    ),
+    ("model", "head", "loose_to_tight", "sv_size_weight"): (
+        "float",
+        0.0,
+        1.0,
+    ),
+    ("model", "head", "loose_to_tight", "sv_yaw_weight"): (
+        "float",
+        0.0,
+        1.0,
+    ),
+    ("model", "sv_aux_head", "in_channels"): ("int", 1, float("inf")),
+    ("model", "sv_aux_head", "num_classes"): ("int", 0, float("inf")),
+    ("model", "sv_aux_head", "roi_size"): ("int", 1, float("inf")),
+    ("model", "sv_aux_head", "hidden_dim"): ("int", 1, float("inf")),
+    ("model", "sv_aux_head", "use_level"): ("int", 0, float("inf")),
+    ("model", "sv_aux_head", "loss_weight"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+    ("model", "sv_aux_head", "min_box_size"): (
+        "float",
+        0.0,
+        float("inf"),
+    ),
+}
+
 
 def _select(values, keys):
     """Return the requested keys from a generated default dictionary."""
     return {key: values[key] for key in keys}
+
+
+def _schema_property(schema, path):
+    """Resolve a nested property definition from a generated schema."""
+    node = schema
+    for key in path:
+        node = node["properties"][key]
+    return node
 
 
 def test_sparse4d_train_schema_exposes_cotrain_defaults():
@@ -171,6 +292,94 @@ def test_sparse4d_structured_config_accepts_cotrain_overrides():
     assert config.model.head.loose_to_tight.enable is True
     assert config.model.sv_aux_head.enable is True
     assert config.train.scrub_nan_gradients is True
+
+
+def test_sparse4d_cotrain_fields_survive_lifecycle_action_filtering():
+    """Shared co-training options remain visible throughout the model lifecycle."""
+    for action in ("train", "evaluate", "inference", "export"):
+        schema = generate_schema("sparse4d", action)
+        defaults = schema["default"]
+
+        assert _select(defaults["dataset"], DATASET_COTRAIN_DEFAULTS) == (
+            DATASET_COTRAIN_DEFAULTS
+        )
+        assert defaults["model"]["head"]["loose_to_tight"] == (
+            LOOSE_TO_TIGHT_DEFAULTS
+        )
+        assert defaults["model"]["sv_aux_head"] == SV_AUX_DEFAULTS
+        assert defaults["model"]["head"]["instance_bank"][
+            "reset_on_time_gap"
+        ] is False
+
+
+def test_sparse4d_cotrain_numeric_constraints_match_runtime_contract():
+    """Risk-sensitive co-training ranges are emitted exactly in service schemas."""
+    schema = generate_schema("sparse4d", "train")
+
+    for path, expected in COTRAIN_NUMERIC_CONSTRAINTS.items():
+        prop = _schema_property(schema, path)
+        actual = (prop["type"], prop["minimum"], prop["maximum"])
+        assert actual == expected, ".".join(path)
+        assert prop["minimum"] <= prop["default"] <= prop["maximum"]
+
+    nvschema_fps = _schema_property(
+        generate_schema("sparse4d", "inference"),
+        ("inference", "nvschema_fps"),
+    )
+    assert (
+        nvschema_fps["type"],
+        nvschema_fps["minimum"],
+        nvschema_fps["maximum"],
+    ) == ("float", 0.0, float("inf"))
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"dataset": {"rtdetr_2d_per_class_score_thr": {"person": "high"}}},
+        {"dataset": {"real_scene_keywords": "SV2D"}},
+        {"model": {"head": {"loose_to_tight": {"min_cams": 1.5}}}},
+        {"model": {"sv_aux_head": {"enable": "maybe"}}},
+    ),
+    ids=(
+        "non-numeric-per-class-threshold",
+        "scalar-scene-keywords",
+        "fractional-minimum-cameras",
+        "non-boolean-aux-enable",
+    ),
+)
+def test_sparse4d_structured_config_rejects_invalid_cotrain_types(override):
+    """Malformed co-training values fail before they reach tao-pytorch runtime."""
+    with pytest.raises(ValidationError):
+        OmegaConf.merge(OmegaConf.structured(ExperimentConfig()), override)
+
+
+def test_sparse4d_structured_config_rejects_unknown_cotrain_keys():
+    """Misspelled route options cannot be silently ignored by structured config."""
+    with pytest.raises(ConfigKeyError, match="unknown_cotrain_key"):
+        OmegaConf.merge(
+            OmegaConf.structured(ExperimentConfig()),
+            {"dataset": {"unknown_cotrain_key": True}},
+        )
+
+
+@pytest.mark.parametrize(
+    ("scene_name", "expected"),
+    (
+        ("CTwarehouse.01__scene-a", "scene-a"),
+        ("CTone__CTtwo__scene-b", "CTtwo__scene-b"),
+        ("scene-c", "scene-c"),
+        ("prefix_CTwarehouse__scene-d", "prefix_CTwarehouse__scene-d"),
+    ),
+)
+def test_sparse4d_scene_dedup_defaults_match_cache_naming_contract(
+    scene_name, expected
+):
+    """LTT and RT-DETR use the same anchored one-prefix normalization rule."""
+    dataset = generate_schema("sparse4d", "train")["default"]["dataset"]
+
+    for key in ("ltt_2dgt_dedup_regex", "rtdetr_2d_dedup_regex"):
+        assert re.sub(dataset[key], "", scene_name) == expected
 
 
 def test_sparse4d_inference_schema_exposes_nvschema_fps():
